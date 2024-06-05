@@ -1,17 +1,17 @@
 use quiche;
-use quiche::h3::{NameValue, Header};
+use quiche::h3::{Header, NameValue};
 use ring::rand::*;
 
-use std::future::Future;
-use std::net::{ToSocketAddrs, SocketAddr};
 use std::collections::HashMap;
-use std::error::{Error, self};
+use std::error::{self, Error};
+use std::future::Future;
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use tokio::io::{AsyncWriteExt, AsyncReadExt};
-use tokio::net::{UdpSocket, TcpStream, TcpListener};
-use tokio::sync::mpsc::{self, UnboundedSender, UnboundedReceiver};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream, UdpSocket};
+use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::time;
 
 use log::*;
@@ -57,7 +57,6 @@ struct Client {
     listener: Option<TcpListener>,
 }
 
-
 impl Client {
     pub fn new() -> Client {
         Client { listener: None }
@@ -67,33 +66,48 @@ impl Client {
      * returns None if client is not bound to a socket yet
      */
     pub fn listen_addr(&self) -> Option<SocketAddr> {
-        return self.listener.as_ref().map(|listener| listener.local_addr().unwrap())
+        return self
+            .listener
+            .as_ref()
+            .map(|listener| listener.local_addr().unwrap());
     }
 
     /**
      * Bind the server to listen to an address
      */
-    pub async fn bind<T: tokio::net::ToSocketAddrs>(&mut self, bind_addr: T) -> Result<(), Box<dyn Error>> {
+    pub async fn bind<T: tokio::net::ToSocketAddrs>(
+        &mut self,
+        bind_addr: T,
+    ) -> Result<(), Box<dyn Error>> {
         debug!("creating TCP listener");
 
         let mut listener = TcpListener::bind(bind_addr).await?;
         debug!("listening on {}", listener.local_addr().unwrap());
-        
+
         self.listener = Some(listener);
         Ok(())
     }
-    
+
     /**
-     * Run client to receive TCP connections at the binded address, and handle 
+     * Run client to receive TCP connections at the binded address, and handle
      * incoming streams with stream_handler (e.g. handshake, negotiation, proxying traffic)
-     * 
+     *
      * This enables any protocol that accepts TCP connection to start with, such as HTTP1.1
-     * CONNECT and SOCKS5 as implemented below. Similarly, UDP listening can be easily 
+     * CONNECT and SOCKS5 as implemented below. Similarly, UDP listening can be easily
      * added if necessary.
      */
-    pub async fn run<F, Fut>(&mut self, server_addr: &String, mut stream_handler: F) -> Result<(), Box<dyn Error>> 
+    pub async fn run<F, Fut>(
+        &mut self,
+        server_addr: &String,
+        mut stream_handler: F,
+    ) -> Result<(), Box<dyn Error>>
     where
-        F: FnMut(TcpStream, UnboundedSender<ToSend>, Arc<Mutex<HashMap<u64, UnboundedSender<Content>>>>, Arc<Mutex<HashMap<u64, UnboundedSender<Content>>>>) -> Fut,
+        F: FnMut(
+            TcpStream,
+            UnboundedSender<ToSend>,
+            Arc<Mutex<HashMap<u64, UnboundedSender<Content>>>>,
+            Arc<Mutex<HashMap<u64, UnboundedSender<Content>>>>,
+        ) -> Fut,
         Fut: Future<Output = ()> + Send + 'static,
     {
         if self.listener.is_none() {
@@ -102,27 +116,28 @@ impl Client {
         let listener = self.listener.as_mut().unwrap();
 
         let server_name = format!("https://{}", server_addr); // TODO: avoid duplicate https://
-    
+
         // Resolve server address.
         let url = url::Url::parse(&server_name).unwrap();
         let peer_addr = url.to_socket_addrs().unwrap().next().unwrap();
-        
+
         debug!("creating socket");
         let socket = UdpSocket::bind("0.0.0.0:0".parse::<SocketAddr>().unwrap()).await?;
         socket.connect(peer_addr.clone()).await?;
         let socket = Arc::new(socket);
         debug!("connecting to {} at {}", server_name, peer_addr);
-        
-    
+
         let mut buf = [0; 65535];
         let mut out = [0; MAX_DATAGRAM_SIZE];
-    
+
         let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
         // TODO: *CAUTION*: this should not be set to `false` in production!!!
         config.verify_peer(false);
-    
-        config.set_application_protos(quiche::h3::APPLICATION_PROTOCOL).unwrap();
-        
+
+        config
+            .set_application_protos(quiche::h3::APPLICATION_PROTOCOL)
+            .unwrap();
+
         config.set_max_idle_timeout(1000);
         config.set_max_recv_udp_payload_size(MAX_DATAGRAM_SIZE);
         config.set_max_send_udp_payload_size(MAX_DATAGRAM_SIZE);
@@ -133,25 +148,25 @@ impl Client {
         config.set_initial_max_streams_bidi(100);
         config.set_initial_max_streams_uni(100);
         config.set_disable_active_migration(true);
-        config.enable_dgram(true, 1000, 1000); 
+        config.enable_dgram(true, 1000, 1000);
 
-    
         let mut scid = [0; quiche::MAX_CONN_ID_LEN];
         let rng = SystemRandom::new();
         rng.fill(&mut scid[..]).unwrap();
         let scid = quiche::ConnectionId::from_ref(&scid);
-        
+
         // Client connection.
         let local_addr = socket.local_addr().unwrap();
-        let mut conn = quiche::connect(url.domain(), &scid, local_addr, peer_addr, &mut config).expect("quic connection failed");
+        let mut conn = quiche::connect(url.domain(), &scid, local_addr, peer_addr, &mut config)
+            .expect("quic connection failed");
         info!(
             "connecting to {:} from {:} with scid {}",
             peer_addr,
             socket.local_addr().unwrap(),
             hex_dump(&scid)
         );
-    
-        let (write, send_info) = conn.send(&mut out).expect("initial send failed"); 
+
+        let (write, send_info) = conn.send(&mut out).expect("initial send failed");
         while let Err(e) = socket.send_to(&out[..write], send_info.to).await {
             if e.kind() == std::io::ErrorKind::WouldBlock {
                 debug!("send_to() would block");
@@ -160,11 +175,13 @@ impl Client {
             panic!("UDP socket send_to() failed: {:?}", e);
         }
         debug!("written {}", write);
-    
+
         let mut http3_conn: Option<quiche::h3::Connection> = None;
         let (http3_sender, mut http3_receiver) = mpsc::unbounded_channel::<ToSend>();
-        let connect_streams: Arc<Mutex<HashMap<u64, UnboundedSender<Content>>>> = Arc::new(Mutex::new(HashMap::new()));
-        let connect_sockets: Arc<Mutex<HashMap<u64, UnboundedSender<Content>>>> = Arc::new(Mutex::new(HashMap::new()));
+        let connect_streams: Arc<Mutex<HashMap<u64, UnboundedSender<Content>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let connect_sockets: Arc<Mutex<HashMap<u64, UnboundedSender<Content>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
         let mut http3_retry_send: Option<ToSend> = None;
         let mut interval = time::interval(Duration::from_millis(20));
         interval.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
@@ -173,7 +190,7 @@ impl Client {
                 info!("connection closed, {:?}", conn.stats());
                 break;
             }
-    
+
             tokio::select! {
                 // handle QUIC received data
                 recvd = socket.recv_from(&mut buf) => {
@@ -189,18 +206,18 @@ impl Client {
                         to: local_addr,
                         from,
                     };
-    
+
                     // Process potentially coalesced packets.
                     let read = match conn.recv(&mut buf[..read], recv_info) {
                         Ok(v) => v,
-    
+
                         Err(e) => {
                             error!("QUIC recv failed: {:?}", e);
                             continue
                         },
                     };
                     debug!("processed {} bytes", read);
-    
+
                     if let Some(http3_conn) = &mut http3_conn {
                         // Process HTTP/3 events.
                         loop {
@@ -213,7 +230,7 @@ impl Client {
                                         sender.send(Content::Headers { headers: list });
                                     }
                                 },
-            
+
                                 Ok((stream_id, quiche::h3::Event::Data)) => {
                                     debug!("received stream data");
                                     let connect_streams = connect_streams.lock().unwrap();
@@ -227,7 +244,7 @@ impl Client {
                                         }
                                     }
                                 },
-            
+
                                 Ok((stream_id, quiche::h3::Event::Finished)) => {
                                     info!("finished received, stream id: {} closing", stream_id);
                                     let mut connect_streams = connect_streams.lock().unwrap();
@@ -236,7 +253,7 @@ impl Client {
                                         connect_streams.remove(&stream_id);
                                     }
                                 },
-            
+
                                 Ok((stream_id, quiche::h3::Event::Reset(e))) => {
                                     error!("request was reset by peer with {}, stream id: {} closed", e, stream_id);
                                     let mut connect_streams = connect_streams.lock().unwrap();
@@ -245,7 +262,8 @@ impl Client {
                                         connect_streams.remove(&stream_id);
                                     }
                                 },
-            
+//                                Ok((_flow_id, quiche::h3::Event::))
+                                /*
                                 Ok((_flow_id, quiche::h3::Event::Datagram)) => {
                                     loop {
                                         match http3_conn.recv_dgram(&mut conn, &mut buf) {
@@ -269,19 +287,19 @@ impl Client {
                                             }
                                         }
                                     }
-                                },
-            
+                                },*/
+
                                 Ok((_, quiche::h3::Event::PriorityUpdate)) => unreachable!(),
-            
+
                                 Ok((goaway_id, quiche::h3::Event::GoAway)) => {
                                     info!("GOAWAY id={}", goaway_id);
                                 },
-            
+
                                 Err(quiche::h3::Error::Done) => {
                                     debug!("poll done");
                                     break;
                                 },
-            
+
                                 Err(e) => {
                                     error!("HTTP/3 processing failed: {:?}", e);
                                     break;
@@ -332,7 +350,14 @@ impl Client {
                             },
                             Content::Datagram { payload } => {
                                 debug!("sending http3 datagram of {} bytes to flow {}", payload.len(), to_send.stream_id);
-                                http3_conn.send_dgram(&mut conn, to_send.stream_id, &payload)
+                                match send_h3_dgram(&mut conn, to_send.stream_id, &payload) {
+                                        Ok(v) => Ok(v),
+                                        Err(e) => {
+                                            error!("sending http3 datagram failed!");
+                                            break;
+                                        }
+                                    }
+                                //http3_conn.send_dgram(&mut conn, to_send.stream_id, &payload)
                             },
                             Content::Finished => {
                                 debug!("shutting down stream");
@@ -342,7 +367,7 @@ impl Client {
                                     Err(e) => {
                                         error!("stream shutdown failed: {}", e);
                                         Ok(()) // ignore the error
-                                    } 
+                                    }
                                 }
                             },
                         };
@@ -351,7 +376,7 @@ impl Client {
                             Err(quiche::h3::Error::StreamBlocked | quiche::h3::Error::Done) => {
                                 debug!("Connection {} stream {} stream blocked, retry later", conn.trace_id(), to_send.stream_id);
                                 http3_retry_send = Some(to_send);
-                                break; 
+                                break;
                             },
                             Err(e) => {
                                 error!("Connection {} stream {} send failed {:?}", conn.trace_id(), to_send.stream_id, e);
@@ -419,7 +444,14 @@ impl Client {
                         },
                         Content::Datagram { payload } => {
                             debug!("retry sending http3 datagram of {} bytes", payload.len());
-                            http3_conn.send_dgram(&mut conn, to_send.stream_id, &payload)
+                            //http3_conn.send_dgram(&mut conn, to_send.stream_id, &payload)
+                            match send_h3_dgram(&mut conn, to_send.stream_id, &payload) {
+                                        Ok(v) => Ok(v),
+                                        Err(e) => {
+                                            error!("sending http3 datagram failed!");
+                                            break;
+                                        }
+                                    }
                         },
                         Content::Finished => unreachable!(),
                     };
@@ -442,10 +474,10 @@ impl Client {
                         }
                     };
                 },
-    
+
                 else => break,
             }
-            
+
             // Create a new HTTP/3 connection once the QUIC connection is established.
             if conn.is_established() && http3_conn.is_none() {
                 let h3_config = quiche::h3::Config::new().unwrap();
@@ -454,44 +486,53 @@ impl Client {
                     .expect("Unable to create HTTP/3 connection, check the server's uni stream limit and window size"),
                 );
             }
-        // Send pending QUIC packets
+            // Send pending QUIC packets
             loop {
                 let (write, send_info) = match conn.send(&mut out) {
                     Ok(v) => v,
-    
+
                     Err(quiche::Error::Done) => {
                         debug!("QUIC connection {} done writing", conn.trace_id());
                         break;
-                    },
-    
+                    }
+
                     Err(e) => {
                         error!("QUIC connection {} send failed: {:?}", conn.trace_id(), e);
-    
+
                         conn.close(false, 0x1, b"fail").ok();
                         break;
-                    },
+                    }
                 };
-    
+
                 match socket.send_to(&out[..write], send_info.to).await {
-                    Ok(written) => debug!("{} written {} bytes out of {}", conn.trace_id(), written, write),
+                    Ok(written) => debug!(
+                        "{} written {} bytes out of {}",
+                        conn.trace_id(),
+                        written,
+                        write
+                    ),
                     Err(e) => panic!("UDP socket send_to() failed: {:?}", e),
                 }
             }
-    
         }
-    
+
         Ok(())
     }
 }
 
-async fn handle_http1_stream(mut stream: TcpStream, http3_sender: UnboundedSender<ToSend>, connect_streams: Arc<Mutex<HashMap<u64, UnboundedSender<Content>>>>, _connect_sockets: Arc<Mutex<HashMap<u64, UnboundedSender<Content>>>>) {
+async fn handle_http1_stream(
+    mut stream: TcpStream,
+    http3_sender: UnboundedSender<ToSend>,
+    connect_streams: Arc<Mutex<HashMap<u64, UnboundedSender<Content>>>>,
+    _connect_sockets: Arc<Mutex<HashMap<u64, UnboundedSender<Content>>>>,
+) {
     let mut buf = [0; 65535];
     let mut pos = match stream.read(&mut buf).await {
         Ok(v) => v,
         Err(e) => {
             error!("Error reading from TCP stream: {}", e);
-            return
-        },
+            return;
+        }
     };
     loop {
         match stream.try_read(&mut buf[pos..]) {
@@ -500,7 +541,7 @@ async fn handle_http1_stream(mut stream: TcpStream, http3_sender: UnboundedSende
             Err(ref e) if interrupted(e) => continue,
             Err(e) => {
                 error!("Error reading from TCP stream: {}", e);
-                return
+                return;
             }
         };
     }
@@ -516,20 +557,33 @@ async fn handle_http1_stream(mut stream: TcpStream, http3_sender: UnboundedSende
                 let headers = vec![
                     quiche::h3::Header::new(b":method", b"CONNECT"),
                     quiche::h3::Header::new(b":authority", path.as_bytes()),
-                    quiche::h3::Header::new(b":authorization", b"dummy-authorization"),    
+                    quiche::h3::Header::new(b":authorization", b"dummy-authorization"),
                 ];
                 info!("sending HTTP3 request {:?}", headers);
                 let (stream_id_sender, mut stream_id_receiver) = mpsc::channel(1);
                 let (response_sender, mut response_receiver) = mpsc::unbounded_channel::<Content>();
-                http3_sender.send(ToSend { content: Content::Request { headers, stream_id_sender }, finished: false, stream_id: u64::MAX});
-                let stream_id = stream_id_receiver.recv().await.expect("stream_id receiver error");
+                http3_sender.send(ToSend {
+                    content: Content::Request {
+                        headers,
+                        stream_id_sender,
+                    },
+                    finished: false,
+                    stream_id: u64::MAX,
+                });
+                let stream_id = stream_id_receiver
+                    .recv()
+                    .await
+                    .expect("stream_id receiver error");
                 {
                     let mut connect_streams = connect_streams.lock().unwrap();
-                    connect_streams.insert(stream_id, response_sender); 
+                    connect_streams.insert(stream_id, response_sender);
                     // TODO: potential race condition: the response could be received before connect_streams is even inserted and get dropped
                 }
 
-                let response = response_receiver.recv().await.expect("http3 response receiver error");
+                let response = response_receiver
+                    .recv()
+                    .await
+                    .expect("http3 response receiver error");
                 if let Content::Headers { headers } = response {
                     info!("Got response {:?}", hdrs_to_strings(&headers));
                     let mut status = None;
@@ -562,16 +616,29 @@ async fn handle_http1_stream(mut stream: TcpStream, http3_sender: UnboundedSende
                             Ok(v) => v,
                             Err(e) => {
                                 error!("Error reading from TCP {}: {}", peer_addr, e);
-                                break
-                            },
+                                break;
+                            }
                         };
                         if read == 0 {
                             debug!("TCP connection closed from {}", peer_addr);
-                            http3_sender_clone.send(ToSend { stream_id: stream_id, content: Content::Finished, finished: false });
-                            break
+                            http3_sender_clone.send(ToSend {
+                                stream_id: stream_id,
+                                content: Content::Finished,
+                                finished: false,
+                            });
+                            break;
                         }
-                        debug!("read {} bytes from TCP from {} for stream {}", read, peer_addr, stream_id);
-                        http3_sender_clone.send(ToSend { stream_id: stream_id, content: Content::Data { data: buf[..read].to_vec() }, finished: false });
+                        debug!(
+                            "read {} bytes from TCP from {} for stream {}",
+                            read, peer_addr, stream_id
+                        );
+                        http3_sender_clone.send(ToSend {
+                            stream_id: stream_id,
+                            content: Content::Data {
+                                data: buf[..read].to_vec(),
+                            },
+                            finished: false,
+                        });
                     }
                 });
                 let write_task = tokio::spawn(async move {
@@ -580,8 +647,8 @@ async fn handle_http1_stream(mut stream: TcpStream, http3_sender: UnboundedSende
                             Some(v) => v,
                             None => {
                                 debug!("TCP receiver channel closed for stream {}", stream_id);
-                                break
-                            },
+                                break;
+                            }
                         };
                         match data {
                             Content::Request { .. } => unreachable!(),
@@ -592,34 +659,43 @@ async fn handle_http1_stream(mut stream: TcpStream, http3_sender: UnboundedSende
                                     let bytes_written = match write_half.write(&data[pos..]).await {
                                         Ok(v) => v,
                                         Err(e) => {
-                                            error!("Error writing to TCP {} on stream id {}: {}", peer_addr, stream_id, e);
-                                            return
-                                        },
+                                            error!(
+                                                "Error writing to TCP {} on stream id {}: {}",
+                                                peer_addr, stream_id, e
+                                            );
+                                            return;
+                                        }
                                     };
                                     pos += bytes_written;
                                 }
-                                debug!("written {} bytes from TCP to {} for stream {}", data.len(), peer_addr, stream_id);
-                            },
+                                debug!(
+                                    "written {} bytes from TCP to {} for stream {}",
+                                    data.len(),
+                                    peer_addr,
+                                    stream_id
+                                );
+                            }
                             Content::Datagram { .. } => unreachable!(),
-                            Content::Finished =>  {
+                            Content::Finished => {
                                 debug!("shutting down stream in write task");
                                 break;
-                            },
+                            }
                         };
-                        
                     }
                 });
                 tokio::join!(read_task, write_task);
-                
+
                 // {
                 //     let mut connect_streams = connect_streams.lock().unwrap();
                 //     connect_streams.remove(&stream_id);
                 // }
-                return
+                return;
             }
         }
     }
-    stream.write(&b"HTTP/1.1 400 Bad Request\r\n\r\n".to_vec()).await;
+    stream
+        .write(&b"HTTP/1.1 400 Bad Request\r\n\r\n".to_vec())
+        .await;
 }
 
 pub struct Http1Client {
@@ -628,14 +704,19 @@ pub struct Http1Client {
 
 impl Http1Client {
     pub fn new() -> Http1Client {
-        Http1Client { client: Client::new() }
+        Http1Client {
+            client: Client::new(),
+        }
     }
 
     pub fn listen_addr(&self) -> Option<SocketAddr> {
-        return self.client.listen_addr()
+        return self.client.listen_addr();
     }
 
-    pub async fn bind<T: tokio::net::ToSocketAddrs>(&mut self, bind_addr: T) -> Result<(), Box<dyn Error>> {
+    pub async fn bind<T: tokio::net::ToSocketAddrs>(
+        &mut self,
+        bind_addr: T,
+    ) -> Result<(), Box<dyn Error>> {
         self.client.bind(bind_addr).await
     }
 
@@ -644,53 +725,65 @@ impl Http1Client {
     }
 }
 
-async fn handle_socks5_stream(mut stream: TcpStream, http3_sender: UnboundedSender<ToSend>, connect_streams: Arc<Mutex<HashMap<u64, UnboundedSender<Content>>>>, connect_sockets: Arc<Mutex<HashMap<u64, UnboundedSender<Content>>>>) {
+async fn handle_socks5_stream(
+    mut stream: TcpStream,
+    http3_sender: UnboundedSender<ToSend>,
+    connect_streams: Arc<Mutex<HashMap<u64, UnboundedSender<Content>>>>,
+    connect_sockets: Arc<Mutex<HashMap<u64, UnboundedSender<Content>>>>,
+) {
     let peer_addr = stream.peer_addr().unwrap();
     let hs_req = match socks5_proto::HandshakeRequest::read_from(&mut stream).await {
         Ok(v) => v,
         Err(e) => {
             error!("socks5 handshake request read failed: {}", e);
-            return
+            return;
         }
     };
 
-    if hs_req.methods.contains(&socks5_proto::HandshakeMethod::None) {
+    if hs_req
+        .methods
+        .contains(&socks5_proto::HandshakeMethod::None)
+    {
         let hs_resp = socks5_proto::HandshakeResponse::new(socks5_proto::HandshakeMethod::None);
         match hs_resp.write_to(&mut stream).await {
-            Ok(_) => {},
+            Ok(_) => {}
             Err(e) => {
                 error!("socks5 handshake write response failed: {}", e);
-                return
+                return;
             }
         };
     } else {
         error!("No available handshake method provided by client, currently only support no auth");
-        let hs_resp = socks5_proto::HandshakeResponse::new(socks5_proto::HandshakeMethod::Unacceptable);
+        let hs_resp =
+            socks5_proto::HandshakeResponse::new(socks5_proto::HandshakeMethod::Unacceptable);
         match hs_resp.write_to(&mut stream).await {
-            Ok(_) => {},
+            Ok(_) => {}
             Err(e) => {
                 error!("socks5 handshake write response failed: {}", e);
-                return
+                return;
             }
         };
         let _ = stream.shutdown().await;
-        return
+        return;
     }
 
     let req = match socks5_proto::Request::read_from(&mut stream).await {
         Ok(v) => v,
         Err(e) => {
             error!("socks5 request parse failed: {}", e);
-            let resp = socks5_proto::Response::new(socks5_proto::Reply::GeneralFailure, socks5_proto::Address::unspecified());
+            let resp = socks5_proto::Response::new(
+                socks5_proto::Reply::GeneralFailure,
+                socks5_proto::Address::unspecified(),
+            );
             match resp.write_to(&mut stream).await {
-                Ok(_) => {},
+                Ok(_) => {}
                 Err(e) => {
                     error!("socks5 write response failed: {}", e);
-                    return
+                    return;
                 }
             };
             let _ = stream.shutdown().await;
-            return
+            return;
         }
     };
 
@@ -700,20 +793,33 @@ async fn handle_socks5_stream(mut stream: TcpStream, http3_sender: UnboundedSend
             let headers = vec![
                 quiche::h3::Header::new(b":method", b"CONNECT"),
                 quiche::h3::Header::new(b":authority", path.as_bytes()),
-                quiche::h3::Header::new(b":authorization", b"dummy-authorization"),    
+                quiche::h3::Header::new(b":authorization", b"dummy-authorization"),
             ];
             info!("sending HTTP3 request {:?}", headers);
             let (stream_id_sender, mut stream_id_receiver) = mpsc::channel(1);
             let (response_sender, mut response_receiver) = mpsc::unbounded_channel::<Content>();
-            http3_sender.send(ToSend { content: Content::Request { headers, stream_id_sender }, finished: false, stream_id: u64::MAX});
-            let stream_id = stream_id_receiver.recv().await.expect("stream_id receiver error");
+            http3_sender.send(ToSend {
+                content: Content::Request {
+                    headers,
+                    stream_id_sender,
+                },
+                finished: false,
+                stream_id: u64::MAX,
+            });
+            let stream_id = stream_id_receiver
+                .recv()
+                .await
+                .expect("stream_id receiver error");
             {
                 let mut connect_streams = connect_streams.lock().unwrap();
-                connect_streams.insert(stream_id, response_sender); 
+                connect_streams.insert(stream_id, response_sender);
                 // TODO: potential race condition: the response could be received before connect_streams is even inserted and get dropped
             }
 
-            let response = response_receiver.recv().await.expect("http3 response receiver error");
+            let response = response_receiver
+                .recv()
+                .await
+                .expect("http3 response receiver error");
             let mut succeeded = false;
             if let Content::Headers { headers } = response {
                 info!("Got response {:?}", hdrs_to_strings(&headers));
@@ -729,14 +835,17 @@ async fn handle_socks5_stream(mut stream: TcpStream, http3_sender: UnboundedSend
                         if let Ok(status_code) = status_str.parse::<i32>() {
                             if status_code >= 200 && status_code < 300 {
                                 info!("connection established, sending OK socks response");
-                                let response = socks5_proto::Response::new(socks5_proto::Reply::Succeeded, socks5_proto::Address::unspecified());
+                                let response = socks5_proto::Response::new(
+                                    socks5_proto::Reply::Succeeded,
+                                    socks5_proto::Address::unspecified(),
+                                );
                                 succeeded = true;
                                 match response.write_to(&mut stream).await {
-                                    Ok(_) => {},
+                                    Ok(_) => {}
                                     Err(e) => {
                                         error!("socks5 response write error: {}", e);
                                         let _ = stream.shutdown().await;
-                                        return
+                                        return;
                                     }
                                 }
                             }
@@ -748,10 +857,13 @@ async fn handle_socks5_stream(mut stream: TcpStream, http3_sender: UnboundedSend
             }
             if !succeeded {
                 error!("http3 CONNECT failed");
-                let response = socks5_proto::Response::new(socks5_proto::Reply::GeneralFailure, socks5_proto::Address::unspecified());
+                let response = socks5_proto::Response::new(
+                    socks5_proto::Reply::GeneralFailure,
+                    socks5_proto::Address::unspecified(),
+                );
                 let _ = response.write_to(&mut stream).await;
                 let _ = stream.shutdown().await;
-                return
+                return;
             }
 
             let (mut read_half, mut write_half) = stream.into_split();
@@ -763,15 +875,24 @@ async fn handle_socks5_stream(mut stream: TcpStream, http3_sender: UnboundedSend
                         Ok(v) => v,
                         Err(e) => {
                             error!("Error reading from TCP {}: {}", peer_addr, e);
-                            break
-                        },
+                            break;
+                        }
                     };
                     if read == 0 {
                         debug!("TCP connection closed from {}", peer_addr);
-                        break
+                        break;
                     }
-                    debug!("read {} bytes from TCP from {} for stream {}", read, peer_addr, stream_id);
-                    http3_sender_clone.send(ToSend { stream_id: stream_id, content: Content::Data { data: buf[..read].to_vec() }, finished: false });
+                    debug!(
+                        "read {} bytes from TCP from {} for stream {}",
+                        read, peer_addr, stream_id
+                    );
+                    http3_sender_clone.send(ToSend {
+                        stream_id: stream_id,
+                        content: Content::Data {
+                            data: buf[..read].to_vec(),
+                        },
+                        finished: false,
+                    });
                 }
             });
             let write_task = tokio::spawn(async move {
@@ -780,8 +901,8 @@ async fn handle_socks5_stream(mut stream: TcpStream, http3_sender: UnboundedSend
                         Some(v) => v,
                         None => {
                             debug!("TCP receiver channel closed for stream {}", stream_id);
-                            break
-                        },
+                            break;
+                        }
                     };
                     match data {
                         Content::Request { .. } => unreachable!(),
@@ -792,45 +913,55 @@ async fn handle_socks5_stream(mut stream: TcpStream, http3_sender: UnboundedSend
                                 let bytes_written = match write_half.write(&data[pos..]).await {
                                     Ok(v) => v,
                                     Err(e) => {
-                                        error!("Error writing to TCP {} on stream id {}: {}", peer_addr, stream_id, e);
-                                        return
-                                    },
+                                        error!(
+                                            "Error writing to TCP {} on stream id {}: {}",
+                                            peer_addr, stream_id, e
+                                        );
+                                        return;
+                                    }
                                 };
                                 pos += bytes_written;
                             }
-                            debug!("written {} bytes from TCP to {} for stream {}", data.len(), peer_addr, stream_id);
-                        },
+                            debug!(
+                                "written {} bytes from TCP to {} for stream {}",
+                                data.len(),
+                                peer_addr,
+                                stream_id
+                            );
+                        }
                         Content::Datagram { .. } => unreachable!(),
                         Content::Finished => {
                             debug!("shutting down stream in write task");
                             break;
-                        },
+                        }
                     };
-                    
                 }
             });
             tokio::join!(read_task, write_task);
-            
+
             {
                 // TODO: check whether this can actually trigger
                 debug!("stream {} terminated", stream_id);
                 let mut connect_streams = connect_streams.lock().unwrap();
                 connect_streams.remove(&stream_id);
             }
-        },
+        }
         socks5_proto::Command::Associate => {
             // NOTE: Currently do not support fragmentation
             let mut local_addr = stream.local_addr().unwrap(); // bind on the same ip address of the tcp connection
             local_addr.set_port(0); // let the OS assign a port
-            if let Ok(bind_socket) = UdpSocket::bind(local_addr).await { 
+            if let Ok(bind_socket) = UdpSocket::bind(local_addr).await {
                 if let Ok(local_addr) = bind_socket.local_addr() {
-                    let response = socks5_proto::Response::new(socks5_proto::Reply::Succeeded, socks5_proto::Address::SocketAddress(local_addr));
+                    let response = socks5_proto::Response::new(
+                        socks5_proto::Reply::Succeeded,
+                        socks5_proto::Address::SocketAddress(local_addr),
+                    );
                     match response.write_to(&mut stream).await {
-                        Ok(_) => {},
+                        Ok(_) => {}
                         Err(e) => {
                             error!("socks5 response write error: {}", e);
                             let _ = stream.shutdown().await;
-                            return
+                            return;
                         }
                     }
                     let bind_socket = Arc::new(bind_socket);
@@ -839,7 +970,7 @@ async fn handle_socks5_stream(mut stream: TcpStream, http3_sender: UnboundedSend
                     let mut stream_ids_clone = stream_ids.clone();
                     let connect_streams_clone = connect_streams.clone();
                     let connect_sockets_clone = connect_sockets.clone();
-                   
+
                     let listen_task = tokio::spawn(async move {
                         let mut buf = [0; 65535];
                         let mut dest_to_flow: HashMap<socks5_proto::Address, u64> = HashMap::new();
@@ -847,67 +978,122 @@ async fn handle_socks5_stream(mut stream: TcpStream, http3_sender: UnboundedSend
                             match bind_socket.recv_from(&mut buf).await {
                                 Ok((read, recv_addr)) => {
                                     debug!("read {} bytes from UDP from {}", read, recv_addr);
-                                    let socks5_udp_header = match socks5_proto::UdpHeader::read_from(&mut &buf[..read]).await {
-                                        Ok(v) => v,
-                                        Err(e) => {
-                                            error!("udp socks5 socket received packet cannot be parsed: {}", e);
-                                            continue
-                                        },
-                                    };
+                                    let socks5_udp_header =
+                                        match socks5_proto::UdpHeader::read_from(&mut &buf[..read])
+                                            .await
+                                        {
+                                            Ok(v) => v,
+                                            Err(e) => {
+                                                error!("udp socks5 socket received packet cannot be parsed: {}", e);
+                                                continue;
+                                            }
+                                        };
                                     let payload = &buf[socks5_udp_header.serialized_len()..read];
-                                    let flow_id = match dest_to_flow.get(&socks5_udp_header.address) {
-                                        Some(flow_id) => {
-                                            *flow_id
-                                        },
+                                    let flow_id = match dest_to_flow.get(&socks5_udp_header.address)
+                                    {
+                                        Some(flow_id) => *flow_id,
                                         None => {
                                             // New destination address to proxy, set up connect-udp flow
-                                            let path = socks5_addr_to_connect_udp_path(&socks5_udp_header.address);
+                                            let path = socks5_addr_to_connect_udp_path(
+                                                &socks5_udp_header.address,
+                                            );
                                             let headers = vec![
                                                 quiche::h3::Header::new(b":method", b"CONNECT"),
                                                 quiche::h3::Header::new(b":path", path.as_bytes()),
-                                                quiche::h3::Header::new(b":protocol", b"connect-udp"),
-                                                quiche::h3::Header::new(b":scheme", b"dummy-scheme"),
-                                                quiche::h3::Header::new(b":authority", b"dummy-authority"),
-                                                quiche::h3::Header::new(b":authorization", b"dummy-authorization"),
+                                                quiche::h3::Header::new(
+                                                    b":protocol",
+                                                    b"connect-udp",
+                                                ),
+                                                quiche::h3::Header::new(
+                                                    b":scheme",
+                                                    b"dummy-scheme",
+                                                ),
+                                                quiche::h3::Header::new(
+                                                    b":authority",
+                                                    b"dummy-authority",
+                                                ),
+                                                quiche::h3::Header::new(
+                                                    b":authorization",
+                                                    b"dummy-authorization",
+                                                ),
                                             ];
                                             debug!("sending HTTP3 request {:?}", headers);
-                                            let (stream_id_sender, mut stream_id_receiver) = mpsc::channel(1);
-                                            let (stream_response_sender, mut stream_response_receiver) = mpsc::unbounded_channel::<Content>();
-                                            let (flow_response_sender, mut flow_response_receiver) = mpsc::unbounded_channel::<Content>();
-                                            http3_sender_clone.send(ToSend { content: Content::Request { headers, stream_id_sender }, finished: false, stream_id: u64::MAX});
-                                            let stream_id = stream_id_receiver.recv().await.expect("stream_id receiver error");
+                                            let (stream_id_sender, mut stream_id_receiver) =
+                                                mpsc::channel(1);
+                                            let (
+                                                stream_response_sender,
+                                                mut stream_response_receiver,
+                                            ) = mpsc::unbounded_channel::<Content>();
+                                            let (flow_response_sender, mut flow_response_receiver) =
+                                                mpsc::unbounded_channel::<Content>();
+                                            http3_sender_clone.send(ToSend {
+                                                content: Content::Request {
+                                                    headers,
+                                                    stream_id_sender,
+                                                },
+                                                finished: false,
+                                                stream_id: u64::MAX,
+                                            });
+                                            let stream_id = stream_id_receiver
+                                                .recv()
+                                                .await
+                                                .expect("stream_id receiver error");
                                             let flow_id = stream_id / 4;
                                             {
-                                                let mut connect_streams = connect_streams.lock().unwrap();
-                                                connect_streams.insert(stream_id, stream_response_sender); 
+                                                let mut connect_streams =
+                                                    connect_streams.lock().unwrap();
+                                                connect_streams
+                                                    .insert(stream_id, stream_response_sender);
                                                 // TODO: potential race condition: the response could be received before connect_streams is even inserted and get dropped
                                             }
                                             {
-                                                let mut connect_sockets = connect_sockets.lock().unwrap();
-                                                connect_sockets.insert(flow_id, flow_response_sender); 
+                                                let mut connect_sockets =
+                                                    connect_sockets.lock().unwrap();
+                                                connect_sockets
+                                                    .insert(flow_id, flow_response_sender);
                                             }
                                             {
-                                                let mut stream_ids = stream_ids_clone.lock().unwrap();
+                                                let mut stream_ids =
+                                                    stream_ids_clone.lock().unwrap();
                                                 stream_ids.push(stream_id);
                                             }
                                             let mut succeeded = false;
-                                            let response = stream_response_receiver.recv().await.expect("http3 response receiver error");
+                                            let response = stream_response_receiver
+                                                .recv()
+                                                .await
+                                                .expect("http3 response receiver error");
                                             if let Content::Headers { headers } = response {
-                                                debug!("Got response {:?}", hdrs_to_strings(&headers));
+                                                debug!(
+                                                    "Got response {:?}",
+                                                    hdrs_to_strings(&headers)
+                                                );
                                                 let mut status = None;
                                                 for hdr in headers {
                                                     match hdr.name() {
-                                                        b":status" => status = Some(hdr.value().to_owned()),
+                                                        b":status" => {
+                                                            status = Some(hdr.value().to_owned())
+                                                        }
                                                         _ => (),
                                                     }
                                                 }
                                                 if let Some(status) = status {
-                                                    if let Ok(status_str) = std::str::from_utf8(&status) {
-                                                        if let Ok(status_code) = status_str.parse::<i32>() {
-                                                            if status_code >= 200 && status_code < 300 {
+                                                    if let Ok(status_str) =
+                                                        std::str::from_utf8(&status)
+                                                    {
+                                                        if let Ok(status_code) =
+                                                            status_str.parse::<i32>()
+                                                        {
+                                                            if status_code >= 200
+                                                                && status_code < 300
+                                                            {
                                                                 succeeded = true;
                                                                 debug!("UDP CONNECT connection established for flow {}", flow_id);
-                                                                dest_to_flow.insert(socks5_udp_header.address.clone(), flow_id);
+                                                                dest_to_flow.insert(
+                                                                    socks5_udp_header
+                                                                        .address
+                                                                        .clone(),
+                                                                    flow_id,
+                                                                );
                                                             }
                                                         }
                                                     }
@@ -917,67 +1103,94 @@ async fn handle_socks5_stream(mut stream: TcpStream, http3_sender: UnboundedSend
                                             }
                                             if !succeeded {
                                                 error!("http3 CONNECT UDP failed");
-                                                continue
+                                                continue;
                                             }
                                             let bind_socket_clone = bind_socket.clone();
                                             let dest_addr = socks5_udp_header.address.clone();
                                             let _write_task = tokio::spawn(async move {
                                                 loop {
-                                                    let data = match flow_response_receiver.recv().await {
+                                                    let data = match flow_response_receiver
+                                                        .recv()
+                                                        .await
+                                                    {
                                                         Some(v) => v,
                                                         None => {
                                                             debug!("receiver channel closed for flow {}", flow_id);
-                                                            break
-                                                        },
+                                                            break;
+                                                        }
                                                     };
                                                     match data {
                                                         Content::Request { .. } => unreachable!(),
                                                         Content::Headers { .. } => unreachable!(),
                                                         Content::Data { .. } => unreachable!(),
                                                         Content::Datagram { payload } => {
-                                                            trace!("raw UDP datagram is {} bytes long", payload.len());
-                                                            let (context_id, payload) = decode_var_int(&payload);
+                                                            trace!(
+                                                                "raw UDP datagram is {} bytes long",
+                                                                payload.len()
+                                                            );
+                                                            let (context_id, payload) =
+                                                                decode_var_int(&payload);
                                                             trace!("UDP datagram payload without context id is {} bytes long", payload.len());
                                                             assert_eq!(context_id, 0, "received UDP Proxying Datagram with non-zero Context ID");
-                                
-                                                            let udp_header = socks5_proto::UdpHeader::new(0, dest_addr.clone());
+
+                                                            let udp_header =
+                                                                socks5_proto::UdpHeader::new(
+                                                                    0,
+                                                                    dest_addr.clone(),
+                                                                );
                                                             trace!("appending SOCKS5 UDP request header of length {}", udp_header.serialized_len());
-                                                            let mut serialized_udp_header = Vec::new();
-                                                            udp_header.write_to_buf(&mut serialized_udp_header);
+                                                            let mut serialized_udp_header =
+                                                                Vec::new();
+                                                            udp_header.write_to_buf(
+                                                                &mut serialized_udp_header,
+                                                            );
                                                             trace!("SOCKS5 UDP request header: {:02x?}", serialized_udp_header);
-                                                            let payload = [&serialized_udp_header, payload].concat();
+                                                            let payload =
+                                                                [&serialized_udp_header, payload]
+                                                                    .concat();
                                                             trace!("start sending on UDP");
-                                                            let bytes_written = match bind_socket_clone.send_to(&payload, recv_addr).await {
-                                                                Ok(v) => v,
-                                                                Err(e) => {
-                                                                    error!("Error writing to UDP {} on flow id {}: {}", recv_addr, flow_id, e);
-                                                                    continue
-                                                                },
-                                                            };
+                                                            let bytes_written =
+                                                                match bind_socket_clone
+                                                                    .send_to(&payload, recv_addr)
+                                                                    .await
+                                                                {
+                                                                    Ok(v) => v,
+                                                                    Err(e) => {
+                                                                        error!("Error writing to UDP {} on flow id {}: {}", recv_addr, flow_id, e);
+                                                                        continue;
+                                                                    }
+                                                                };
                                                             if bytes_written < payload.len() {
                                                                 debug!("Partially sent {} bytes of UDP packet of length {}", bytes_written, payload.len());
                                                             }
                                                             debug!("written {} bytes from UDP to {} for flow {}", payload.len(), recv_addr, flow_id);
-                                                        },
-                                                        Content::Finished =>  {
+                                                        }
+                                                        Content::Finished => {
                                                             debug!("shutting down stream in write task");
                                                             break;
-                                                        },
+                                                        }
                                                     };
-                                                    
                                                 }
                                             });
                                             flow_id
-                                        },
+                                        }
                                     };
-                                    debug!("sending {} bytes of data to flow {}", payload.len(), flow_id);
+                                    debug!(
+                                        "sending {} bytes of data to flow {}",
+                                        payload.len(),
+                                        flow_id
+                                    );
                                     let data = wrap_udp_connect_payload(0, payload);
-                                    http3_sender_clone.send(ToSend { stream_id: flow_id, content: Content::Datagram { payload: data }, finished: false });
-                                },
+                                    http3_sender_clone.send(ToSend {
+                                        stream_id: flow_id,
+                                        content: Content::Datagram { payload: data },
+                                        finished: false,
+                                    });
+                                }
                                 Err(e) => {
                                     error!("udp socks5 socket recv failed: {}", e);
-                                    break
-                                },
+                                    break;
+                                }
                             }
                         }
                     });
@@ -990,12 +1203,15 @@ async fn handle_socks5_stream(mut stream: TcpStream, http3_sender: UnboundedSend
                                 if n > 0 {
                                     unreachable!()
                                 }
-                            },
+                            }
                             Err(e) => {
                                 error!("udp associate control stream read error: {}", e);
                             }
                         }
-                        debug!("Socks5 TCP connection on {} associated with UDP sockets terminated", local_addr);
+                        debug!(
+                            "Socks5 TCP connection on {} associated with UDP sockets terminated",
+                            local_addr
+                        );
                         {
                             let stream_ids = stream_ids.lock().unwrap();
                             let mut connect_streams = connect_streams_clone.lock().unwrap();
@@ -1005,7 +1221,11 @@ async fn handle_socks5_stream(mut stream: TcpStream, http3_sender: UnboundedSend
                                 let stream_id = *stream_id;
                                 let flow_id = stream_id / 4;
                                 debug!("terminating stream {} and flow {}", stream_id, flow_id);
-                                http3_sender_clone_2.send(ToSend { stream_id, content: Content::Finished, finished: true });
+                                http3_sender_clone_2.send(ToSend {
+                                    stream_id,
+                                    content: Content::Finished,
+                                    finished: true,
+                                });
                                 connect_sockets.remove(&flow_id);
                                 connect_streams.remove(&stream_id);
                             }
@@ -1015,14 +1235,9 @@ async fn handle_socks5_stream(mut stream: TcpStream, http3_sender: UnboundedSend
                 }
             }
             // TODO: handle termination of UDP assoiciate correctly
-        },
+        }
         socks5_proto::Command::Bind => unimplemented!(),
     }
-
-
-    
-    
-    
 }
 
 pub struct Socks5Client {
@@ -1031,14 +1246,19 @@ pub struct Socks5Client {
 
 impl Socks5Client {
     pub fn new() -> Socks5Client {
-        Socks5Client { client: Client::new() }
+        Socks5Client {
+            client: Client::new(),
+        }
     }
 
     pub fn listen_addr(&self) -> Option<SocketAddr> {
-        return self.client.listen_addr()
+        return self.client.listen_addr();
     }
 
-    pub async fn bind<T: tokio::net::ToSocketAddrs>(&mut self, bind_addr: T) -> Result<(), Box<dyn Error>> {
+    pub async fn bind<T: tokio::net::ToSocketAddrs>(
+        &mut self,
+        bind_addr: T,
+    ) -> Result<(), Box<dyn Error>> {
         self.client.bind(bind_addr).await
     }
 
@@ -1063,7 +1283,7 @@ fn socks5_addr_to_connect_udp_path(addr: &socks5_proto::Address) -> String {
             let ip_string = socket_addr.ip().to_string();
             ip_string.replace(":", "%3A"); // encode ':' in IPv6 address in URI
             (ip_string, socket_addr.port())
-        },
+        }
         socks5_proto::Address::DomainAddress(domain, port) => (domain.to_owned(), port.to_owned()),
     };
     format!("/.well_known/masque/udp/{}/{}/", host, port)

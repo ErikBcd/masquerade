@@ -363,7 +363,14 @@ async fn handle_client(mut client: Client) {
                         },
                         Content::Datagram { payload } => {
                             debug!("sending http3 datagram of {} bytes to flow {}", payload.len(), to_send.stream_id);
-                            http3_conn.send_dgram(&mut client.conn, to_send.stream_id, &payload)
+                            //http3_conn.send_dgram(&mut client.conn, to_send.stream_id, &payload)
+                            match send_h3_dgram(&mut client.conn, to_send.stream_id, &payload) {
+                                        Ok(v) => Ok(v),
+                                        Err(e) => {
+                                            error!("sending http3 datagram failed!");
+                                            break;
+                                        }
+                                    }
                         },
                         Content::Finished => {
                             debug!("terminating stream {}", to_send.stream_id);
@@ -672,7 +679,7 @@ async fn handle_client(mut client: Client) {
                                     connect_streams.remove(&stream_id);
                                 }
                             }, 
-
+/*
                             Ok((_flow_id, quiche::h3::Event::Datagram)) => {
                                 loop {
                                     match http3_conn.recv_dgram(&mut client.conn, &mut buf) {
@@ -700,7 +707,7 @@ async fn handle_client(mut client: Client) {
                                     }
                                 }
                                 ()
-                            },
+                            },*/
 
                             Ok((
                                 _prioritized_element_id,
@@ -750,7 +757,14 @@ async fn handle_client(mut client: Client) {
                     },
                     Content::Datagram { payload } => {
                         debug!("retry sending http3 datagram of {} bytes", payload.len());
-                        http3_conn.send_dgram(&mut client.conn, to_send.stream_id, &payload)
+                       // http3_conn.send_dgram(&mut client.conn, to_send.stream_id, &payload)
+                        match send_h3_dgram(&mut client.conn, to_send.stream_id, &payload) {
+                                        Ok(v) => Ok(v),
+                                        Err(e) => {
+                                            error!("sending http3 datagram failed!");
+                                            break;
+                                        }
+                                    }
                     },
                     Content::Finished => todo!(),
                 };

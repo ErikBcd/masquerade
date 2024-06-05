@@ -18,12 +18,14 @@ log = { version = "0.4", features = ["std"] }
 env_logger = "0.10"
 url = "1"
 
-quiche = "0.16.0"
+quiche = "0.18.0"
 tokio = { version = "1", features = ["full"] }
 ring = "0.16"
 
 httparse = "1.8"
 socks5-proto = "0.3"
+
+octets = "0.3"
 
 [dev-dependencies]
 rand = "0.8"
