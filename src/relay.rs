@@ -163,21 +163,19 @@ impl Relay {
                                 server_connections
                                     .insert(conn_id.clone(), (c, addr, Instant::now()));
                             }
-                            if let Some((conn, s_addr, _)) =
+                            if let Some((mut conn, s_addr, _)) =
                                 server_connections.get_mut(&conn_id)
                             { // TODO: Debug this, too tired now..
                                 conn.recv(&mut buffer[..len]).unwrap();
                                 self.relay_data(
-                                    conn,
-                                    &mut buffer,
-                                    &client_socket,
+                                    &mut conn,
+                                    &mut client_socket,
                                     listen_addr_client.parse().unwrap(),
                                     *s_addr,
+                                    &mut buffer,
                                     &mut client_connections,
                                     &mut config,
                                     &mut rng,
-                                    &hmac_key,
-                                    false,
                                 );
                             }
                         }
@@ -195,13 +193,14 @@ impl Relay {
      *   Relays given data via the given connection
      *   Afterwards it takes care of other streams that exist for this connection.
      */
-    fn relay(
+    fn relay_data(
+        &self,
         conn: &mut Connection,
         socket: &mut UdpSocket,
         addr: SocketAddr,
         local_addr: SocketAddr,
         buffer: &mut [u8],
-        connections: &mut HashMap<ConnectionId<'static>, (Connection, SocketAddr)>,
+        connections: &mut HashMap<ConnectionId<'static>, (Connection, SocketAddr, Instant)>,
         config: &mut Config,
         rng: &mut SystemRandom,
     ) {
