@@ -27,6 +27,8 @@ socks5-proto = "0.3"
 
 octets = "0.3"
 
+mio = { version = "0.8", features = ["net", "os-poll"] }
+
 [dev-dependencies]
 rand = "0.8"
 env_logger = "*"
