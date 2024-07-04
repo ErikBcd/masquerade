@@ -157,7 +157,12 @@ impl Client {
 
         // Client connection.
         let local_addr = socket.local_addr().unwrap();
-        let mut conn = quiche::connect(url.domain(), &scid, local_addr, peer_addr, &mut config)
+        let mut conn = quiche::connect(
+            url.domain(), 
+            &scid, 
+            local_addr, 
+            peer_addr, 
+            &mut config)
             .expect("quic connection failed");
         info!(
             "connecting to {:} from {:} with scid {}",
@@ -262,33 +267,6 @@ impl Client {
                                         connect_streams.remove(&stream_id);
                                     }
                                 },
-//                                Ok((_flow_id, quiche::h3::Event::))
-                                /*
-                                Ok((_flow_id, quiche::h3::Event::Datagram)) => {
-                                    loop {
-                                        match http3_conn.recv_dgram(&mut conn, &mut buf) {
-                                            Ok((read, flow_id, flow_id_len)) => {
-                                                let connect_sockets = connect_sockets.lock().unwrap();
-                                                debug!("got {} bytes of datagram on flow {} ({})", read, flow_id, _flow_id);
-                                                trace!("{}", unsafe {std::str::from_utf8_unchecked(&buf[flow_id_len..read])});
-                                                if let Some(sender) = connect_sockets.get(&flow_id) {
-                                                    sender.send(Content::Datagram { payload: buf[flow_id_len..read].to_vec() });
-                                                } else {
-                                                    debug!("received datagram on unknown flow: {}", flow_id)
-                                                }
-                                            },
-                                            Err(quiche::h3::Error::Done) => {
-                                                debug!("done recv_dgram");
-                                                break;
-                                            },
-                                            Err(e) => {
-                                                error!("error recv_dgram(): {}", e);
-                                                break;
-                                            }
-                                        }
-                                    }
-                                },*/
-
                                 Ok((_, quiche::h3::Event::PriorityUpdate)) => unreachable!(),
 
                                 Ok((goaway_id, quiche::h3::Event::GoAway)) => {
