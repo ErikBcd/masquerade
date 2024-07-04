@@ -6,25 +6,27 @@
 //  * and then waits for a client connection on a specified port
 //  * -> Client can be another relay
 
-use env_logger::fmt::buffer;
 use log::*;
 use mio::net::UdpSocket;
 use mio::Token;
-use quiche::{Config, Connection, ConnectionId, Header};
+use quiche::{Config, Connection, ConnectionId, RecvInfo};
 use ring::hmac;
 use ring::rand::{SecureRandom, SystemRandom};
 
 use core::panic;
 use std::collections::HashMap;
 use std::error::Error;
-use std::net::{self, SocketAddr, ToSocketAddrs, UdpSocket};
+use std::net::SocketAddr;
 
-use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use crate::{client, common::*};
+use crate::common::*;
 
 const MAX_BUF_SIZE: usize = 65507;
+const SERVER_TOKEN: Token = Token(0);
+const CLIENT_TOKEN: Token = Token(1);
+
+type ClientMap = HashMap<ConnectionId<'static>,(Connection, SocketAddr, Instant),>;
 
 #[derive(Debug)]
 pub enum ClientError {
@@ -64,125 +66,137 @@ impl Relay {
         let hmac_key = hmac::Key::generate(ring::hmac::HMAC_SHA256, &rng).unwrap();
 
         let mut buf = [0; MAX_BUF_SIZE];
+        let mut out = [0; MAX_DATAGRAM_SIZE];
 
         // Sockets
         let mut server_socket = mio::net::UdpSocket::bind(listen_addr_server.parse().unwrap())?;
         let mut client_socket = mio::net::UdpSocket::bind(listen_addr_client.parse().unwrap())?;
         poll.registry()
-            .register(&mut server_socket, Token(0), mio::Interest::READABLE);
+            .register(&mut server_socket, SERVER_TOKEN, mio::Interest::READABLE)
+            .expect("Could not register server socket!");
         poll.registry()
-            .register(&mut client_socket, Token(1), mio::Interest::READABLE);
+            .register(&mut client_socket, CLIENT_TOKEN, mio::Interest::READABLE)
+            .expect("Could not register client socket!");
 
-        let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
-        // WARN: Don't do this in production
-        config.verify_peer(false);
+        // TODO: Make config editable via command line arguments
+        let mut config = default_config();
 
-        config
-            .set_application_protos(quiche::h3::APPLICATION_PROTOCOL)
-            .unwrap();
-
-        config.set_max_idle_timeout(1000);
-        config.set_max_recv_udp_payload_size(MAX_DATAGRAM_SIZE);
-        config.set_max_send_udp_payload_size(MAX_DATAGRAM_SIZE);
-        config.set_initial_max_data(10_000_000);
-        config.set_initial_max_stream_data_bidi_local(1_000_000);
-        config.set_initial_max_stream_data_bidi_remote(1_000_000);
-        config.set_initial_max_stream_data_uni(1_000_000);
-        config.set_initial_max_streams_bidi(100);
-        config.set_initial_max_streams_uni(100);
-        config.set_disable_active_migration(true);
-        config.set_active_connection_id_limit(10);
-
-        let mut client_connections: HashMap<
-            ConnectionId<'static>,
-            (Connection, SocketAddr, Instant),
-        > = HashMap::new();
-        let mut server_connections: HashMap<
-            ConnectionId<'static>,
-            (Connection, SocketAddr, Instant),
-        > = HashMap::new();
-
-        // Establish server connection
+        // TODO: Put server connection in it's own method, to clean this up a little
         let mut scid = [0; quiche::MAX_CONN_ID_LEN];
         rng.fill(&mut scid[..]).unwrap();
-        let initial_conn_id = ConnectionId::from_ref(&scid);
-        let server_conn = quiche::connect(
+        let initial_conn_id = ConnectionId::from_ref(&scid[..]);
+
+        // Establish server connection
+        // TODO: Maybe put this into a loop that loops till we have a connection
+        let mut server_conn = match quiche::connect(
             None,
             &initial_conn_id,
             server_socket.local_addr().unwrap(),
             server_addr.parse().unwrap(),
             &mut config,
-        )
-        .unwrap();
-        server_connections.insert(
-            initial_conn_id.clone(),
-            (server_conn, server_addr.parse().unwrap(), Instant::now()),
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                panic!("Could not connect to next server: {:?}", e);
+            }
+        };
+
+        info!(
+            "connecting to {:} from {:} with scid {}",
+            server_addr,
+            server_socket.local_addr().unwrap(),
+            hex_dump(&initial_conn_id)
         );
 
-        // Once both connections are established:
-        //  Wait for data from one of the connections, then forward the data
-        //  Also: When client or server lose connection, try to reconnect to server and/or wait for
-        //  new client connection
+        let (write, send_info) = server_conn.send(&mut out).expect("initial send failed");
+
+        while let Err(e) = server_socket.send_to(&out[..write], send_info.to) {
+            if e.kind() == std::io::ErrorKind::WouldBlock {
+                trace!(
+                    "{} -> {}: send() would block",
+                    server_socket.local_addr().unwrap(),
+                    send_info.to
+                );
+                continue;
+            }
+
+            panic!("Could not send data to server after establishing connection!");
+        }
+
+        trace!("written {}", write);
+
+        let mut client_connections = ClientMap::new();
+        if server_conn.is_closed() {
+            panic!("connection closed, {:?}", server_conn.stats());
+        }
+        // Handle all packets that we receive.
+        // New packet either means we have a new connection,
+        // or we have a packet to relay
         'read: loop {
             poll.poll(&mut events, None)?;
-
             for event in events.iter() {
                 match event.token() {
                     // Server side
-                    Token(0) => {
+                    SERVER_TOKEN => {
                         if event.is_readable() {
-                            let (len, addr) = match server_socket.recv_from(&mut buffer) {
+                            let (len, addr) = match server_socket.recv_from(&mut buf) {
                                 Ok(v) => v,
                                 Err(e) => {
                                     panic!("recv_from() failed: {:?}", e);
                                 }
                             };
                             let pkt_buf = &mut buf[..len];
-                            let hdr = match quiche::Header::from_slice(
-                                pkt_buf,
-                                quiche::MAX_CONN_ID_LEN,
-                            ) {
-                                Ok(v) => v,
+                            match quiche::Header::from_slice(pkt_buf, quiche::MAX_CONN_ID_LEN) {
+                                Ok(v) => {
+                                    let conn_id = generate_hmac_conn_id(&v.dcid, &hmac_key);
+                                    if let Some((conn, client_addr, _)) =
+                                        client_connections.get_mut(&conn_id)
+                                    {
+                                        let recv_info = RecvInfo {
+                                            from: addr,
+                                            to: *client_addr,
+                                        };
+                                        server_conn.recv(&mut buf[..len], recv_info).unwrap();
+                                        self.relay_data(
+                                            &mut server_conn,
+                                            &mut buf,
+                                            &mut client_socket,
+                                            *client_addr,
+                                            conn,
+                                        );
+                                    }
+                                }
                                 Err(e) => {
                                     error!("Parsing packet header failed: {:?}", e);
                                     continue 'read;
                                 }
                             };
-                            let conn_id = ring::hmac::sign(&hmac_key, &hdr.dcid);
-                            let conn_id = &conn_id.as_ref()[..quiche::MAX_CONN_ID_LEN];
-                            let conn_id = conn_id.to_vec().into();
-                            if !server_connections.contains_key(&conn_id) {
-                                let c = quiche::connect(
-                                    None,
-                                    &conn_id,
-                                    addr,
-                                    server_addr.parse().unwrap(),
-                                    &mut config,
-                                )
-                                .unwrap();
-                                server_connections
-                                    .insert(conn_id.clone(), (c, addr, Instant::now()));
-                            }
-                            if let Some((mut conn, s_addr, _)) =
-                                server_connections.get_mut(&conn_id)
-                            { // TODO: Debug this, too tired now..
-                                conn.recv(&mut buffer[..len]).unwrap();
-                                self.relay_data(
-                                    &mut conn,
-                                    &mut client_socket,
-                                    listen_addr_client.parse().unwrap(),
-                                    *s_addr,
-                                    &mut buffer,
-                                    &mut client_connections,
-                                    &mut config,
-                                    &mut rng,
-                                );
-                            }
                         }
                     }
 
                     // Client side
-                    Token(1) => {}
+                    CLIENT_TOKEN => {
+                        if event.is_readable() {
+                            match self.handle_client(
+                                &mut client_socket, 
+                                &mut server_socket, 
+                                &mut server_conn, 
+                                &mut client_connections, 
+                                &mut buf, 
+                                &mut out, 
+                                &hmac_key, 
+                                listen_addr_client, 
+                                server_addr, 
+                                &mut config
+                            ) {
+                                Ok(_) => {continue 'read},
+                                Err(e) => {
+                                    debug!("Handling client: {:?}", e);
+                                    break;
+                                }
+                            }
+                        }
+                    }
                     _ => unreachable!(),
                 }
             }
@@ -196,149 +210,195 @@ impl Relay {
     fn relay_data(
         &self,
         conn: &mut Connection,
+        buffer: &mut [u8],
         socket: &mut UdpSocket,
         addr: SocketAddr,
-        local_addr: SocketAddr,
-        buffer: &mut [u8],
-        connections: &mut HashMap<ConnectionId<'static>, (Connection, SocketAddr, Instant)>,
-        config: &mut Config,
-        rng: &mut SystemRandom,
+        remote_conn: &mut Connection,
     ) {
         // Forward the QUIC data
-        while let Ok((len, send_addr)) = conn.send(buffer) {
-            socket.send_to(&buffer[..len], addr);
+        while let Ok((len, _send_addr)) = conn.send(buffer) {
+            match socket.send_to(&buffer[..len], addr) {
+                Ok(_) => {}
+                Err(e) => {
+                    warn!("Could not send data to {:?}, error: {:?}", addr, e);
+                }
+            }
         }
 
         // Check for new incoming data on the connection and handle that directly
         for stream_id in conn.readable() {
             while let Ok((len, fin)) = conn.stream_recv(stream_id, buffer) {
-                let conn_id = conn.destination_id().to_vec();
-                if !connections.contains_key(&ConnectionId::from_ref(&conn_id)) {
-                    let new_conn = quiche::connect(
-                        None,
-                        &ConnectionId::from_ref(&conn_id),
-                        local_addr,
+                if fin {
+                    todo!("What if connection has ended?")
+                }
+                remote_conn
+                    .stream_send(stream_id, &buffer[..len], fin)
+                    .unwrap();
+            }
+        }
+    }
+
+    fn handle_client(
+        &self,
+        client_socket: &mut UdpSocket, 
+        server_socket: &mut UdpSocket,
+        server_conn: &mut Connection,
+        client_connections: &mut ClientMap,
+        buf: &mut [u8],
+        out: &mut [u8],
+        hmac_key: &hmac::Key,
+        listen_addr_client: &String,
+        server_addr: &String,
+        config: &mut Config,
+    ) -> Result<(), ClientError> {
+        let (len, addr) = match client_socket.recv_from(buf) {
+            Ok(v) => v,
+            Err(e) => {
+                panic!("recv_from() failed: {:?}", e);
+            }
+        };
+        debug!("Handling event! Message from: {:?}", addr);
+        let pkt_buf = &mut buf[..len];
+        match quiche::Header::from_slice(pkt_buf, quiche::MAX_CONN_ID_LEN) {
+            Ok(hdr) => {
+                let conn_id = generate_hmac_conn_id(&hdr.dcid, &hmac_key);
+
+                if !client_connections.contains_key(&conn_id) {
+                    if hdr.ty != quiche::Type::Initial {
+                        error!("Packet is not Initial");
+                        return Ok(());
+                    }
+                    if !quiche::version_is_supported(hdr.version) {
+                        warn!("Doing version negotiation");
+
+                        let len = quiche::negotiate_version(
+                            &hdr.scid, &hdr.dcid, out,
+                        )
+                        .unwrap();
+
+                        let out = &out[..len];
+
+                        if let Err(e) = client_socket.send_to(out, addr) {
+                            if e.kind() == std::io::ErrorKind::WouldBlock {
+                                debug!("send_to() would block");
+                                return Err(ClientError::Other(format!("send() failed: {e:?}")));
+                            }
+
+                            panic!("send_to() failed: {:?}", e);
+                        }
+                        return Ok(());
+                    }
+                    // If we have no token, get a new one
+                    let token = hdr.token.as_ref().unwrap();
+                    if token.is_empty() {
+                        warn!("Doing stateless retry!");
+                        let new_token = mint_token(&hdr, &addr);
+                        let len = quiche::retry(
+                            &hdr.scid,
+                            &hdr.dcid,
+                            &conn_id,
+                            &new_token,
+                            hdr.version,
+                            out,
+                        )
+                        .unwrap();
+                        let out = &out[..len];
+                        if let Err(e) = client_socket.send_to(out, addr) {
+                            if e.kind() == std::io::ErrorKind::WouldBlock {
+                                trace!("send() would block");
+                                return Err(ClientError::Other(format!("send() failed: {e:?}")));
+                            }
+
+                            panic!("send() failed: {:?}", e);
+                        }
+                        return Ok(())
+                    }
+                    let odcid = validate_token(&addr, token);
+
+                    // The token was not valid, meaning the retry failed, so
+                    // drop the packet.
+                    if odcid.is_none() {
+                        error!("Invalid address validation token");
+                        return Ok(())
+                    }
+                    let scid = hdr.dcid.clone();
+                    // TODO: Check the addresses, these might be wrong
+                    match quiche::accept(
+                        &scid,
+                        odcid.as_ref(),
+                        listen_addr_client.parse().unwrap(),
                         addr,
                         config,
-                    )
-                    .unwrap();
-                    connections.insert(ConnectionId::from_ref(&conn_id), (new_conn, addr));
-                }
-
-                if let Some((remote_conn, _)) =
-                    connections.get_mut(&ConnectionId::from_ref(&conn_id))
+                    ) {
+                        Ok(v) => {
+                            debug!(
+                                "New client at {:} connection added: {:?}",
+                                addr,
+                                v.stats()
+                            );
+                            client_connections.insert(
+                                scid.clone(),
+                                (v, addr, Instant::now()),
+                            );
+                        }
+                        Err(e) => {
+                            warn!("Could not add connection: {:?}", e);
+                        }
+                    }
+                } else if let Some((conn, _, _)) =
+                    client_connections.get_mut(&conn_id)
                 {
-                    remote_conn
-                        .stream_send(stream_id, &buffer[..len], fin)
-                        .unwrap();
+                    let recv_info = RecvInfo {
+                        from: addr,
+                        to: client_socket.local_addr().unwrap(),
+                    };
+
+                    conn.recv(&mut buf[..len], recv_info).unwrap();
+                    self.relay_data(
+                        conn,
+                        buf,
+                        server_socket,
+                        server_addr.parse().unwrap(),
+                        server_conn,
+                    );
+                    // TODO: Once QUIC conn is established create a new app protocol session
                 }
             }
-        }
-    }
-
-    async fn connect_to_next(
-        &self,
-        socket: &mio::net::UdpSocket,
-        server_addr: &String,
-    ) -> Option<Connection> {
-        // Try to connect to the specified server/relay (relay and server work the same from our
-        // perspective)
-
-        // Create the configuration for the QUIC connection.
-        let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
-        // WARN: Do not blindly set this to false in production, see quiche example
-        config.verify_peer(false);
-
-        config
-            .set_application_protos(quiche::h3::APPLICATION_PROTOCOL)
-            .unwrap();
-
-        config.set_max_idle_timeout(1000);
-        config.set_max_recv_udp_payload_size(MAX_DATAGRAM_SIZE);
-        config.set_max_send_udp_payload_size(MAX_DATAGRAM_SIZE);
-        config.set_initial_max_data(10_000_000);
-        config.set_initial_max_stream_data_bidi_local(1_000_000);
-        config.set_initial_max_stream_data_bidi_remote(1_000_000);
-        config.set_initial_max_stream_data_uni(1_000_000);
-        config.set_initial_max_streams_bidi(100);
-        config.set_initial_max_streams_uni(100);
-        config.set_disable_active_migration(true);
-        config.set_active_connection_id_limit(10);
-
-        let mut keylog = None;
-
-        if let Some(keylog_path) = std::env::var_os("SSLKEYLOGFILE") {
-            let file = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(keylog_path)
-                .unwrap();
-
-            keylog = Some(file);
-
-            config.log_keys();
-        }
-
-        config.enable_dgram(true, 1000, 1000);
-
-        let mut http_conn: Option<Box<dyn HttpConn>> = None;
-
-        let mut app_proto_selected = false;
-
-        // Generate a random source connection ID for the connection.
-        let rng = SystemRandom::new();
-
-        let scid = if !cfg!(feature = "fuzzing") {
-            let mut conn_id = [0; quiche::MAX_CONN_ID_LEN];
-            rng.fill(&mut conn_id[..]).unwrap();
-
-            conn_id.to_vec()
-        } else {
-            // When fuzzing use an all zero connection ID.
-            [0; quiche::MAX_CONN_ID_LEN].to_vec()
-        };
-
-        let scid = quiche::ConnectionId::from_ref(&scid);
-
-        let local_addr = socket.local_addr().unwrap();
-
-        // Create a QUIC connection and initiate handshake.
-        // Resolve server address.
-        let url = url::Url::parse(&server_addr).unwrap();
-        let peer_addr = url.to_socket_addrs().unwrap().next().unwrap();
-
-        let mut conn =
-            quiche::connect(url.domain(), &scid, local_addr, peer_addr, &mut config).unwrap();
-
-        info!(
-            "connecting to {:} from {:} with scid {:?}",
-            peer_addr,
-            socket.local_addr().unwrap(),
-            scid,
-        );
-        // Now send connection stuff!
-        let mut out = [0; MAX_DATAGRAM_SIZE];
-        let (write, send_info) = conn.send(&mut out).expect("initial send failed");
-        while let Err(e) = socket.send_to(&out[..write], send_info.to) {
-            if e.kind() == std::io::ErrorKind::WouldBlock {
-                trace!(
-                    "{} -> {}: send() would block",
-                    socket.local_addr().unwrap(),
-                    send_info.to
-                );
-                continue;
+            Err(e) => {
+                error!("Parsing packet header failed: {:?}", e);
+                return Ok(());
             }
-            warn!("send() failed: {e:?}");
-            return None;
-        }
-
-        trace!("written {}", write);
-
-        Some(conn)
+        };
+        Ok(())
     }
+}
 
-    async fn connect_client(&self, socket: &mio::net::UdpSocket) -> Option<Connection> {
-        // Wait for a client to connect. Once we establish a connection, return that connection
-        None
-    }
+fn default_config() -> Config {
+    let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
+    // WARN: Don't do this in production
+    config.verify_peer(false);
+
+    config
+        .set_application_protos(quiche::h3::APPLICATION_PROTOCOL)
+        .unwrap();
+
+    config.set_max_idle_timeout(1000);
+    config.set_max_recv_udp_payload_size(MAX_DATAGRAM_SIZE);
+    config.set_max_send_udp_payload_size(MAX_DATAGRAM_SIZE);
+    config.set_initial_max_data(10_000_000);
+    config.set_initial_max_stream_data_bidi_local(1_000_000);
+    config.set_initial_max_stream_data_bidi_remote(1_000_000);
+    config.set_initial_max_stream_data_uni(1_000_000);
+    config.set_initial_max_streams_bidi(100);
+    config.set_initial_max_streams_uni(100);
+    config.set_disable_active_migration(true);
+    config.set_active_connection_id_limit(10);
+
+    config
+}
+
+fn generate_hmac_conn_id(dcid: &ConnectionId, key: &hmac::Key) -> ConnectionId<'static> {
+    let tag = hmac::sign(key, dcid.as_ref());
+    let hmac_conn_id = &tag.as_ref()[..quiche::MAX_CONN_ID_LEN];
+    ConnectionId::from_vec(hmac_conn_id.to_vec())
 }
