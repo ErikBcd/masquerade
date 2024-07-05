@@ -1,5 +1,5 @@
 // Base notes:
-//  * Relay has one incoming and one outgoing connection
+//  * Relay has one incoming and one outgoing connection(s)
 //  * Takes packets from incoming conn and sends to outgoing
 //  * (also vice-versa, bidirectional)
 //  * First connects to the specified server on a specified port,
@@ -119,7 +119,6 @@ impl Relay {
                 );
                 continue;
             }
-
             panic!("Could not send data to server after establishing connection!");
         }
 
@@ -127,7 +126,7 @@ impl Relay {
 
         let mut client_connections = ClientMap::new();
         if server_conn.is_closed() {
-            panic!("connection closed, {:?}", server_conn.stats());
+            panic!("connection closed unexpectetly, {:?}", server_conn.stats());
         }
         // Handle all packets that we receive.
         // New packet either means we have a new connection,

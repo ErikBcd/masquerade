@@ -366,15 +366,15 @@ async fn handle_client(mut client: Client) {
                             match send_h3_dgram(&mut client.conn, to_send.stream_id, &payload) {
                                         Ok(v) => Ok(v),
                                         Err(e) => {
-                                            error!("sending http3 datagram failed!");
+                                            error!("sending http3 datagram failed! {:?}", e);
                                             break;
                                         }
                                     }
                         },
                         Content::Finished => {
                             debug!("terminating stream {}", to_send.stream_id);
-                            client.conn.stream_shutdown(to_send.stream_id, quiche::Shutdown::Read, 0);
-                            client.conn.stream_shutdown(to_send.stream_id, quiche::Shutdown::Write, 0);
+                            client.conn.stream_shutdown(to_send.stream_id, quiche::Shutdown::Read, 0).expect("Couldn't shutdown stream!");
+                            client.conn.stream_shutdown(to_send.stream_id, quiche::Shutdown::Write, 0).expect("Couldn't shutdown stream!");
                             connect_streams.remove(&to_send.stream_id);
                             Ok(())
                         },
@@ -388,14 +388,14 @@ async fn handle_client(mut client: Client) {
                         },
                         Err(e) => {
                             error!("Connection {} stream {} send failed {:?}", client.conn.trace_id(), to_send.stream_id, e);
-                            client.conn.stream_shutdown(to_send.stream_id, quiche::Shutdown::Read, 0);
-                            client.conn.stream_shutdown(to_send.stream_id, quiche::Shutdown::Write, 0);
+                            client.conn.stream_shutdown(to_send.stream_id, quiche::Shutdown::Read, 0).expect("Couldn't shutdown stream!");
+                            client.conn.stream_shutdown(to_send.stream_id, quiche::Shutdown::Write, 0).expect("Couldn't shutdown stream!");
                             connect_streams.remove(&to_send.stream_id);
                         }
                     };
                     to_send = match http3_receiver.try_recv() {
                         Ok(v) => v,
-                        Err(e) => break,
+                        Err(_) => break,
                     };
                 }
             },
@@ -495,7 +495,7 @@ async fn handle_client(mut client: Client) {
                                                         let socket = match UdpSocket::bind("0.0.0.0:0").await {
                                                             Ok(v) => v,
                                                             Err(e) => {
-                                                                error!("Error binding UDP socket");
+                                                                error!("Error binding UDP socket: {:?}", e);
                                                                 return
                                                             }
                                                         };
@@ -521,7 +521,17 @@ async fn handle_client(mut client: Client) {
                                                                 }
                                                                 debug!("read {} bytes from UDP from {} for flow {}", read, peer_addr, flow_id);
                                                                 let data = wrap_udp_connect_payload(0, &buf[..read]);
-                                                                http3_sender_clone_1.send(ToSend { stream_id: flow_id, content: Content::Datagram { payload: data }, finished: false });
+                                                                match http3_sender_clone_1
+                                                                    .send(ToSend { 
+                                                                        stream_id: flow_id, 
+                                                                        content: Content::Datagram { payload: data }, 
+                                                                        finished: false }
+                                                                ) {
+                                                                    Ok(_) => {},
+                                                                    Err(e) => {
+                                                                        debug!("Sending udp connect payload to clone failed: {:?}", e);
+                                                                }
+                                                            };
                                                             }
                                                         });
                                                         let write_task = tokio::spawn(async move {
@@ -590,9 +600,29 @@ async fn handle_client(mut client: Client) {
                                                                     break
                                                                 }
                                                                 debug!("read {} bytes from TCP from {} for stream {}", read, peer_addr, stream_id);
-                                                                http3_sender_clone_1.send(ToSend { stream_id: stream_id, content: Content::Data { data: buf[..read].to_vec() }, finished: false });
+                                                                match http3_sender_clone_1.send(
+                                                                    ToSend { 
+                                                                        stream_id: stream_id, 
+                                                                        content: Content::Data { data: buf[..read].to_vec() }, 
+                                                                        finished: false 
+                                                                }) {
+                                                                    Ok(_) => {},
+                                                                    Err(e) => {
+                                                                        debug!("Error sending http3 data: {:?}", e);
+                                                                    },
+                                                                };
                                                             }
-                                                            http3_sender_clone_1.send(ToSend { stream_id: stream_id, content: Content::Finished, finished: true });
+                                                            match http3_sender_clone_1.send(
+                                                                ToSend { 
+                                                                    stream_id: stream_id, 
+                                                                    content: Content::Finished, 
+                                                                finished: true 
+                                                            }) {
+                                                                Ok(_) => {},
+                                                                Err(e) => {
+                                                                    debug!("Error sending http3 data: {:?}", e);
+                                                                },
+                                                            };
                                                         });
                                                         let write_task = tokio::spawn(async move {
                                                             loop {
