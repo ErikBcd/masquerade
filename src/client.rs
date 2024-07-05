@@ -202,7 +202,7 @@ impl Client {
                     let (read, from) = match recvd {
                         Ok(v) => v,
                         Err(e) => {
-                            error!("error when reading from UDP socket");
+                            error!("error when reading from UDP socket: {:?}", e);
                             continue
                         },
                     };
@@ -232,7 +232,8 @@ impl Client {
                                     info!("got response headers {:?} on stream id {}", hdrs_to_strings(&list), stream_id);
                                     let connect_streams = connect_streams.lock().unwrap();
                                     if let Some(sender) = connect_streams.get(&stream_id) {
-                                        sender.send(Content::Headers { headers: list });
+                                        sender.send(Content::Headers { headers: list })
+                                            .unwrap_or_else(|e| error!("Could not send headers: {:?}", e));
                                     }
                                 },
 
@@ -243,7 +244,8 @@ impl Client {
                                         if let Some(sender) = connect_streams.get(&stream_id) {
                                             debug!("got {} bytes of response data on stream {}", read, stream_id);
                                             trace!("{}", unsafe {std::str::from_utf8_unchecked(&buf[..read])});
-                                            sender.send(Content::Data { data: buf[..read].to_vec() });
+                                            sender.send(Content::Data { data: buf[..read].to_vec() })
+                                                .unwrap_or_else(|e| error!("Could not send data: {:?}", e));
                                         } else {
                                             debug!("received {} bytes of stream data on unknown stream {}", read, stream_id);
                                         }
@@ -254,7 +256,8 @@ impl Client {
                                     info!("finished received, stream id: {} closing", stream_id);
                                     let mut connect_streams = connect_streams.lock().unwrap();
                                     if let Some(sender) = connect_streams.get(&stream_id) {
-                                        sender.send(Content::Finished {});
+                                        sender.send(Content::Finished {})
+                                            .unwrap_or_else(|e| error!("Could not send finish stream data: {:?}", e));
                                         connect_streams.remove(&stream_id);
                                     }
                                 },
@@ -263,7 +266,8 @@ impl Client {
                                     error!("request was reset by peer with {}, stream id: {} closed", e, stream_id);
                                     let mut connect_streams = connect_streams.lock().unwrap();
                                     if let Some(sender) = connect_streams.get(&stream_id) {
-                                        sender.send(Content::Finished {});
+                                        sender.send(Content::Finished {})
+                                            .unwrap_or_else(|e| error!("Could not send finish stream data: {:?}", e));
                                         connect_streams.remove(&stream_id);
                                     }
                                 },
@@ -300,7 +304,9 @@ impl Client {
                                 debug!("sending http3 request {:?}", hdrs_to_strings(&headers));
                                 match http3_conn.send_request(&mut conn, headers, to_send.finished) {
                                     Ok(stream_id) => {
-                                        stream_id_sender.send(stream_id).await;
+                                        stream_id_sender.send(stream_id)
+                                            .await
+                                            .unwrap_or_else(|e| error!("http3 request send stream_id failed: {:?}", e));
                                         Ok(())
                                     },
                                     Err(e) => {
@@ -331,7 +337,7 @@ impl Client {
                                 match send_h3_dgram(&mut conn, to_send.stream_id, &payload) {
                                         Ok(v) => Ok(v),
                                         Err(e) => {
-                                            error!("sending http3 datagram failed!");
+                                            error!("sending http3 datagram failed: {:?}", e);
                                             break;
                                         }
                                     }
@@ -339,7 +345,8 @@ impl Client {
                             },
                             Content::Finished => {
                                 debug!("shutting down stream");
-                                conn.stream_shutdown(to_send.stream_id, quiche::Shutdown::Read, 0);
+                                conn.stream_shutdown(to_send.stream_id, quiche::Shutdown::Read, 0)
+                                    .unwrap_or_else(|e| error!("stream shutdown read failed: {:?}", e));
                                 match conn.stream_shutdown(to_send.stream_id, quiche::Shutdown::Write, 0) {
                                     Ok(v) => Ok(v),
                                     Err(e) => {
@@ -358,8 +365,10 @@ impl Client {
                             },
                             Err(e) => {
                                 error!("Connection {} stream {} send failed {:?}", conn.trace_id(), to_send.stream_id, e);
-                                conn.stream_shutdown(to_send.stream_id, quiche::Shutdown::Read, 0);
-                                conn.stream_shutdown(to_send.stream_id, quiche::Shutdown::Write, 0);
+                                conn.stream_shutdown(to_send.stream_id, quiche::Shutdown::Read, 0)
+                                    .unwrap_or_else(|e| error!("stream shutdown read failed: {:?}", e));
+                                conn.stream_shutdown(to_send.stream_id, quiche::Shutdown::Write, 0)
+                                    .unwrap_or_else(|e| error!("stream shutdown write failed: {:?}", e));
                                 {
                                     let mut connect_streams = connect_streams.lock().unwrap();
                                     connect_streams.remove(&to_send.stream_id);
@@ -368,7 +377,7 @@ impl Client {
                         };
                         to_send = match http3_receiver.try_recv() {
                             Ok(v) => v,
-                            Err(e) => break,
+                            Err(_) => break,
                         };
                     }
                 },
@@ -394,7 +403,8 @@ impl Client {
                             debug!("retry sending http3 request {:?}", hdrs_to_strings(&headers));
                             match http3_conn.send_request(&mut conn, headers, to_send.finished) {
                                 Ok(stream_id) => {
-                                    stream_id_sender.send(stream_id).await;
+                                    stream_id_sender.send(stream_id).await
+                                        .unwrap_or_else(|e| error!("http3 request send stream_id failed: {:?}", e));
                                     Ok(())
                                 },
                                 Err(e) => {
@@ -426,7 +436,7 @@ impl Client {
                             match send_h3_dgram(&mut conn, to_send.stream_id, &payload) {
                                         Ok(v) => Ok(v),
                                         Err(e) => {
-                                            error!("sending http3 datagram failed!");
+                                            error!("sending http3 datagram failed: {:?}", e);
                                             break;
                                         }
                                     }
@@ -443,7 +453,8 @@ impl Client {
                         },
                         Err(e) => {
                             error!("Connection {} stream {} send failed {:?}", conn.trace_id(), to_send.stream_id, e);
-                            conn.stream_shutdown(to_send.stream_id, quiche::Shutdown::Write, 0);
+                            conn.stream_shutdown(to_send.stream_id, quiche::Shutdown::Write, 0)
+                                .unwrap_or_else(|e| error!("stream shutdown write failed: {:?}", e));
                             {
                                 let mut connect_streams = connect_streams.lock().unwrap();
                                 connect_streams.remove(&to_send.stream_id);
@@ -547,7 +558,8 @@ async fn handle_http1_stream(
                     },
                     finished: false,
                     stream_id: u64::MAX,
-                });
+                }).unwrap_or_else(|e| error!("sending HTTP3 request failed: {:?}", e));
+                
                 let stream_id = stream_id_receiver
                     .recv()
                     .await
@@ -576,7 +588,12 @@ async fn handle_http1_stream(
                             if let Ok(status_code) = status_str.parse::<i32>() {
                                 if status_code >= 200 && status_code < 300 {
                                     info!("connection established, sending 200 OK");
-                                    stream.write(&b"HTTP/1.1 200 OK\r\n\r\n".to_vec()).await;
+                                    match stream.write(&b"HTTP/1.1 200 OK\r\n\r\n".to_vec()).await {
+                                        Ok(_) => {},
+                                        Err(e) => {
+                                            error!("Sending 200 OK failed: {:?}", e);
+                                        }
+                                    };
                                 }
                             }
                         }
@@ -603,7 +620,7 @@ async fn handle_http1_stream(
                                 stream_id: stream_id,
                                 content: Content::Finished,
                                 finished: false,
-                            });
+                            }).unwrap_or_else(|e| error!("tcp finish message not sent: {:?}", e));
                             break;
                         }
                         debug!(
@@ -616,7 +633,7 @@ async fn handle_http1_stream(
                                 data: buf[..read].to_vec(),
                             },
                             finished: false,
-                        });
+                        }).unwrap_or_else(|e| error!("tcp finish message not sent: {:?}", e));
                     }
                 });
                 let write_task = tokio::spawn(async move {
@@ -783,7 +800,8 @@ async fn handle_socks5_stream(
                 },
                 finished: false,
                 stream_id: u64::MAX,
-            });
+            }).unwrap_or_else(|e| error!("sending http3 request failed: {:?}", e));
+
             let stream_id = stream_id_receiver
                 .recv()
                 .await
@@ -870,7 +888,7 @@ async fn handle_socks5_stream(
                             data: buf[..read].to_vec(),
                         },
                         finished: false,
-                    });
+                    }).unwrap_or_else(|e| error!("sending bytes from TCP failed: {:?}", e));
                 }
             });
             let write_task = tokio::spawn(async move {
@@ -1011,6 +1029,8 @@ async fn handle_socks5_stream(
                                                 },
                                                 finished: false,
                                                 stream_id: u64::MAX,
+                                            }).unwrap_or_else(|err| {
+                                                error!("Error: {}", err); 
                                             });
                                             let stream_id = stream_id_receiver
                                                 .recv()
@@ -1163,7 +1183,7 @@ async fn handle_socks5_stream(
                                         stream_id: flow_id,
                                         content: Content::Datagram { payload: data },
                                         finished: false,
-                                    });
+                                    }).unwrap_or_else(|e| error!("sending data to flow {} failed: {:?}", flow_id, e));
                                 }
                                 Err(e) => {
                                     error!("udp socks5 socket recv failed: {}", e);
@@ -1203,7 +1223,7 @@ async fn handle_socks5_stream(
                                     stream_id,
                                     content: Content::Finished,
                                     finished: true,
-                                });
+                                }).unwrap_or_else(|e| error!("Terminating stream failed: {:?}", e));
                                 connect_sockets.remove(&flow_id);
                                 connect_streams.remove(&stream_id);
                             }
