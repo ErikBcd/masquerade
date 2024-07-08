@@ -6,6 +6,14 @@ It is built on HTTP/3 and QUIC provided by the library [quiche](https://github.c
 
 Very early prototype with no thorough testing, missing a lot of features, poorly documented, and very poor error and edge case handling.
 
+This fork aims to build up on the original masquerade implementation for the sake of improvement and evaluation.
+
+### Todo:
+ * Finish relays (a way to tunnel QUIC traffic via multiple nodes)
+ * Fix socks-udp (Broke when updating to the latest quiche version)
+ * Fix cases where connections aren't closed properly
+ * Refactor some things (Code is hard to read in some places, Error handling is missing)
+
 ## Examples
 
 Server:
