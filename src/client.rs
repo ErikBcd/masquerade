@@ -157,12 +157,7 @@ impl Client {
 
         // Client connection.
         let local_addr = socket.local_addr().unwrap();
-        let mut conn = quiche::connect(
-            url.domain(), 
-            &scid, 
-            local_addr, 
-            peer_addr, 
-            &mut config)
+        let mut conn = quiche::connect(url.domain(), &scid, local_addr, peer_addr, &mut config)
             .expect("quic connection failed");
         info!(
             "connecting to {:} from {:} with scid {}",
@@ -206,8 +201,8 @@ impl Client {
                         len,
                         buf[0..len].to_vec()
                     );
-                    
-                    // TODO: Check if this is actually a good way to check for the 
+
+                    // TODO: Check if this is actually a good way to check for the
                     // length of the flow_id
                     // So far it's confirmed to work for a flow id of 0
                     let flow_id_len: usize = (flow_id.checked_ilog10().unwrap_or(0) + 1)
@@ -216,7 +211,10 @@ impl Client {
                     info!("flow_id_len={}", flow_id_len);
                     let connect_sockets = connect_sockets.lock().unwrap();
                     if let Some(sender) = connect_sockets.get(&flow_id) {
-                        sender.send(Content::Datagram { payload: buf[flow_id_len..len].to_vec() })
+                        sender
+                            .send(Content::Datagram {
+                                payload: buf[flow_id_len..len].to_vec(),
+                            })
                             .unwrap_or_else(|e| error!("Could not send dgram payload {:?}", e));
                     }
                 } else {
@@ -579,16 +577,18 @@ async fn handle_http1_stream(
                 info!("sending HTTP3 request {:?}", headers);
                 let (stream_id_sender, mut stream_id_receiver) = mpsc::channel(1);
                 let (response_sender, mut response_receiver) = mpsc::unbounded_channel::<Content>();
-                http3_sender.send(ToSend {
-                    content: Content::Request {
-                        headers,
-                        stream_id_sender,
-                    },
-                    finished: false,
-                    stream_id: u64::MAX,
-                }).unwrap_or_else(|e| error!("sending HTTP3 request failed: {:?}", e));
+                http3_sender
+                    .send(ToSend {
+                        content: Content::Request {
+                            headers,
+                            stream_id_sender,
+                        },
+                        finished: false,
+                        stream_id: u64::MAX,
+                    })
+                    .unwrap_or_else(|e| error!("sending HTTP3 request failed: {:?}", e));
                 info!("Sent HTTP3 request");
-                
+
                 let stream_id = stream_id_receiver
                     .recv()
                     .await
@@ -618,7 +618,7 @@ async fn handle_http1_stream(
                                 if status_code >= 200 && status_code < 300 {
                                     info!("connection established, sending 200 OK");
                                     match stream.write(&b"HTTP/1.1 200 OK\r\n\r\n".to_vec()).await {
-                                        Ok(_) => {},
+                                        Ok(_) => {}
                                         Err(e) => {
                                             error!("Sending 200 OK failed: {:?}", e);
                                         }
@@ -645,24 +645,28 @@ async fn handle_http1_stream(
                         };
                         if read == 0 {
                             debug!("TCP connection closed from {}", peer_addr);
-                            http3_sender_clone.send(ToSend {
-                                stream_id: stream_id,
-                                content: Content::Finished,
-                                finished: false,
-                            }).unwrap_or_else(|e| error!("tcp finish message not sent: {:?}", e));
+                            http3_sender_clone
+                                .send(ToSend {
+                                    stream_id: stream_id,
+                                    content: Content::Finished,
+                                    finished: false,
+                                })
+                                .unwrap_or_else(|e| error!("tcp finish message not sent: {:?}", e));
                             break;
                         }
                         debug!(
                             "read {} bytes from TCP from {} for stream {}",
                             read, peer_addr, stream_id
                         );
-                        http3_sender_clone.send(ToSend {
-                            stream_id: stream_id,
-                            content: Content::Data {
-                                data: buf[..read].to_vec(),
-                            },
-                            finished: false,
-                        }).unwrap_or_else(|e| error!("tcp finish message not sent: {:?}", e));
+                        http3_sender_clone
+                            .send(ToSend {
+                                stream_id: stream_id,
+                                content: Content::Data {
+                                    data: buf[..read].to_vec(),
+                                },
+                                finished: false,
+                            })
+                            .unwrap_or_else(|e| error!("tcp finish message not sent: {:?}", e));
                     }
                 });
                 let write_task = tokio::spawn(async move {
@@ -822,14 +826,16 @@ async fn handle_socks5_stream(
             info!("sending HTTP3 request {:?}", headers);
             let (stream_id_sender, mut stream_id_receiver) = mpsc::channel(1);
             let (response_sender, mut response_receiver) = mpsc::unbounded_channel::<Content>();
-            http3_sender.send(ToSend {
-                content: Content::Request {
-                    headers,
-                    stream_id_sender,
-                },
-                finished: false,
-                stream_id: u64::MAX,
-            }).unwrap_or_else(|e| error!("sending http3 request failed: {:?}", e));
+            http3_sender
+                .send(ToSend {
+                    content: Content::Request {
+                        headers,
+                        stream_id_sender,
+                    },
+                    finished: false,
+                    stream_id: u64::MAX,
+                })
+                .unwrap_or_else(|e| error!("sending http3 request failed: {:?}", e));
 
             let stream_id = stream_id_receiver
                 .recv()
@@ -911,13 +917,15 @@ async fn handle_socks5_stream(
                         "read {} bytes from TCP from {} for stream {}",
                         read, peer_addr, stream_id
                     );
-                    http3_sender_clone.send(ToSend {
-                        stream_id: stream_id,
-                        content: Content::Data {
-                            data: buf[..read].to_vec(),
-                        },
-                        finished: false,
-                    }).unwrap_or_else(|e| error!("sending bytes from TCP failed: {:?}", e));
+                    http3_sender_clone
+                        .send(ToSend {
+                            stream_id: stream_id,
+                            content: Content::Data {
+                                data: buf[..read].to_vec(),
+                            },
+                            finished: false,
+                        })
+                        .unwrap_or_else(|e| error!("sending bytes from TCP failed: {:?}", e));
                 }
             });
             let write_task = tokio::spawn(async move {
@@ -1051,16 +1059,18 @@ async fn handle_socks5_stream(
                                             ) = mpsc::unbounded_channel::<Content>();
                                             let (flow_response_sender, mut flow_response_receiver) =
                                                 mpsc::unbounded_channel::<Content>();
-                                            http3_sender_clone.send(ToSend {
-                                                content: Content::Request {
-                                                    headers,
-                                                    stream_id_sender,
-                                                },
-                                                finished: false,
-                                                stream_id: u64::MAX,
-                                            }).unwrap_or_else(|err| {
-                                                error!("Error: {}", err); 
-                                            });
+                                            http3_sender_clone
+                                                .send(ToSend {
+                                                    content: Content::Request {
+                                                        headers,
+                                                        stream_id_sender,
+                                                    },
+                                                    finished: false,
+                                                    stream_id: u64::MAX,
+                                                })
+                                                .unwrap_or_else(|err| {
+                                                    error!("Error: {}", err);
+                                                });
                                             let stream_id = stream_id_receiver
                                                 .recv()
                                                 .await
@@ -1208,11 +1218,18 @@ async fn handle_socks5_stream(
                                         flow_id
                                     );
                                     let data = wrap_udp_connect_payload(0, payload);
-                                    http3_sender_clone.send(ToSend {
-                                        stream_id: flow_id,
-                                        content: Content::Datagram { payload: data },
-                                        finished: false,
-                                    }).unwrap_or_else(|e| error!("sending data to flow {} failed: {:?}", flow_id, e));
+                                    http3_sender_clone
+                                        .send(ToSend {
+                                            stream_id: flow_id,
+                                            content: Content::Datagram { payload: data },
+                                            finished: false,
+                                        })
+                                        .unwrap_or_else(|e| {
+                                            error!(
+                                                "sending data to flow {} failed: {:?}",
+                                                flow_id, e
+                                            )
+                                        });
                                 }
                                 Err(e) => {
                                     error!("udp socks5 socket recv failed: {}", e);
@@ -1248,11 +1265,15 @@ async fn handle_socks5_stream(
                                 let stream_id = *stream_id;
                                 let flow_id = stream_id / 4;
                                 debug!("terminating stream {} and flow {}", stream_id, flow_id);
-                                http3_sender_clone_2.send(ToSend {
-                                    stream_id,
-                                    content: Content::Finished,
-                                    finished: true,
-                                }).unwrap_or_else(|e| error!("Terminating stream failed: {:?}", e));
+                                http3_sender_clone_2
+                                    .send(ToSend {
+                                        stream_id,
+                                        content: Content::Finished,
+                                        finished: true,
+                                    })
+                                    .unwrap_or_else(|e| {
+                                        error!("Terminating stream failed: {:?}", e)
+                                    });
                                 connect_sockets.remove(&flow_id);
                                 connect_streams.remove(&stream_id);
                             }

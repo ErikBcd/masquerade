@@ -317,7 +317,7 @@ async fn handle_client(mut client: Client) {
     loop {
         tokio::select! {
             // Send pending HTTP3 data in channel to HTTP3 connection on QUIC
-            http3_to_send = http3_receiver.recv(), 
+            http3_to_send = http3_receiver.recv(),
                             if http3_conn.is_some() && http3_retry_send.is_none() => {
                 if http3_to_send.is_none() {
                     unreachable!()
@@ -421,11 +421,11 @@ async fn handle_client(mut client: Client) {
                     let http3_conn = http3_conn.as_mut().unwrap();
                     loop {
                         match handle_http3_event(
-                            http3_conn, 
-                            &mut client, 
-                            http3_sender.clone(), 
-                            &mut connect_sockets, 
-                            &mut connect_streams, 
+                            http3_conn,
+                            &mut client,
+                            http3_sender.clone(),
+                            &mut connect_sockets,
+                            &mut connect_streams,
                             &mut buf) {
                                 Ok(_) => {},
                                 Err(_) => {
@@ -598,24 +598,22 @@ fn create_http3_conn(client: &mut Client) -> Option<quiche::h3::Connection> {
     );
 
     let h3_config = quiche::h3::Config::new().unwrap();
-    let h3_conn = match quiche::h3::Connection::with_transport(
-        &mut client.conn,
-        &h3_config,
-    ) {
-        Ok(v) => v,
+    let h3_conn = 
+        match quiche::h3::Connection::with_transport(&mut client.conn, &h3_config) {
+            Ok(v) => v,
 
-        Err(e) => {
-            error!("failed to create HTTP/3 connection: {}", e);
-            return None
-        },
-    };
+            Err(e) => {
+                error!("failed to create HTTP/3 connection: {}", e);
+                return None;
+            }
+        };
 
     // TODO: sanity check h3 connection before adding to map
     Some(h3_conn)
 }
 
 /**
- * Processes an HTTP/3 event 
+ * Processes an HTTP/3 event
  */
 fn handle_http3_event(
     http3_conn: &mut quiche::h3::Connection,
@@ -624,7 +622,7 @@ fn handle_http3_event(
     connect_sockets: &mut HashMap<u64, UnboundedSender<Vec<u8>>>,
     connect_streams: &mut HashMap<u64, UnboundedSender<Vec<u8>>>,
     buf: &mut [u8; 65535],
-    ) -> Result<(), ClientError> {
+) -> Result<(), ClientError> {
     // Process datagram-related events.
     while let Ok(len) = client.conn.dgram_recv(buf) {
         let mut b = octets::Octets::with_slice(buf);
@@ -635,8 +633,8 @@ fn handle_http3_event(
                 len,
                 buf[0..len].to_vec()
             );
-            
-            // TODO: Check if this is actually a good way to check for the 
+
+            // TODO: Check if this is actually a good way to check for the
             // length of the flow_id
             let flow_id_len: usize = (flow_id.checked_ilog10().unwrap_or(0) + 1)
                 .try_into()
@@ -644,17 +642,18 @@ fn handle_http3_event(
             info!("flow_id_len={}", flow_id_len);
             if connect_sockets.contains_key(&flow_id) {
                 let data = &buf[flow_id_len..len];
-                connect_sockets.get(&flow_id).unwrap().send(data.to_vec()).expect("channel send failed");
+                connect_sockets
+                    .get(&flow_id)
+                    .unwrap()
+                    .send(data.to_vec())
+                    .expect("channel send failed");
             } else {
                 debug!("received datagram on unknown flow: {}", flow_id)
             }
         }
     }
     match http3_conn.poll(&mut client.conn) {
-        Ok((
-            stream_id,
-            quiche::h3::Event::Headers { list: headers, .. },
-        )) => {
+        Ok((stream_id, quiche::h3::Event::Headers { list: headers, .. })) => {
             info!(
                 "{} got request {:?} on stream id {}",
                 client.conn.trace_id(),
@@ -686,10 +685,16 @@ fn handle_http3_event(
                         if protocol == Some(b"connect-udp") && scheme.is_some() && path.is_some() {
                             let path = path.unwrap();
                             if let Some(peer_addr) = path_to_socketaddr(path) {
-                                debug!("connecting udp to {} at {} from authority {}", std::str::from_utf8(&path).unwrap(), peer_addr, authority);
+                                debug!(
+                                    "connecting udp to {} at {} from authority {}",
+                                    std::str::from_utf8(&path).unwrap(),
+                                    peer_addr,
+                                    authority
+                                );
                                 let http3_sender_clone_1 = http3_sender.clone();
                                 let http3_sender_clone_2 = http3_sender.clone();
-                                let (udp_sender, mut udp_receiver) = mpsc::unbounded_channel::<Vec<u8>>();
+                                let (udp_sender, mut udp_receiver) =
+                                    mpsc::unbounded_channel::<Vec<u8>>();
                                 let flow_id = stream_id / 4;
                                 connect_sockets.insert(flow_id, udp_sender);
                                 tokio::spawn(async move {
@@ -697,12 +702,12 @@ fn handle_http3_event(
                                         Ok(v) => v,
                                         Err(e) => {
                                             error!("Error binding UDP socket: {:?}", e);
-                                            return
+                                            return;
                                         }
                                     };
                                     if socket.connect(peer_addr).await.is_err() {
                                         error!("Error connecting to UDP {}", peer_addr);
-                                        return
+                                        return;
                                     };
                                     let socket = Arc::new(socket);
                                     let socket_clone = socket.clone();
@@ -713,14 +718,17 @@ fn handle_http3_event(
                                                 Ok(v) => v,
                                                 Err(e) => {
                                                     error!("Error reading from UDP {} on stream id {}: {}", peer_addr, stream_id, e);
-                                                    break
-                                                },
+                                                    break;
+                                                }
                                             };
                                             if read == 0 {
                                                 debug!("UDP connection closed from {}", peer_addr); // do we need this check?
-                                                break
+                                                break;
                                             }
-                                            debug!("read {} bytes from UDP from {} for flow {}", read, peer_addr, flow_id);
+                                            debug!(
+                                                "read {} bytes from UDP from {} for flow {}",
+                                                read, peer_addr, flow_id
+                                            );
                                             let data = wrap_udp_connect_payload(0, &buf[..read]);
                                             http3_sender_clone_1
                                                 .send(ToSend {
@@ -736,9 +744,12 @@ fn handle_http3_event(
                                             let data = match udp_receiver.recv().await {
                                                 Some(v) => v,
                                                 None => {
-                                                    debug!("UDP receiver channel closed for flow {}", flow_id);
-                                                    break
-                                                },
+                                                    debug!(
+                                                        "UDP receiver channel closed for flow {}",
+                                                        flow_id
+                                                    );
+                                                    break;
+                                                }
                                             };
                                             let (context_id, payload) = decode_var_int(&data);
                                             assert_eq!(context_id, 0, "received UDP Proxying Datagram with non-zero Context ID");
@@ -747,40 +758,64 @@ fn handle_http3_event(
                                             let bytes_written = match socket.send(payload).await {
                                                 Ok(v) => v,
                                                 Err(e) => {
-                                                    error!("Error writing to UDP {} on flow id {}: {}", peer_addr, flow_id, e);
-                                                    return
-                                                },
+                                                    error!(
+                                                        "Error writing to UDP {} on flow id {}: {}",
+                                                        peer_addr, flow_id, e
+                                                    );
+                                                    return;
+                                                }
                                             };
                                             if bytes_written < payload.len() {
                                                 debug!("Partially sent {} bytes of UDP packet of length {}", bytes_written, payload.len());
                                             }
-                                            debug!("written {} bytes from UDP to {} for flow {}", payload.len(), peer_addr, flow_id);
+                                            debug!(
+                                                "written {} bytes from UDP to {} for flow {}",
+                                                payload.len(),
+                                                peer_addr,
+                                                flow_id
+                                            );
                                         }
                                     });
-                                    let headers = vec![
-                                        quiche::h3::Header::new(b":status", b"200"),
-                                    ];
-                                    http3_sender_clone_2.send(ToSend { stream_id, content: Content::Headers { headers }, finished: false }).expect("channel send failed");
+                                    let headers = vec![quiche::h3::Header::new(b":status", b"200")];
+                                    http3_sender_clone_2
+                                        .send(ToSend {
+                                            stream_id,
+                                            content: Content::Headers { headers },
+                                            finished: false,
+                                        })
+                                        .expect("channel send failed");
                                     tokio::join!(read_task, write_task);
                                 });
                             }
-                        } else if let Ok(target_url) = if authority.contains("://") { url::Url::parse(authority) } else {url::Url::parse(format!("scheme://{}", authority).as_str())} {
-                            debug!("connecting to url {} from authority {}", target_url, authority);
+                        } else if let Ok(target_url) = if authority.contains("://") {
+                            url::Url::parse(authority)
+                        } else {
+                            url::Url::parse(format!("scheme://{}", authority).as_str())
+                        } {
+                            debug!(
+                                "connecting to url {} from authority {}",
+                                target_url, authority
+                            );
                             if let Ok(mut socket_addrs) = target_url.to_socket_addrs() {
                                 let peer_addr = socket_addrs.next().unwrap();
                                 let http3_sender_clone_1 = http3_sender.clone();
                                 let http3_sender_clone_2 = http3_sender.clone();
-                                let (tcp_sender, mut tcp_receiver) = mpsc::unbounded_channel::<Vec<u8>>();
+                                let (tcp_sender, mut tcp_receiver) =
+                                    mpsc::unbounded_channel::<Vec<u8>>();
                                 connect_streams.insert(stream_id, tcp_sender);
                                 tokio::spawn(async move {
                                     let stream = match TcpStream::connect(peer_addr).await {
                                         Ok(v) => v,
                                         Err(e) => {
                                             error!("Error connecting TCP to {}: {}", peer_addr, e);
-                                            return
+                                            return;
                                         }
                                     };
-                                    debug!("connecting to url {} {}", target_url, target_url.to_socket_addrs().unwrap().next().unwrap());
+                                    debug!(
+                                        "connecting to url {} {}",
+                                        target_url,
+                                        target_url.to_socket_addrs().unwrap().next().unwrap()
+                                    );
                                     let (mut read_half, mut write_half) = stream.into_split();
                                     let read_task = tokio::spawn(async move {
                                         let mut buf = [0; 65535];
@@ -788,58 +823,89 @@ fn handle_http3_event(
                                             let read = match read_half.read(&mut buf).await {
                                                 Ok(v) => v,
                                                 Err(e) => {
-                                                    error!("Error reading from TCP {}: {}", peer_addr, e);
-                                                    break
-                                                },
+                                                    error!(
+                                                        "Error reading from TCP {}: {}",
+                                                        peer_addr, e
+                                                    );
+                                                    break;
+                                                }
                                             };
                                             if read == 0 {
                                                 debug!("TCP connection closed from {}", peer_addr);
-                                                break
+                                                break;
                                             }
-                                            debug!("read {} bytes from TCP from {} for stream {}", read, peer_addr, stream_id);
-                                            http3_sender_clone_1.send(
-                                                ToSend {
+                                            debug!(
+                                                "read {} bytes from TCP from {} for stream {}",
+                                                read, peer_addr, stream_id
+                                            );
+                                            http3_sender_clone_1
+                                                .send(ToSend {
                                                     stream_id: stream_id,
-                                                    content: Content::Data { data: buf[..read].to_vec() },
-                                                    finished: false
-                                            }).unwrap_or_else(|e| debug!("Error sending http3 data: {:?}", e));
+                                                    content: Content::Data {
+                                                        data: buf[..read].to_vec(),
+                                                    },
+                                                    finished: false,
+                                                })
+                                                .unwrap_or_else(|e| {
+                                                    debug!("Error sending http3 data: {:?}", e)
+                                                });
                                         }
-                                        http3_sender_clone_1.send(
-                                            ToSend {
+                                        http3_sender_clone_1
+                                            .send(ToSend {
                                                 stream_id: stream_id,
                                                 content: Content::Finished,
-                                            finished: true
-                                        }).unwrap_or_else(|e| debug!("Error sending http3 data: {:?}", e));
+                                                finished: true,
+                                            })
+                                            .unwrap_or_else(|e| {
+                                                debug!("Error sending http3 data: {:?}", e)
+                                            });
                                     });
                                     let write_task = tokio::spawn(async move {
                                         loop {
                                             let data = match tcp_receiver.recv().await {
                                                 Some(v) => v,
                                                 None => {
-                                                    debug!("TCP receiver channel closed for stream {}", stream_id);
-                                                    break
-                                                },
+                                                    debug!(
+                                                        "TCP receiver channel closed for stream {}",
+                                                        stream_id
+                                                    );
+                                                    break;
+                                                }
                                             };
                                             trace!("start sending on TCP");
                                             let mut pos = 0;
                                             while pos < data.len() {
-                                                let bytes_written = match write_half.write(&data[pos..]).await {
+                                                let bytes_written = match write_half
+                                                    .write(&data[pos..])
+                                                    .await
+                                                {
                                                     Ok(v) => v,
                                                     Err(e) => {
                                                         error!("Error writing to TCP {} on stream id {}: {}", peer_addr, stream_id, e);
-                                                        return
-                                                    },
+                                                        return;
+                                                    }
                                                 };
                                                 pos += bytes_written;
                                             }
-                                            debug!("written {} bytes from TCP to {} for stream {}", data.len(), peer_addr, stream_id);
+                                            debug!(
+                                                "written {} bytes from TCP to {} for stream {}",
+                                                data.len(),
+                                                peer_addr,
+                                                stream_id
+                                            );
                                         }
                                     });
                                     let headers = vec![
                                         quiche::h3::Header::new(b":status", b"200"),
                                         quiche::h3::Header::new(b"content-length", b"0"), // NOTE: is this needed?
                                     ];
-                                    http3_sender_clone_2.send(ToSend { stream_id, content: Content::Headers { headers }, finished: false }).expect("channel send failed");
+                                    http3_sender_clone_2
+                                        .send(ToSend {
+                                            stream_id,
+                                            content: Content::Headers { headers },
+                                            finished: false,
+                                        })
+                                        .expect("channel send failed");
                                     tokio::join!(read_task, write_task);
                                 });
                             } else {
@@ -851,11 +917,11 @@ fn handle_http3_event(
                     } else {
                         // TODO: send error
                     }
-                },
+                }
 
-                _ => {},
+                _ => {}
             };
-        },
+        }
 
         Ok((stream_id, quiche::h3::Event::Data)) => {
             info!(
@@ -865,20 +931,22 @@ fn handle_http3_event(
             );
             while let Ok(read) = http3_conn.recv_body(&mut client.conn, stream_id, buf) {
                 if connect_streams.contains_key(&stream_id) {
+                    debug!("got {} bytes of data on stream {}", read, stream_id);
+                    trace!("{}", unsafe { std::str::from_utf8_unchecked(&buf[..read]) });
+                    let data = &buf[..read];
+                    connect_streams
+                        .get(&stream_id)
+                        .unwrap()
+                        .send(data.to_vec())
+                        .expect("channel send failed");
+                } else {
                     debug!(
-                        "got {} bytes of data on stream {}",
+                        "received {} bytes of stream data on unknown stream {}",
                         read, stream_id
                     );
-                    trace!("{}", unsafe {
-                        std::str::from_utf8_unchecked(&buf[..read])
-                    });
-                    let data = &buf[..read];
-                    connect_streams.get(&stream_id).unwrap().send(data.to_vec()).expect("channel send failed");
-                } else {
-                    debug!("received {} bytes of stream data on unknown stream {}", read, stream_id);
                 }
             }
-        },
+        }
 
         Ok((stream_id, quiche::h3::Event::Finished)) => {
             info!("finished received, stream id: {} closing", stream_id);
@@ -886,30 +954,30 @@ fn handle_http3_event(
             if connect_streams.contains_key(&stream_id) {
                 connect_streams.remove(&stream_id);
             }
-        },
+        }
 
         Ok((stream_id, quiche::h3::Event::Reset(e))) => {
-            error!("request was reset by peer with {}, stream id: {} closed", e, stream_id);
+            error!(
+                "request was reset by peer with {}, stream id: {} closed",
+                e, stream_id
+            );
             // TODO: do we need to shutdown the stream on our side?
             if connect_streams.contains_key(&stream_id) {
                 connect_streams.remove(&stream_id);
             }
-        },
-        Ok((
-            _prioritized_element_id,
-            quiche::h3::Event::PriorityUpdate,
-        )) => unreachable!(),
+        }
+        Ok((_prioritized_element_id, quiche::h3::Event::PriorityUpdate)) => unreachable!(),
 
         Ok((_goaway_id, quiche::h3::Event::GoAway)) => unreachable!(),
 
         Err(quiche::h3::Error::Done) => {
             return Err(ClientError::Other(format!("quiche error: Done")));
-        },
+        }
 
         Err(e) => {
             error!("{} HTTP/3 error {:?}", client.conn.trace_id(), e);
             return Err(ClientError::Other(format!("HTTP/3 error")));
-        },
+        }
     }
     Ok(())
 }
