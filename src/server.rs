@@ -420,7 +420,8 @@ async fn handle_client(mut client: Client) {
                     // Process HTTP/3 events.
                     let http3_conn = http3_conn.as_mut().unwrap();
                     loop {
-                        match handle_http3_event(http3_conn, 
+                        match handle_http3_event(
+                            http3_conn, 
                             &mut client, 
                             http3_sender.clone(), 
                             &mut connect_sockets, 
@@ -624,6 +625,31 @@ fn handle_http3_event(
     connect_streams: &mut HashMap<u64, UnboundedSender<Vec<u8>>>,
     buf: &mut [u8; 65535],
     ) -> Result<(), ClientError> {
+    // Process datagram-related events.
+    while let Ok(len) = client.conn.dgram_recv(buf) {
+        let mut b = octets::Octets::with_slice(buf);
+        if let Ok(flow_id) = b.get_varint() {
+            info!(
+                "Received DATAGRAM flow_id={} len={} buf={:02x?}",
+                flow_id,
+                len,
+                buf[0..len].to_vec()
+            );
+            
+            // TODO: Check if this is actually a good way to check for the 
+            // length of the flow_id
+            let flow_id_len: usize = (flow_id.checked_ilog10().unwrap_or(0) + 1)
+                .try_into()
+                .unwrap();
+            info!("flow_id_len={}", flow_id_len);
+            if connect_sockets.contains_key(&flow_id) {
+                let data = &buf[flow_id_len..len];
+                connect_sockets.get(&flow_id).unwrap().send(data.to_vec()).expect("channel send failed");
+            } else {
+                debug!("received datagram on unknown flow: {}", flow_id)
+            }
+        }
+    }
     match http3_conn.poll(&mut client.conn) {
         Ok((
             stream_id,

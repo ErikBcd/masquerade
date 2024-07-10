@@ -190,10 +190,38 @@ impl Client {
         let mut http3_retry_send: Option<ToSend> = None;
         let mut interval = time::interval(Duration::from_millis(20));
         interval.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
+
         loop {
             if conn.is_closed() {
                 info!("connection closed, {:?}", conn.stats());
                 break;
+            }
+            // Process datagram-related events.
+            while let Ok(len) = conn.dgram_recv(&mut buf) {
+                let mut b = octets::Octets::with_slice(&mut buf);
+                if let Ok(flow_id) = b.get_varint() {
+                    info!(
+                        "Received DATAGRAM flow_id={} len={} buf={:02x?}",
+                        flow_id,
+                        len,
+                        buf[0..len].to_vec()
+                    );
+                    
+                    // TODO: Check if this is actually a good way to check for the 
+                    // length of the flow_id
+                    // So far it's confirmed to work for a flow id of 0
+                    let flow_id_len: usize = (flow_id.checked_ilog10().unwrap_or(0) + 1)
+                        .try_into()
+                        .unwrap();
+                    info!("flow_id_len={}", flow_id_len);
+                    let connect_sockets = connect_sockets.lock().unwrap();
+                    if let Some(sender) = connect_sockets.get(&flow_id) {
+                        sender.send(Content::Datagram { payload: buf[flow_id_len..len].to_vec() })
+                            .unwrap_or_else(|e| error!("Could not send dgram payload {:?}", e));
+                    }
+                } else {
+                    error!("Could not get varint from dgram!");
+                }
             }
 
             tokio::select! {
@@ -286,7 +314,7 @@ impl Client {
                                     error!("HTTP/3 processing failed: {:?}", e);
                                     break;
                                 },
-                            }
+                            };
                         }
                     }
                 },
@@ -301,7 +329,7 @@ impl Client {
                         let result = match &to_send.content {
                             Content::Headers { .. } => unreachable!(),
                             Content::Request { headers, stream_id_sender } => {
-                                debug!("sending http3 request {:?}", hdrs_to_strings(&headers));
+                                debug!("sending http3 request {:?} to {:?}", hdrs_to_strings(&headers), http3_conn.peer_settings_raw());
                                 match http3_conn.send_request(&mut conn, headers, to_send.finished) {
                                     Ok(stream_id) => {
                                         stream_id_sender.send(stream_id)
@@ -559,6 +587,7 @@ async fn handle_http1_stream(
                     finished: false,
                     stream_id: u64::MAX,
                 }).unwrap_or_else(|e| error!("sending HTTP3 request failed: {:?}", e));
+                info!("Sent HTTP3 request");
                 
                 let stream_id = stream_id_receiver
                     .recv()
