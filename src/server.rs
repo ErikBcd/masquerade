@@ -784,7 +784,18 @@ fn handle_http3_event(
                                             finished: false,
                                         })
                                         .expect("channel send failed");
-                                    tokio::join!(read_task, write_task);
+                                    match tokio::join!(read_task, write_task) {
+                                        (Err(e), Err(e2)) => {
+                                            debug!("Two errors occured when joining r/w tasks: {:?} | {:?}", e, e2);
+                                        },
+                                        (Err(e), _) => {
+                                            debug!("An error occured when joining r/w tasks: {:?}", e);
+                                        },
+                                        (_, Err(e)) => {
+                                            debug!("An error occured when joining r/w tasks: {:?}", e);
+                                        },
+                                        (_, _) => {}
+                                    };
                                 });
                             }
                         } else if let Ok(target_url) = if authority.contains("://") {
@@ -906,7 +917,18 @@ fn handle_http3_event(
                                             finished: false,
                                         })
                                         .expect("channel send failed");
-                                    tokio::join!(read_task, write_task);
+                                    match tokio::join!(read_task, write_task) {
+                                        (Err(e), Err(e2)) => {
+                                            debug!("Two errors occured when joining r/w tasks: {:?} | {:?}", e, e2);
+                                        },
+                                        (Err(e), _) => {
+                                            debug!("An error occured when joining r/w tasks: {:?}", e);
+                                        },
+                                        (_, Err(e)) => {
+                                            debug!("An error occured when joining r/w tasks: {:?}", e);
+                                        },
+                                        (_, _) => {}
+                                    };
                                 });
                             } else {
                                 // TODO: send error

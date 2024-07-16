@@ -134,6 +134,7 @@ impl Relay {
         'read: loop {
             poll.poll(&mut events, None)?;
             for event in events.iter() {
+                debug!("Handling an event with token {:?}", event.token());
                 match event.token() {
                     // Server side
                     SERVER_TOKEN => {
@@ -260,8 +261,9 @@ impl Relay {
         let pkt_buf = &mut buf[..len];
         match quiche::Header::from_slice(pkt_buf, quiche::MAX_CONN_ID_LEN) {
             Ok(hdr) => {
+                self.handle_message(&hdr);
                 let conn_id = generate_hmac_conn_id(&hdr.dcid, &hmac_key);
-
+                
                 if !client_connections.contains_key(&conn_id) {
                     if hdr.ty != quiche::Type::Initial {
                         error!("Packet is not Initial");
@@ -369,6 +371,10 @@ impl Relay {
             }
         };
         Ok(())
+    }
+
+    fn handle_message(&self, hdr: &quiche::Header) {
+        debug!("Header data: Type={:?}", hdr.ty);
     }
 }
 

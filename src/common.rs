@@ -2,8 +2,7 @@ use log::info;
 use quiche::h3::NameValue;
 
 use std::collections::HashMap;
-use std::net::{self, SocketAddr};
-use std::net::ToSocketAddrs;
+use std::net::{self};
 
 pub const MAX_DATAGRAM_SIZE: usize = 1350;
 
@@ -49,7 +48,7 @@ pub fn send_h3_dgram(
     conn: &mut quiche::Connection, flow_id: u64, dgram_content: &[u8],
 ) -> quiche::Result<()> {
     info!(
-        "sending HTTP/3 DATAGRAM on flow_id={} with data {:?}",
+        "sending HTTP/3 DATAGRAM on flow_id={} with data {:x?}",
         flow_id, dgram_content
     );
 

@@ -23,11 +23,14 @@ pub async fn setup_http1_client() -> Result<(TcpStream, TcpStream), Box<dyn Erro
     client.bind("127.0.0.1:0").await?;
     let listen_addr = client.listen_addr().unwrap();
 
-    let server_task = tokio::spawn(async move {
-        server.run().await;
+    tokio::spawn(async move {
+        server.run().await.unwrap_or_else(|e| 
+            println!("http1 test: failed tp run server: {:?}", e));
     });
-    let client_task = tokio::spawn(async move {
-        client.run(&server_addr.to_string()).await;
+    tokio::spawn(async move {
+        client.run(&server_addr.to_string()).await
+            .unwrap_or_else(|e| 
+            println!("http1 test: failed tp run client: {:?}", e));
     });
 
     let socket = TcpSocket::new_v4()?;
@@ -42,7 +45,7 @@ pub async fn setup_http1_client() -> Result<(TcpStream, TcpStream), Box<dyn Erro
 
     client_stream.write(request.as_bytes()).await?;
 
-    let (server_stream, client_addr) = listener.accept().await?;
+    let (server_stream, _) = listener.accept().await?;
 
     let mut buf = [0; 65535];
     let mut read = 0;
@@ -97,11 +100,14 @@ pub async fn setup_socks5_tcp_client() -> Result<(TcpStream, TcpStream), Box<dyn
     client.bind("127.0.0.1:0").await?;
     let listen_addr = client.listen_addr().unwrap();
 
-    let server_task = tokio::spawn(async move {
-        server.run().await;
+    tokio::spawn(async move {
+        server.run().await.unwrap_or_else(|e| 
+            println!("socks5 udp test: failed tp run server: {:?}", e));
     });
-    let client_task = tokio::spawn(async move {
-        client.run(&server_addr.to_string()).await;
+    tokio::spawn(async move {
+        client.run(&server_addr.to_string()).await
+            .unwrap_or_else(|e| 
+            println!("socks5 tcp test: failed tp run client: {:?}", e));
     });
 
     let socket = TcpSocket::new_v4()?;
@@ -125,7 +131,7 @@ pub async fn setup_socks5_tcp_client() -> Result<(TcpStream, TcpStream), Box<dyn
     println!("{:02x?}", request);
     client_stream.write(&request).await?;
 
-    let (server_stream, client_addr) = listener.accept().await?;
+    let (server_stream, _) = listener.accept().await?;
     let mut buf = [0; 65535];
     let mut read = 0;
     while read < 6 { // we are expecting a reply of at least 6 bytes
@@ -154,11 +160,14 @@ pub async fn setup_socks5_udp_client() -> Result<(UdpSocket, TcpStream), Box<dyn
     client.bind("127.0.0.1:0").await?;
     let listen_addr = client.listen_addr().unwrap();
 
-    let server_task = tokio::spawn(async move {
-        server.run().await;
+    tokio::spawn(async move {
+        server.run().await.unwrap_or_else(|e| 
+            println!("socks5 udp test: failed tp run server: {:?}", e));
     });
-    let client_task = tokio::spawn(async move {
-        client.run(&server_addr.to_string()).await;
+    tokio::spawn(async move {
+        client.run(&server_addr.to_string()).await
+        .unwrap_or_else(|e| 
+        println!("socks5 udp test: failed tp run client: {:?}", e));
     });
 
     let socket = TcpSocket::new_v4()?;
@@ -166,7 +175,7 @@ pub async fn setup_socks5_udp_client() -> Result<(UdpSocket, TcpStream), Box<dyn
 
     socks5_handshake_no_auth(&mut client_stream).await?;
 
-    let mut request: Vec<u8> = vec![5, 3, 0, 1, 0, 0, 0, 0, 0, 0];
+    let request: Vec<u8> = vec![5, 3, 0, 1, 0, 0, 0, 0, 0, 0];
 
     println!("sending request:");
     println!("{:02x?}", request);
@@ -196,7 +205,7 @@ pub async fn setup_socks5_udp_client() -> Result<(UdpSocket, TcpStream), Box<dyn
 
 async fn socks5_handshake_no_auth(stream: &mut TcpStream) -> Result<(), Box<dyn Error>> {
     let mut buf = [0; 65535];
-    let mut handshake: Vec<u8> = vec![5, 1, 0]; // Ask only for no authentication method
+    let handshake: Vec<u8> = vec![5, 1, 0]; // Ask only for no authentication method
     println!("sending socks5 handshake:");
     println!("{:02x?}", handshake);
     stream.write(&handshake).await?;
@@ -286,7 +295,14 @@ pub async fn assert_socks5_socket_connected(local_socket: &UdpSocket, size: usiz
     println!("{:02x?}", data);
     remote_socket.send_to(&data, peer_addr).await.unwrap();
 
-    let read = timeout(TIMEOUT_DURATION, local_socket.recv(&mut buf)).await.unwrap().unwrap();
+    let read = match timeout(TIMEOUT_DURATION, local_socket.recv(&mut buf)).await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                panic!("local: error at recv: {:?}", e);
+            }
+        }
+        .unwrap();
     println!("local: received packet:");
     println!("{:02x?}", &buf[..read]);
 

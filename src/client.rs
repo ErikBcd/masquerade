@@ -1,9 +1,9 @@
 use quiche;
-use quiche::h3::{Header, NameValue};
+use quiche::h3::NameValue;
 use ring::rand::*;
 
 use std::collections::HashMap;
-use std::error::{self, Error};
+use std::error::Error;
 use std::future::Future;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::{Arc, Mutex};
@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
-use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio::time;
 
 use log::*;
@@ -81,7 +81,7 @@ impl Client {
     ) -> Result<(), Box<dyn Error>> {
         debug!("creating TCP listener");
 
-        let mut listener = TcpListener::bind(bind_addr).await?;
+        let listener = TcpListener::bind(bind_addr).await?;
         debug!("listening on {}", listener.local_addr().unwrap());
 
         self.listener = Some(listener);
@@ -564,7 +564,8 @@ async fn handle_http1_stream(
 
     let mut headers = [httparse::EMPTY_HEADER; 16];
     let mut req = httparse::Request::new(&mut headers);
-    let res = req.parse(&buf[..pos]).unwrap();
+    //let res = req.parse(&buf[..pos]).unwrap();
+    req.parse(&buf[..pos]).unwrap();
     if let Some(method) = req.method {
         if let Some(path) = req.path {
             if method.eq_ignore_ascii_case("CONNECT") {
@@ -711,7 +712,18 @@ async fn handle_http1_stream(
                         };
                     }
                 });
-                tokio::join!(read_task, write_task);
+                match tokio::join!(read_task, write_task) {
+                    (Err(e), Err(e2)) => {
+                        debug!("Two errors occured when joining r/w tasks: {:?} | {:?}", e, e2);
+                    },
+                    (Err(e), _) => {
+                        debug!("An error occured when joining r/w tasks: {:?}", e);
+                    },
+                    (_, Err(e)) => {
+                        debug!("An error occured when joining r/w tasks: {:?}", e);
+                    },
+                    (_, _) => {}
+                };
 
                 // {
                 //     let mut connect_streams = connect_streams.lock().unwrap();
@@ -721,9 +733,14 @@ async fn handle_http1_stream(
             }
         }
     }
-    stream
+    match stream
         .write(&b"HTTP/1.1 400 Bad Request\r\n\r\n".to_vec())
-        .await;
+        .await {
+            Ok(_) => {},
+            Err(e) => {
+                error!("Error when writing 400 to tcp stream: {:?}", e);
+            }
+        };
 }
 
 pub struct Http1Client {
@@ -970,7 +987,19 @@ async fn handle_socks5_stream(
                     };
                 }
             });
-            tokio::join!(read_task, write_task);
+            match tokio::join!(read_task, write_task) {
+                (Err(e), Err(e2)) => {
+                    debug!("Two errors occured when joining r/w tasks: {:?} | {:?}", e, e2);
+                },
+                (Err(e), _) => {
+                    debug!("An error occured when joining r/w tasks: {:?}", e);
+                },
+                (_, Err(e)) => {
+                    debug!("An error occured when joining r/w tasks: {:?}", e);
+                },
+                (_, _) => {}
+            };
+
 
             {
                 // TODO: check whether this can actually trigger
@@ -999,8 +1028,8 @@ async fn handle_socks5_stream(
                     }
                     let bind_socket = Arc::new(bind_socket);
                     let http3_sender_clone = http3_sender.clone();
-                    let mut stream_ids: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
-                    let mut stream_ids_clone = stream_ids.clone();
+                    let stream_ids: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
+                    let stream_ids_clone = stream_ids.clone();
                     let connect_streams_clone = connect_streams.clone();
                     let connect_sockets_clone = connect_sockets.clone();
 
@@ -1279,7 +1308,8 @@ async fn handle_socks5_stream(
                             }
                         }
                     });
-                    tokio::join!(terminate_task);
+                    // TODO: Might wanna handle the return value
+                    let _ = tokio::join!(terminate_task);
                 }
             }
             // TODO: handle termination of UDP assoiciate correctly
@@ -1329,7 +1359,7 @@ fn socks5_addr_to_connect_udp_path(addr: &socks5_proto::Address) -> String {
     let (host, port) = match addr {
         socks5_proto::Address::SocketAddress(socket_addr) => {
             let ip_string = socket_addr.ip().to_string();
-            ip_string.replace(":", "%3A"); // encode ':' in IPv6 address in URI
+            let _ = ip_string.replace(":", "%3A"); // encode ':' in IPv6 address in URI
             (ip_string, socket_addr.port())
         }
         socks5_proto::Address::DomainAddress(domain, port) => (domain.to_owned(), port.to_owned()),
