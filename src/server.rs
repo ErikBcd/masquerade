@@ -331,7 +331,7 @@ async fn handle_client(mut client: Client) {
                             http3_conn.send_response(&mut client.conn, to_send.stream_id, headers, to_send.finished)
                         },
                         Content::Data { data } => {
-                            debug!("sending http3 data of {} bytes", data.len());
+                            debug!("sending http3 data of {} bytes to steam {}", data.len(), to_send.stream_id);
                             let mut written = 0;
                             loop {
                                 if written >= data.len() {
@@ -360,8 +360,15 @@ async fn handle_client(mut client: Client) {
                         },
                         Content::Finished => {
                             debug!("terminating stream {}", to_send.stream_id);
-                            client.conn.stream_shutdown(to_send.stream_id, quiche::Shutdown::Read, 0).expect("Couldn't shutdown stream!");
-                            client.conn.stream_shutdown(to_send.stream_id, quiche::Shutdown::Write, 0).expect("Couldn't shutdown stream!");
+                            if client.conn.stream_finished(to_send.stream_id) {
+                                debug!("stream {} finished", to_send.stream_id);
+                                
+                            } else {
+                                client.conn.stream_shutdown(to_send.stream_id, quiche::Shutdown::Read, 0)
+                                    .expect("Couldn't shutdown stream!");
+                                client.conn.stream_shutdown(to_send.stream_id, quiche::Shutdown::Write, 0)
+                                    .expect("Couldn't shutdown stream!");
+                            }
                             connect_streams.remove(&to_send.stream_id);
                             Ok(())
                         },
@@ -374,9 +381,16 @@ async fn handle_client(mut client: Client) {
                             break;
                         },
                         Err(e) => {
-                            error!("Connection {} stream {} send failed {:?}", client.conn.trace_id(), to_send.stream_id, e);
-                            client.conn.stream_shutdown(to_send.stream_id, quiche::Shutdown::Read, 0).expect("Couldn't shutdown stream!");
-                            client.conn.stream_shutdown(to_send.stream_id, quiche::Shutdown::Write, 0).expect("Couldn't shutdown stream!");
+                            error!("A Connection {} stream {} send failed {:?}", client.conn.trace_id(), to_send.stream_id, e);
+                            if client.conn.stream_finished(to_send.stream_id) {
+                                debug!("stream {} finished", to_send.stream_id);
+                                connect_streams.remove(&to_send.stream_id);
+                            } else {
+                            client.conn.stream_shutdown(to_send.stream_id, quiche::Shutdown::Read, 0)
+                                .expect("Couldn't shutdown stream!");
+                            client.conn.stream_shutdown(to_send.stream_id, quiche::Shutdown::Write, 0)
+                                .expect("Couldn't shutdown stream!");
+                            }
                             connect_streams.remove(&to_send.stream_id);
                         }
                     };
@@ -484,7 +498,7 @@ async fn handle_client(mut client: Client) {
                         http3_retry_send = Some(to_send);
                     },
                     Err(e) => {
-                        error!("Connection {} stream {} send failed {:?}",
+                        error!("B Connection {} stream {} send failed {:?}",
                             client.conn.trace_id(),
                             to_send.stream_id, e);
                         client.conn.stream_shutdown(
@@ -973,6 +987,13 @@ fn handle_http3_event(
         Ok((stream_id, quiche::h3::Event::Finished)) => {
             info!("finished received, stream id: {} closing", stream_id);
             // TODO: do we need to shutdown the stream on our side?
+            if !client.conn.stream_finished(stream_id) {
+                client.conn.stream_shutdown(stream_id, quiche::Shutdown::Read, 0)
+                                    .expect("Couldn't shutdown stream!");
+                client.conn.stream_shutdown(stream_id, quiche::Shutdown::Write, 0)
+                    .expect("Couldn't shutdown stream!");
+            }
+
             if connect_streams.contains_key(&stream_id) {
                 connect_streams.remove(&stream_id);
             }
@@ -984,6 +1005,13 @@ fn handle_http3_event(
                 e, stream_id
             );
             // TODO: do we need to shutdown the stream on our side?
+            if !client.conn.stream_finished(stream_id) {
+                client.conn.stream_shutdown(stream_id, quiche::Shutdown::Read, 0)
+                                    .expect("Couldn't shutdown stream!");
+                client.conn.stream_shutdown(stream_id, quiche::Shutdown::Write, 0)
+                    .expect("Couldn't shutdown stream!");
+            }
+
             if connect_streams.contains_key(&stream_id) {
                 connect_streams.remove(&stream_id);
             }
