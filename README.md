@@ -10,8 +10,8 @@ This fork aims to build up on the original masquerade implementation for the sak
 
 ### Todo:
  * Finish relays (a way to tunnel QUIC traffic via multiple nodes)
- * Fix socks-udp (Broke when updating to the latest quiche version)
- * Fix cases where connections aren't closed properly
+ * ~~Fix socks-udp (Broke when updating to the latest quiche version)~~ Done!
+ * Fix cases where connections aren't shut down properly
  * Refactor some things (Code is hard to read in some places, Error handling is missing)
 
 ## Examples
