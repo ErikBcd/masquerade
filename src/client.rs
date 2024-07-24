@@ -367,12 +367,11 @@ impl Client {
                                             break;
                                         }
                                     }
-                                //http3_conn.send_dgram(&mut conn, to_send.stream_id, &payload)
                             },
                             Content::Finished => {
                                 debug!("shutting down stream");
                                 conn.stream_shutdown(to_send.stream_id, quiche::Shutdown::Read, 0)
-                                    .unwrap_or_else(|e| error!("stream shutdown read failed: {:?}", e));
+                                    .unwrap_or_else(|e| error!("A stream shutdown read failed: {:?}", e));
                                 match conn.stream_shutdown(to_send.stream_id, quiche::Shutdown::Write, 0) {
                                     Ok(v) => Ok(v),
                                     Err(e) => {
@@ -391,10 +390,12 @@ impl Client {
                             },
                             Err(e) => {
                                 error!("Connection {} stream {} send failed {:?}", conn.trace_id(), to_send.stream_id, e);
-                                conn.stream_shutdown(to_send.stream_id, quiche::Shutdown::Read, 0)
-                                    .unwrap_or_else(|e| error!("stream shutdown read failed: {:?}", e));
-                                conn.stream_shutdown(to_send.stream_id, quiche::Shutdown::Write, 0)
-                                    .unwrap_or_else(|e| error!("stream shutdown write failed: {:?}", e));
+                                if !conn.stream_finished(to_send.stream_id) {
+                                    conn.stream_shutdown(to_send.stream_id, quiche::Shutdown::Read, 0)
+                                        .unwrap_or_else(|e| error!("stream shutdown read failed: {:?}", e));
+                                    conn.stream_shutdown(to_send.stream_id, quiche::Shutdown::Write, 0)
+                                        .unwrap_or_else(|e| error!("stream shutdown write failed: {:?}", e));
+                                }
                                 {
                                     let mut connect_streams = connect_streams.lock().unwrap();
                                     connect_streams.remove(&to_send.stream_id);
@@ -646,6 +647,7 @@ async fn handle_http1_stream(
                         };
                         if read == 0 {
                             debug!("TCP connection closed from {}", peer_addr);
+                            // TODO: Do we have to tell the server that the TCP connection is closed?
                             http3_sender_clone
                                 .send(ToSend {
                                     stream_id: stream_id,
@@ -928,6 +930,7 @@ async fn handle_socks5_stream(
                     };
                     if read == 0 {
                         debug!("TCP connection closed from {}", peer_addr);
+                        // TODO: Do we have to tell the server that the TCP connection is closed?
                         break;
                     }
                     debug!(
