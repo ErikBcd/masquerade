@@ -376,6 +376,16 @@ async fn handle_client(mut client: Client) {
                     match result {
                         Ok(_) => {},
                         Err(quiche::h3::Error::StreamBlocked | quiche::h3::Error::Done) => {
+                            if client.conn.stream_finished(to_send.stream_id) {
+                                error!("stream {} finished", to_send.stream_id);
+                                connect_streams.remove(&to_send.stream_id);
+                                client.conn.stream_shutdown(to_send.stream_id, quiche::Shutdown::Read, 0)
+                                    .expect("Couldn't shutdown stream!");
+                                client.conn.stream_shutdown(to_send.stream_id, quiche::Shutdown::Write, 0)
+                                    .expect("Couldn't shutdown stream!");
+                                break;
+                            }
+                            
                             debug!("Connection {} stream {} stream blocked, retry later", client.conn.trace_id(), to_send.stream_id);
                             http3_retry_send = Some(to_send);
                             break;
@@ -857,6 +867,7 @@ fn handle_http3_event(
                                             };
                                             if read == 0 {
                                                 debug!("TCP connection closed from {}", peer_addr);
+                                                // TODO: Do we have to tell the client about this?
                                                 break;
                                             }
                                             debug!(
