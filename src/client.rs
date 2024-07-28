@@ -285,9 +285,9 @@ impl Client {
                                         sender.send(Content::Finished {})
                                             .unwrap_or_else(|e| error!("Could not send finish stream data: {:?}", e));
                                         conn.stream_shutdown(stream_id, quiche::Shutdown::Read, 0)
-                                            .expect("Couldn't shutdown stream!");
+                                            .unwrap_or_else(|e| error!("stream shutdown read failed: {:?}", e));
                                         conn.stream_shutdown(stream_id, quiche::Shutdown::Write, 0)
-                                            .expect("stream shutdown write failed");
+                                            .unwrap_or_else(|e| error!("stream shutdown write failed: {:?}", e));
                                         connect_streams.remove(&stream_id);
                                     }
                                 },
@@ -300,9 +300,9 @@ impl Client {
                                             .unwrap_or_else(|e| error!("Could not send finish stream data: {:?}", e));
                                         
                                         conn.stream_shutdown(stream_id, quiche::Shutdown::Read, 0)
-                                            .expect("Couldn't shutdown stream!");
+                                            .unwrap_or_else(|e| error!("stream shutdown read failed: {:?}", e));
                                         conn.stream_shutdown(stream_id, quiche::Shutdown::Write, 0)
-                                            .expect("stream shutdown write failed");
+                                            .unwrap_or_else(|e| error!("stream shutdown write failed: {:?}", e));
                                             
                                         // TODO: Check how to properly end stream
                                         
@@ -492,6 +492,8 @@ impl Client {
                         },
                         Err(e) => {
                             error!("Connection {} stream {} send failed {:?}", conn.trace_id(), to_send.stream_id, e);
+                            conn.stream_shutdown(to_send.stream_id, quiche::Shutdown::Read, 0)
+                                .unwrap_or_else(|e| error!("stream shutdown read failed: {:?}", e));;
                             conn.stream_shutdown(to_send.stream_id, quiche::Shutdown::Write, 0)
                                 .unwrap_or_else(|e| error!("stream shutdown write failed: {:?}", e));
                             {
