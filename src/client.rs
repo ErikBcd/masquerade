@@ -16,6 +16,13 @@ use tokio::time;
 
 use log::*;
 
+use socks5_proto::{
+    handshake::{
+        Method as HandshakeMethod, Request as HandshakeRequest, Response as HandshakeResponse,
+    },
+    Address, ProtocolError, Reply, Request, Response,
+};
+
 use crate::common::*;
 
 #[derive(Debug)]
@@ -779,7 +786,7 @@ async fn handle_socks5_stream(
     connect_sockets: Arc<Mutex<HashMap<u64, UnboundedSender<Content>>>>,
 ) {
     let peer_addr = stream.peer_addr().unwrap();
-    let hs_req = match socks5_proto::HandshakeRequest::read_from(&mut stream).await {
+    let hs_req = match HandshakeRequest::read_from(&mut stream).await {
         Ok(v) => v,
         Err(e) => {
             error!("socks5 handshake request read failed: {}", e);
@@ -789,9 +796,9 @@ async fn handle_socks5_stream(
 
     if hs_req
         .methods
-        .contains(&socks5_proto::HandshakeMethod::None)
+        .contains(&HandshakeMethod::NONE)
     {
-        let hs_resp = socks5_proto::HandshakeResponse::new(socks5_proto::HandshakeMethod::None);
+        let hs_resp = HandshakeResponse::new(HandshakeMethod::NONE);
         match hs_resp.write_to(&mut stream).await {
             Ok(_) => {}
             Err(e) => {
@@ -802,7 +809,7 @@ async fn handle_socks5_stream(
     } else {
         error!("No available handshake method provided by client, currently only support no auth");
         let hs_resp =
-            socks5_proto::HandshakeResponse::new(socks5_proto::HandshakeMethod::Unacceptable);
+            HandshakeResponse::new(HandshakeMethod::UNACCEPTABLE);
         match hs_resp.write_to(&mut stream).await {
             Ok(_) => {}
             Err(e) => {
@@ -1351,7 +1358,7 @@ impl Socks5Client {
 fn socks5_addr_to_string(addr: &socks5_proto::Address) -> String {
     match addr {
         socks5_proto::Address::SocketAddress(socket_addr) => socket_addr.to_string(),
-        socks5_proto::Address::DomainAddress(domain, port) => format!("{}:{}", domain, port),
+        socks5_proto::Address::DomainAddress(domain, port) => format!("{:?}:{}", domain, port),
     }
 }
 
@@ -1365,7 +1372,10 @@ fn socks5_addr_to_connect_udp_path(addr: &socks5_proto::Address) -> String {
             let _ = ip_string.replace(":", "%3A"); // encode ':' in IPv6 address in URI
             (ip_string, socket_addr.port())
         }
-        socks5_proto::Address::DomainAddress(domain, port) => (domain.to_owned(), port.to_owned()),
+        socks5_proto::Address::DomainAddress(domain, port) => { 
+            let domain_string = format!("{:?}", domain);
+            let _ = domain_string.replace("\"", "");
+            (domain_string, port.to_owned())},
     };
     format!("/.well_known/masque/udp/{}/{}/", host, port)
 }
