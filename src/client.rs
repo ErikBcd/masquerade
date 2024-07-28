@@ -284,6 +284,10 @@ impl Client {
                                     if let Some(sender) = connect_streams.get(&stream_id) {
                                         sender.send(Content::Finished {})
                                             .unwrap_or_else(|e| error!("Could not send finish stream data: {:?}", e));
+                                        conn.stream_shutdown(stream_id, quiche::Shutdown::Read, 0)
+                                            .expect("Couldn't shutdown stream!");
+                                        conn.stream_shutdown(stream_id, quiche::Shutdown::Write, 0)
+                                            .expect("stream shutdown write failed");
                                         connect_streams.remove(&stream_id);
                                     }
                                 },
@@ -294,6 +298,14 @@ impl Client {
                                     if let Some(sender) = connect_streams.get(&stream_id) {
                                         sender.send(Content::Finished {})
                                             .unwrap_or_else(|e| error!("Could not send finish stream data: {:?}", e));
+                                        
+                                        conn.stream_shutdown(stream_id, quiche::Shutdown::Read, 0)
+                                            .expect("Couldn't shutdown stream!");
+                                        conn.stream_shutdown(stream_id, quiche::Shutdown::Write, 0)
+                                            .expect("stream shutdown write failed");
+                                            
+                                        // TODO: Check how to properly end stream
+                                        
                                         connect_streams.remove(&stream_id);
                                     }
                                 },
