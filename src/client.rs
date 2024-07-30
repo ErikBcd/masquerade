@@ -145,8 +145,8 @@ impl Client {
         config.set_initial_max_stream_data_bidi_local(1_000_000);
         config.set_initial_max_stream_data_bidi_remote(1_000_000);
         config.set_initial_max_stream_data_uni(1_000_000);
-        config.set_initial_max_streams_bidi(100);
-        config.set_initial_max_streams_uni(100);
+        config.set_initial_max_streams_bidi(1000);
+        config.set_initial_max_streams_uni(1000);
         config.set_disable_active_migration(true);
         config.enable_dgram(true, 1000, 1000);
 
@@ -501,7 +501,7 @@ impl Client {
                         Err(e) => {
                             error!("Connection {} stream {} send failed {:?}", conn.trace_id(), to_send.stream_id, e);
                             conn.stream_shutdown(to_send.stream_id, quiche::Shutdown::Read, 0)
-                                .unwrap_or_else(|e| error!("stream shutdown read failed: {:?}", e));;
+                                .unwrap_or_else(|e| error!("stream shutdown read failed: {:?}", e));
                             conn.stream_shutdown(to_send.stream_id, quiche::Shutdown::Write, 0)
                                 .unwrap_or_else(|e| error!("stream shutdown write failed: {:?}", e));
                             {

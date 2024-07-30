@@ -125,8 +125,8 @@ impl Server {
         config.set_initial_max_stream_data_bidi_local(1_000_000);
         config.set_initial_max_stream_data_bidi_remote(1_000_000);
         config.set_initial_max_stream_data_uni(1_000_000);
-        config.set_initial_max_streams_bidi(100);
-        config.set_initial_max_streams_uni(100);
+        config.set_initial_max_streams_bidi(1000);
+        config.set_initial_max_streams_uni(1000);
         config.set_disable_active_migration(true);
         config.enable_dgram(true, 1000, 1000);
         config.enable_early_data();
