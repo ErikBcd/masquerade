@@ -15,7 +15,13 @@ use tokio::time::{self, Duration};
 use ring::rand::*;
 
 use crate::common::*;
-use crate::relay::ClientError;
+
+#[derive(Debug)]
+pub enum ClientError {
+    HandshakeFail,
+    HttpFail,
+    Other(String),
+}
 
 #[derive(PartialEq, Debug)]
 enum Content {
