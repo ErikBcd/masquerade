@@ -1,48 +1,9 @@
 use log::info;
 use quiche::h3::NameValue;
 
-use std::collections::HashMap;
 use std::net::{self};
 
 pub const MAX_DATAGRAM_SIZE: usize = 1350;
-
-pub struct PartialRequest {
-    pub req: Vec<u8>,
-}
-
-pub struct PartialResponse {
-    pub headers: Option<Vec<quiche::h3::Header>>,
-    pub priority: Option<quiche::h3::Priority>,
-
-    pub body: Vec<u8>,
-
-    pub written: usize,
-}
-
-pub trait HttpConn {
-    fn send_requests(
-        &mut self, conn: &mut quiche::Connection, target_path: &Option<String>,
-    );
-
-    fn handle_responses(
-        &mut self, conn: &mut quiche::Connection, buf: &mut [u8],
-        req_start: &std::time::Instant,
-    );
-
-    fn report_incomplete(&self, start: &std::time::Instant) -> bool;
-
-    fn handle_requests(
-        &mut self, conn: &mut quiche::Connection,
-        partial_requests: &mut HashMap<u64, PartialRequest>,
-        partial_responses: &mut HashMap<u64, PartialResponse>, root: &str,
-        index: &str, buf: &mut [u8],
-    ) -> quiche::h3::Result<()>;
-
-    fn handle_writable(
-        &mut self, conn: &mut quiche::Connection,
-        partial_responses: &mut HashMap<u64, PartialResponse>, stream_id: u64,
-    );
-}
 
 pub fn send_h3_dgram(
     conn: &mut quiche::Connection, flow_id: u64, dgram_content: &[u8],
