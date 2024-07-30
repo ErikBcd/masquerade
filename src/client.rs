@@ -284,10 +284,14 @@ impl Client {
                                     if let Some(sender) = connect_streams.get(&stream_id) {
                                         sender.send(Content::Finished {})
                                             .unwrap_or_else(|e| error!("Could not send finish stream data: {:?}", e));
-                                        conn.stream_shutdown(stream_id, quiche::Shutdown::Read, 0)
-                                            .unwrap_or_else(|e| error!("stream shutdown read failed: {:?}", e));
-                                        conn.stream_shutdown(stream_id, quiche::Shutdown::Write, 0)
-                                            .unwrap_or_else(|e| error!("stream shutdown write failed: {:?}", e));
+                                        if conn.stream_finished(stream_id) {
+                                            debug!("stream {} finished", stream_id);
+                                        } else {
+                                            conn.stream_shutdown(stream_id, quiche::Shutdown::Read, 0)
+                                                .unwrap_or_else(|e| error!("stream shutdown read failed: {:?}", e));
+                                            conn.stream_shutdown(stream_id, quiche::Shutdown::Write, 0)
+                                                .unwrap_or_else(|e| error!("stream shutdown write failed: {:?}", e));
+                                        }
                                         connect_streams.remove(&stream_id);
                                     }
                                 },
@@ -299,13 +303,14 @@ impl Client {
                                         sender.send(Content::Finished {})
                                             .unwrap_or_else(|e| error!("Could not send finish stream data: {:?}", e));
                                         
-                                        conn.stream_shutdown(stream_id, quiche::Shutdown::Read, 0)
-                                            .unwrap_or_else(|e| error!("stream shutdown read failed: {:?}", e));
-                                        conn.stream_shutdown(stream_id, quiche::Shutdown::Write, 0)
-                                            .unwrap_or_else(|e| error!("stream shutdown write failed: {:?}", e));
-                                            
-                                        // TODO: Check how to properly end stream
-                                        
+                                        if conn.stream_finished(stream_id) {
+                                            debug!("stream {} finished", stream_id);
+                                        } else {
+                                            conn.stream_shutdown(stream_id, quiche::Shutdown::Read, 0)
+                                                .unwrap_or_else(|e| error!("stream shutdown read failed: {:?}", e));
+                                            conn.stream_shutdown(stream_id, quiche::Shutdown::Write, 0)
+                                                .unwrap_or_else(|e| error!("stream shutdown write failed: {:?}", e));
+                                        }
                                         connect_streams.remove(&stream_id);
                                     }
                                 },
@@ -382,13 +387,18 @@ impl Client {
                             },
                             Content::Finished => {
                                 debug!("shutting down stream");
-                                conn.stream_shutdown(to_send.stream_id, quiche::Shutdown::Read, 0)
-                                    .unwrap_or_else(|e| error!("A stream shutdown read failed: {:?}", e));
-                                match conn.stream_shutdown(to_send.stream_id, quiche::Shutdown::Write, 0) {
-                                    Ok(v) => Ok(v),
-                                    Err(e) => {
-                                        error!("stream shutdown failed: {}", e);
-                                        Ok(()) // ignore the error
+                                if conn.stream_finished(to_send.stream_id) {
+                                    debug!("stream {} finished", to_send.stream_id);
+                                    Ok(())
+                                } else {
+                                    conn.stream_shutdown(to_send.stream_id, quiche::Shutdown::Read, 0)
+                                        .unwrap_or_else(|e| error!("A stream shutdown read failed: {:?}", e));
+                                    match conn.stream_shutdown(to_send.stream_id, quiche::Shutdown::Write, 0) {
+                                        Ok(v) => Ok(v),
+                                        Err(e) => {
+                                            error!("stream shutdown failed: {}", e);
+                                            Ok(()) // ignore the error
+                                        }
                                     }
                                 }
                             },
@@ -408,10 +418,8 @@ impl Client {
                                     conn.stream_shutdown(to_send.stream_id, quiche::Shutdown::Write, 0)
                                         .unwrap_or_else(|e| error!("stream shutdown write failed: {:?}", e));
                                 }
-                                {
-                                    let mut connect_streams = connect_streams.lock().unwrap();
-                                    connect_streams.remove(&to_send.stream_id);
-                                }
+                                let mut connect_streams = connect_streams.lock().unwrap();
+                                connect_streams.remove(&to_send.stream_id);
                             }
                         };
                         to_send = match http3_receiver.try_recv() {
