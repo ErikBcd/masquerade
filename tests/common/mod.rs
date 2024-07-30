@@ -2,7 +2,7 @@ use std::error::Error;
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
-use masquerade_proxy::client::Http1Client;
+use masquerade_proxy::http::Http1Client;
 use masquerade_proxy::socks::Socks5Client;
 use masquerade_proxy::server::Server;
 

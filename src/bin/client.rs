@@ -1,4 +1,4 @@
-use masquerade_proxy::client::Http1Client;
+use masquerade_proxy::http::Http1Client;
 use masquerade_proxy::socks::Socks5Client;
 
 use std::env;
