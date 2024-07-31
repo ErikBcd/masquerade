@@ -308,7 +308,8 @@ async fn handle_client(mut client: Client) {
     let mut http3_conn: Option<quiche::h3::Connection> = None;
     let mut connect_streams: HashMap<u64, UnboundedSender<Vec<u8>>> = HashMap::new(); // for TCP CONNECT
     let mut connect_sockets: HashMap<u64, UnboundedSender<Vec<u8>>> = HashMap::new(); // for CONNECT UDP
-                                                                                      // TODO: Add a connect method for http3/QUIC traffic
+    let mut connect_ip: HashMap<u64, UnboundedSender<Vec<u8>>> = HashMap::new(); 
+
     let (http3_sender, mut http3_receiver) = mpsc::unbounded_channel::<ToSend>();
 
     let mut buf = [0; 65535];
@@ -432,6 +433,7 @@ async fn handle_client(mut client: Client) {
                             http3_sender.clone(),
                             &mut connect_sockets,
                             &mut connect_streams,
+                            &mut connect_ip,
                             &mut buf) {
                                 Ok(_) => {},
                                 Err(_) => {
@@ -617,6 +619,7 @@ fn handle_http3_event(
     http3_sender: UnboundedSender<ToSend>,
     connect_sockets: &mut HashMap<u64, UnboundedSender<Vec<u8>>>,
     connect_streams: &mut HashMap<u64, UnboundedSender<Vec<u8>>>,
+    connect_ip: &mut HashMap<u64, UnboundedSender<Vec<u8>>>,
     buf: &mut [u8; 65535],
 ) -> Result<(), ClientError> {
     // Process datagram-related events.
@@ -793,6 +796,131 @@ fn handle_http3_event(
                                         (_, _) => {}
                                     };
                                 });
+                            }
+                        } else if protocol == Some(b"connect-ip") && scheme.is_some() && path.is_some() && !authority.is_empty() {
+                            // TODO: Implement connect-ip support
+                            // Check the path
+                            let path = path.unwrap();
+                            // TODO: Do we need to handle the path differently in connect-ip?
+                            if let Some(peer_addr) = path_to_socketaddr(path) {
+                                debug!(
+                                    "connecting ip to {} at {} from authority {}",
+                                    std::str::from_utf8(&path).unwrap(),
+                                    peer_addr,
+                                    authority
+                                );
+                                // Create new http3 flow
+                                let http3_sender_clone_1 = http3_sender.clone();
+                                let http3_sender_clone_2 = http3_sender.clone();
+                                let (udp_sender, mut udp_receiver) =
+                                    mpsc::unbounded_channel::<Vec<u8>>();
+                                let flow_id = stream_id / 4;
+                                connect_ip.insert(flow_id, udp_sender);
+                                
+                                /* 
+                                tokio::spawn(async move {
+                                    let socket = match UdpSocket::bind("0.0.0.0:0").await {
+                                        Ok(v) => v,
+                                        Err(e) => {
+                                            error!("Error binding UDP socket: {:?}", e);
+                                            return;
+                                        }
+                                    };
+                                    if socket.connect(peer_addr).await.is_err() {
+                                        error!("Error connecting to UDP {}", peer_addr);
+                                        return;
+                                    };
+                                    // TODO: Create TUN for this
+                                    
+                                    let socket = Arc::new(socket);
+                                    let socket_clone = socket.clone();
+                                    let read_task = tokio::spawn(async move {
+                                        let mut buf = [0; 65527]; // max length of UDP Proxying Payload, ref: https://www.rfc-editor.org/rfc/rfc9298.html#name-http-datagram-payload-forma
+                                        loop {
+                                            let read = match socket_clone.recv(&mut buf).await {
+                                                Ok(v) => v,
+                                                Err(e) => {
+                                                    error!("Error reading from UDP {} on stream id {}: {}", peer_addr, stream_id, e);
+                                                    break;
+                                                }
+                                            };
+                                            if read == 0 {
+                                                debug!("UDP connection closed from {}", peer_addr); // do we need this check?
+                                                break;
+                                            }
+                                            debug!(
+                                                "read {} bytes from UDP from {} for flow {}",
+                                                read, peer_addr, flow_id
+                                            );
+                                            let data = wrap_udp_connect_payload(0, &buf[..read]);
+                                            http3_sender_clone_1
+                                                .send(ToSend {
+                                                    stream_id: flow_id,
+                                                    content: Content::Datagram { payload: data },
+                                                    finished: false }
+                                                )
+                                                .unwrap_or_else(|e| debug!("Sending udp connect payload to clone failed: {:?}", e));
+                                        }
+                                    });
+                                    let write_task = tokio::spawn(async move {
+                                        loop {
+                                            let data = match udp_receiver.recv().await {
+                                                Some(v) => v,
+                                                None => {
+                                                    debug!(
+                                                        "UDP receiver channel closed for flow {}",
+                                                        flow_id
+                                                    );
+                                                    break;
+                                                }
+                                            };
+                                            let (context_id, payload) = decode_var_int(&data);
+                                            assert_eq!(context_id, 0, "received UDP Proxying Datagram with non-zero Context ID");
+
+                                            trace!("start sending on UDP");
+                                            let bytes_written = match socket.send(payload).await {
+                                                Ok(v) => v,
+                                                Err(e) => {
+                                                    error!(
+                                                        "Error writing to UDP {} on flow id {}: {}",
+                                                        peer_addr, flow_id, e
+                                                    );
+                                                    return;
+                                                }
+                                            };
+                                            if bytes_written < payload.len() {
+                                                debug!("Partially sent {} bytes of UDP packet of length {}", bytes_written, payload.len());
+                                            }
+                                            debug!(
+                                                "written {} bytes from UDP to {} for flow {}",
+                                                payload.len(),
+                                                peer_addr,
+                                                flow_id
+                                            );
+                                        }
+                                    });
+                                    let headers = vec![quiche::h3::Header::new(b":status", b"200")];
+                                    http3_sender_clone_2
+                                        .send(ToSend {
+                                            stream_id,
+                                            content: Content::Headers { headers },
+                                            finished: false,
+                                        })
+                                        .expect("channel send failed");
+                                    match tokio::join!(read_task, write_task) {
+                                        (Err(e), Err(e2)) => {
+                                            debug!("Two errors occured when joining r/w tasks: {:?} | {:?}", e, e2);
+                                        },
+                                        (Err(e), _) => {
+                                            debug!("An error occured when joining r/w tasks: {:?}", e);
+                                        },
+                                        (_, Err(e)) => {
+                                            debug!("An error occured when joining r/w tasks: {:?}", e);
+                                        },
+                                        (_, _) => {}
+                                    };
+                                });
+                                */
                             }
                         } else if let Ok(target_url) = if authority.contains("://") {
                             url::Url::parse(authority)
