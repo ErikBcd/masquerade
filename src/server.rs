@@ -830,7 +830,8 @@ fn handle_http3_event(
                                         error!("Error connecting to UDP {}", peer_addr);
                                         return;
                                     };
-                                    // TODO: Create TUN for this
+                                    // TODO: Create TUN for this, send/receive external traffic via this TUN interface
+                                    // When we receive traffic put that into http3 packets and send to registered client
                                     
                                     let socket = Arc::new(socket);
                                     let socket_clone = socket.clone();

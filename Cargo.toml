@@ -29,6 +29,9 @@ octets = "0.3"
 
 mio = { version = "1.0.1", features = ["net", "os-poll"] }
 
+tun2 = { version = "2", features = ["async"] }
+packet = "0.1"
+
 [dev-dependencies]
 rand = "0.8"
 env_logger = "*"
