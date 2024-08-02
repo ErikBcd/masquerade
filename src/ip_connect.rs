@@ -37,6 +37,11 @@ impl IPConnectClientStarter {
             move || handle_ip_t(local_client, rx, writer));
 
         // TODO: Spawn handler for QUIC
+        debug!("Spawning HTTP/3 handler");
+        let local_client = self.client.clone();
+        let _t3 = std::thread::spawn(
+            move || handle_http3(local_client)
+        );
 
         loop {
             
