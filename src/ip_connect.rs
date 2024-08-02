@@ -1,33 +1,13 @@
-use std::{error::Error, io::Read, net::{SocketAddr, ToSocketAddrs}, sync::Arc, time::Duration};
+use std::{net::{SocketAddr, ToSocketAddrs}, sync::{Arc, Mutex}};
 
 use log::*;
-use packet::ip;
 use quiche::Connection;
 use ring::rand::{SecureRandom, SystemRandom};
-use tokio::{net::UdpSocket, sync::Mutex, time::sleep};
+use tokio::net::UdpSocket;
 use tun2::platform::Device;
 
 use crate::common::*;
-
-#[derive(Debug, Clone)]
-struct UdpBindError;
-
-impl std::fmt::Display for UdpBindError {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "get_udp(server_addr) has failed!")
-    }
-}
-impl Error for UdpBindError {}
-
-#[derive(Debug, Clone)]
-struct HandleIPError;
-impl std::fmt::Display for HandleIPError {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "get_udp(server_addr) has failed!")
-    }
-}
-impl Error for HandleIPError {}
-
+use crate::ip_connect_util::*;
 pub struct IPConnectClientStarter {
     client: Arc<Mutex<IPConnectClient>>
 }
@@ -38,78 +18,35 @@ impl IPConnectClientStarter {
     }
 
     pub async fn init(&mut self, server_addr: &String, bind_addr: &String) {
-        self.client.lock().await.init(server_addr, bind_addr).await;
+        self.client.lock().unwrap().init(server_addr, bind_addr).await;
     }
 
     pub async fn run(&mut self) {
         // TODO: Figure out how concurrency works in rust
-        loop {
-            sleep(Duration::from_secs(1)).await;
-            println!("I'm still running smile");
-        }
-    }
-
-    /**
-     * Runs a TUN client.
-     * Will spawn threads for receiving and handling incoming IP messages.
-     * 
-     * Currently only handles IPv4 packets!
-     * 
-     * Panics on errors with channels!
-     */
-    pub async fn run_tun(&mut self) {
         let local_client = self.client.clone();
-        let dev = local_client.lock().await
+        let dev = local_client.lock().unwrap()
             .create_tun().await.expect("Could not create TUN device!");
 
-        let (mut reader, mut writer) = dev.split();
-        let (tx, mut rx) = tokio::sync::mpsc::channel(100);
-        
-        // Thread for handling incoming raw ip messages
-        // Sends packets to receiver
-        tokio::spawn(async move {
-            let mut buf = [0; 4096];
-            loop {
-                let size = reader.read(&mut buf)?;
-                let pkt = &buf[..size];
-                if let Err(e) = tx.send(pkt.to_vec()).await {
-                    debug!("Receiver dropped: {:?}", e);
-                    break;
-                };
-            }
-            #[allow(unreachable_code)]
-            Ok::<(), std::io::Error>(())
-        });
-        
-        // Thread for handling received messages
-        // Checks if the packet is an IPv4 packet
-        // Lets the client handle these packets.
-        tokio::spawn(async move {
-            loop {
-                println!("Test");
-                if let Some(pkt) = rx.recv().await {
-                    println!("Received.. something. ");
-                    match ip::Packet::new(pkt.as_slice()) {
-                        Ok(ip::Packet::V4(mut pkt)) => {
-                            local_client.lock().await
-                                .handle_ip_packet(&mut pkt).await.expect("Error handling ip packet");
-                        },
-                        Ok(_) => {
-                            debug!("Received packet with unsupported protocol version.");
-                        }
-                        Err(err) => println!("Received an invalid packet: {:?}", err),
-                    }
-                }
-            }
-        });
+        let (reader, writer) = dev.split();
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        debug!("Spawning IP handlers");
+        let _t1 = std::thread::spawn(
+            move || receive_ip_t(tx, reader));
+        let _t2 = std::thread::spawn(
+            move || handle_ip_t(local_client, rx, writer));
+
+        // TODO: Spawn handler for QUIC
+
         loop {
-            sleep(Duration::from_secs(1)).await;
+            
         }
     }
 }
-struct IPConnectClient {
-    connection: Option<Connection>,
-    udp_socket: Option<UdpSocket>
+
+pub struct IPConnectClient {
+    pub connection: Option<Connection>,
+    pub udp_socket: Option<UdpSocket>
 }
 
 impl IPConnectClient {
@@ -130,7 +67,11 @@ impl IPConnectClient {
      * Creates and binds the UDP socket used for QUIC
      */
     async fn get_udp(&mut self, bind_addr: &String) -> Result<(), UdpBindError> {
-        let server_name = format!("https://{}", bind_addr); // TODO: avoid duplicate https://
+        let mut http_start = "";
+        if !bind_addr.starts_with("https://") {
+            http_start = "https://";
+        }
+        let server_name = format!("{}{}",http_start, bind_addr); 
 
         // Resolve server address.
         let url = url::Url::parse(&server_name).unwrap();
@@ -193,7 +134,7 @@ impl IPConnectClient {
      * 
      * If the packet is malformed we reject it.
      */
-    async fn handle_ip_packet(
+    pub fn handle_ip_packet(
         &mut self, pkt: &mut packet::ip::v4::Packet<&[u8]>) -> Result<Vec<u8>, HandleIPError> {
         println!("Totally handling a packet rn");
         Ok(vec![0, 0, 0])
