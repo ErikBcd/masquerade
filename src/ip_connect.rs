@@ -5,7 +5,7 @@ use packet::ip;
 use quiche::Connection;
 use ring::rand::{SecureRandom, SystemRandom};
 use tokio::{net::UdpSocket, sync::Mutex};
-use tun2::platform::{posix::{Reader, Writer}, Device};
+use tun2::platform::Device;
 
 use crate::common::*;
 
@@ -37,6 +37,14 @@ impl IPConnectClientStarter {
         IPConnectClientStarter {client: Arc::new(Mutex::new(IPConnectClient::new()))}
     }
 
+    /**
+     * Runs a TUN client.
+     * Will spawn threads for receiving and handling incoming IP messages.
+     * 
+     * Currently only handles IPv4 packets!
+     * 
+     * Panics on errors with channels!
+     */
     async fn run_tun(&mut self) {
         let local_client = self.client.clone();
         let dev = local_client.lock().await
@@ -45,7 +53,8 @@ impl IPConnectClientStarter {
         let (mut reader, mut writer) = dev.split();
         let (tx, mut rx) = tokio::sync::mpsc::channel(100);
         
-
+        // Thread for handling incoming raw ip messages
+        // Sends packets to receiver
         tokio::spawn(async move {
             let mut buf = [0; 4096];
             loop {
@@ -60,6 +69,9 @@ impl IPConnectClientStarter {
             Ok::<(), std::io::Error>(())
         });
         
+        // Thread for handling received messages
+        // Checks if the packet is an IPv4 packet
+        // Lets the client handle these packets.
         tokio::spawn(async move {
             loop {
                 if let Some(pkt) = rx.recv().await {
@@ -68,16 +80,16 @@ impl IPConnectClientStarter {
                         Ok(ip::Packet::V4(mut pkt)) => {
                             local_client.lock().await
                                 .handle_ip_packet(&mut pkt).await.expect("Error handling ip packet");
+                        },
+                        Ok(_) => {
+                            debug!("Received packet with unsupported protocol version.");
                         }
                         Err(err) => println!("Received an invalid packet: {:?}", err),
-                        _ => {
-                            println!("receive pkt {:?}", pkt);
-                        }
                     }
                 }
             }
-            #[allow(unreachable_code)]
-            Ok::<(), packet::Error>(())
+            //#[allow(unreachable_code)]
+            //Ok::<(), packet::Error>(())
         });
     }
 }
@@ -99,6 +111,9 @@ impl IPConnectClient {
         self.connect_quic(server_addr).await.expect("Could not connect to QUIC masquerade server!");
     }
 
+    /**
+     * Creates and binds the UDP socket used for QUIC
+     */
     async fn get_udp(&mut self, server_addr: &String) -> Result<(), UdpBindError> {
         let server_name = format!("https://{}", server_addr); // TODO: avoid duplicate https://
 
@@ -126,7 +141,17 @@ impl IPConnectClient {
         Ok(())
     }
 
+    /**
+     * Creates a TUN. 
+     * Currently config is hardcoded:
+     *  - Address = 10.0.0.9
+     *  - Netmaks = 255.255.255.0
+     *  - Dest    = 10.0.0.1
+     * 
+     * Warning: Needs root priviligies on linux!
+     */
     pub async fn create_tun(&mut self) -> Result<Device, tun2::Error> {
+        // TODO: Let user assign IP configuration if needed
         let mut config = tun2::Configuration::default();
         config
             .address((10, 0, 0, 9))
@@ -141,11 +166,26 @@ impl IPConnectClient {
         tun2::create(&config)
     }
 
+    /**
+     * Handles a ip packet
+     * Will check if it is a valid packet,
+     * Then it will check if the client that sent this packet is already known,
+     * and if it has a tunnel established.
+     * 
+     * If not we accept that client and create a new CONNECT_IP HTTP/3 tunnel
+     * 
+     * If a tunnel exists just pack the packet and send it via HTTP/3.
+     * 
+     * If the packet is malformed we reject it.
+     */
     async fn handle_ip_packet(
         &mut self, pkt: &mut packet::ip::v4::Packet<&[u8]>) -> Result<Vec<u8>, HandleIPError> {
         todo!();
     }
 
+    /**
+     * Creates a new QUIC connection and connects to the given server.
+     */
     async fn connect_quic(&mut self, server_addr: &String) -> Result<Connection, quiche::Error> {
         let server_name = format!("https://{}", server_addr); // TODO: avoid duplicate https://
 
