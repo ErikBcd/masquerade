@@ -1,10 +1,11 @@
-use std::{error::Error, net::{SocketAddr, ToSocketAddrs}};
+use std::{error::Error, io::Read, net::{SocketAddr, ToSocketAddrs}, sync::{Arc}};
 
 use log::*;
+use packet::ip;
 use quiche::Connection;
 use ring::rand::{SecureRandom, SystemRandom};
-use tokio::net::UdpSocket;
-use tun2::platform::Device;
+use tokio::{net::UdpSocket, sync::Mutex};
+use tun2::platform::{posix::{Reader, Writer}, Device};
 
 use crate::common::*;
 
@@ -18,8 +19,69 @@ impl std::fmt::Display for UdpBindError {
 }
 impl Error for UdpBindError {}
 
+#[derive(Debug, Clone)]
+struct HandleIPError;
+impl std::fmt::Display for HandleIPError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "get_udp(server_addr) has failed!")
+    }
+}
+impl Error for HandleIPError {}
+
+struct IPConnectClientStarter {
+    client: Arc<Mutex<IPConnectClient>>
+}
+
+impl IPConnectClientStarter {
+    pub fn new() -> IPConnectClientStarter {
+        IPConnectClientStarter {client: Arc::new(Mutex::new(IPConnectClient::new()))}
+    }
+
+    async fn run_tun(&mut self) {
+        let local_client = self.client.clone();
+        let dev = local_client.lock().await
+            .create_tun().await.expect("Could not create TUN device!");
+
+        let (mut reader, mut writer) = dev.split();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(100);
+        
+
+        tokio::spawn(async move {
+            let mut buf = [0; 4096];
+            loop {
+                let size = reader.read(&mut buf)?;
+                let pkt = &buf[..size];
+                if let Err(e) = tx.send(pkt.to_vec()).await {
+                    debug!("Receiver dropped: {:?}", e);
+                    break;
+                };
+            }
+            #[allow(unreachable_code)]
+            Ok::<(), std::io::Error>(())
+        });
+        
+        tokio::spawn(async move {
+            loop {
+                if let Some(pkt) = rx.recv().await {
+                    println!("Received.. something. ");
+                    match ip::Packet::new(pkt.as_slice()) {
+                        Ok(ip::Packet::V4(mut pkt)) => {
+                            local_client.lock().await
+                                .handle_ip_packet(&mut pkt).await.expect("Error handling ip packet");
+                        }
+                        Err(err) => println!("Received an invalid packet: {:?}", err),
+                        _ => {
+                            println!("receive pkt {:?}", pkt);
+                        }
+                    }
+                }
+            }
+            #[allow(unreachable_code)]
+            Ok::<(), packet::Error>(())
+        });
+    }
+}
 struct IPConnectClient {
-    tun_device: Option<Device>,
     connection: Option<Connection>,
     udp_socket: Option<UdpSocket>
 }
@@ -27,7 +89,6 @@ struct IPConnectClient {
 impl IPConnectClient {
     pub fn new() -> IPConnectClient {
         IPConnectClient {
-            tun_device: None,
             connection: None,
             udp_socket: None
         }
@@ -35,7 +96,6 @@ impl IPConnectClient {
 
     pub async fn init(&mut self, server_addr: &String) {
         self.get_udp(server_addr).await.expect("Could not create udp socket!");
-        self.get_tun().await.expect("Could not create TUN!");
         self.connect_quic(server_addr).await.expect("Could not connect to QUIC masquerade server!");
     }
 
@@ -66,7 +126,7 @@ impl IPConnectClient {
         Ok(())
     }
 
-    async fn get_tun(&mut self) -> Result<Device, tun2::Error> {
+    pub async fn create_tun(&mut self) -> Result<Device, tun2::Error> {
         let mut config = tun2::Configuration::default();
         config
             .address((10, 0, 0, 9))
@@ -78,8 +138,11 @@ impl IPConnectClient {
             config.ensure_root_privileges(true);
         });
 
-        self.tun_device = Some(tun2::create(&config)?);
-        // TODO: More init stuff for TUN device
+        tun2::create(&config)
+    }
+
+    async fn handle_ip_packet(
+        &mut self, pkt: &mut packet::ip::v4::Packet<&[u8]>) -> Result<Vec<u8>, HandleIPError> {
         todo!();
     }
 
@@ -127,7 +190,21 @@ impl IPConnectClient {
             hex_dump(&scid)
         );
 
-        // TODO: Establish and add http3 connection, see how client does it
+        let mut buf = [0; 65535];
+        let mut out = [0; MAX_DATAGRAM_SIZE];
+
+        let (write, send_info) = self.connection.as_mut().unwrap()
+            .send(&mut out).expect("initial send failed");
+
+        while let Err(e) = self.udp_socket.as_mut().unwrap()
+            .send_to(&out[..write], send_info.to).await {
+            if e.kind() == std::io::ErrorKind::WouldBlock {
+                debug!("send_to() would block");
+                continue;
+            }
+            panic!("UDP socket send_to() failed: {:?}", e);
+        }
+        debug!("written {}", write);
 
         todo!();
     }
