@@ -1,10 +1,10 @@
-use std::{error::Error, io::Read, net::{SocketAddr, ToSocketAddrs}, sync::{Arc}};
+use std::{error::Error, io::Read, net::{SocketAddr, ToSocketAddrs}, sync::Arc, time::Duration};
 
 use log::*;
 use packet::ip;
 use quiche::Connection;
 use ring::rand::{SecureRandom, SystemRandom};
-use tokio::{net::UdpSocket, sync::Mutex};
+use tokio::{net::UdpSocket, sync::Mutex, time::sleep};
 use tun2::platform::Device;
 
 use crate::common::*;
@@ -28,13 +28,25 @@ impl std::fmt::Display for HandleIPError {
 }
 impl Error for HandleIPError {}
 
-struct IPConnectClientStarter {
+pub struct IPConnectClientStarter {
     client: Arc<Mutex<IPConnectClient>>
 }
 
 impl IPConnectClientStarter {
     pub fn new() -> IPConnectClientStarter {
         IPConnectClientStarter {client: Arc::new(Mutex::new(IPConnectClient::new()))}
+    }
+
+    pub async fn init(&mut self, server_addr: &String, bind_addr: &String) {
+        self.client.lock().await.init(server_addr, bind_addr).await;
+    }
+
+    pub async fn run(&mut self) {
+        // TODO: Figure out how concurrency works in rust
+        loop {
+            sleep(Duration::from_secs(1)).await;
+            println!("I'm still running smile");
+        }
     }
 
     /**
@@ -45,7 +57,7 @@ impl IPConnectClientStarter {
      * 
      * Panics on errors with channels!
      */
-    async fn run_tun(&mut self) {
+    pub async fn run_tun(&mut self) {
         let local_client = self.client.clone();
         let dev = local_client.lock().await
             .create_tun().await.expect("Could not create TUN device!");
@@ -74,6 +86,7 @@ impl IPConnectClientStarter {
         // Lets the client handle these packets.
         tokio::spawn(async move {
             loop {
+                println!("Test");
                 if let Some(pkt) = rx.recv().await {
                     println!("Received.. something. ");
                     match ip::Packet::new(pkt.as_slice()) {
@@ -88,9 +101,10 @@ impl IPConnectClientStarter {
                     }
                 }
             }
-            //#[allow(unreachable_code)]
-            //Ok::<(), packet::Error>(())
         });
+        loop {
+            sleep(Duration::from_secs(1)).await;
+        }
     }
 }
 struct IPConnectClient {
@@ -106,16 +120,17 @@ impl IPConnectClient {
         }
     }
 
-    pub async fn init(&mut self, server_addr: &String) {
-        self.get_udp(server_addr).await.expect("Could not create udp socket!");
-        self.connect_quic(server_addr).await.expect("Could not connect to QUIC masquerade server!");
+    pub async fn init(&mut self, server_addr: &String, bind_addr: &String) {
+        // TODO: Uncommented for testing!
+        //self.get_udp(bind_addr).await.expect("Could not create udp socket!");
+        //self.connect_quic(server_addr).await.expect("Could not connect to QUIC masquerade server!");
     }
 
     /**
      * Creates and binds the UDP socket used for QUIC
      */
-    async fn get_udp(&mut self, server_addr: &String) -> Result<(), UdpBindError> {
-        let server_name = format!("https://{}", server_addr); // TODO: avoid duplicate https://
+    async fn get_udp(&mut self, bind_addr: &String) -> Result<(), UdpBindError> {
+        let server_name = format!("https://{}", bind_addr); // TODO: avoid duplicate https://
 
         // Resolve server address.
         let url = url::Url::parse(&server_name).unwrap();
@@ -180,7 +195,9 @@ impl IPConnectClient {
      */
     async fn handle_ip_packet(
         &mut self, pkt: &mut packet::ip::v4::Packet<&[u8]>) -> Result<Vec<u8>, HandleIPError> {
-        todo!();
+        println!("Totally handling a packet rn");
+        Ok(vec![0, 0, 0])
+        //todo!();
     }
 
     /**
