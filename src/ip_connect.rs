@@ -1,10 +1,13 @@
-use std::{net::{SocketAddr, ToSocketAddrs}, sync::{Arc, Mutex}};
+use std::{collections::HashMap, net::{Ipv4Addr, SocketAddr, ToSocketAddrs}, sync::{Arc, Mutex}, u64};
 
 use log::*;
+use packet::{builder::Builder, icmp, ip, tcp, udp, Packet};
 use quiche::Connection;
 use ring::rand::{SecureRandom, SystemRandom};
-use tokio::net::UdpSocket;
+use tokio::{net::UdpSocket, sync::mpsc::{self, UnboundedSender}};
 use tun2::platform::Device;
+
+use futures::executor;
 
 use crate::common::*;
 use crate::ip_connect_util::*;
@@ -22,7 +25,6 @@ impl IPConnectClientStarter {
     }
 
     pub async fn run(&mut self) {
-        // TODO: Figure out how concurrency works in rust
         let local_client = self.client.clone();
         let dev = local_client.lock().unwrap()
             .create_tun().await.expect("Could not create TUN device!");
@@ -36,34 +38,52 @@ impl IPConnectClientStarter {
         let _t2 = std::thread::spawn(
             move || handle_ip_t(local_client, rx, writer));
 
-        // TODO: Spawn handler for QUIC
-        debug!("Spawning HTTP/3 handler");
-        let local_client = self.client.clone();
-        let _t3 = std::thread::spawn(
-            move || handle_http3(local_client)
-        );
+        //debug!("Spawning HTTP/3 handler");
+        //let local_client = self.client.clone();
+        //let _t3 = std::thread::spawn(
+        //    move || handle_http3(local_client)
+        //);
 
-        loop {
+        // TODO: Threads should inform us that they are finished, 
+        //       while() loop might be unnecessarily CPU intensive
+        //while !_t1.is_finished() && !_t2.is_finished() && !_t3.is_finished() {
+            
+        //}
+        while !_t1.is_finished() && !_t2.is_finished() {
             
         }
     }
 }
 
+/**
+ * A client that sent data via the TUN interface
+ * It has a list of streams which correspond to a number of ports
+ */
+struct IPClient {
+    streams: Arc<Mutex<HashMap<u16, u64>>>
+}
+
 pub struct IPConnectClient {
     pub connection: Option<Connection>,
-    pub udp_socket: Option<UdpSocket>
+    pub udp_socket: Option<UdpSocket>,
+    streams: Arc<Mutex<HashMap<u64, UnboundedSender<Content>>>>,
+    clients: Arc<Mutex<HashMap<Ipv4Addr, IPClient>>>, // Maps clients to streams based on their ip addr
+    http3_sender: Option<Arc<Mutex<UnboundedSender<ToSend>>>>,
 }
 
 impl IPConnectClient {
     pub fn new() -> IPConnectClient {
         IPConnectClient {
             connection: None,
-            udp_socket: None
+            udp_socket: None,
+            streams: Arc::new(Mutex::new(HashMap::new())),
+            clients: Arc::new(Mutex::new(HashMap::new())),
+            http3_sender: None
         }
     }
 
     pub async fn init(&mut self, server_addr: &String, bind_addr: &String) {
-        // TODO: Uncommented for testing!
+        // TODO: Disabled for testing
         //self.get_udp(bind_addr).await.expect("Could not create udp socket!");
         //self.connect_quic(server_addr).await.expect("Could not connect to QUIC masquerade server!");
     }
@@ -141,9 +161,158 @@ impl IPConnectClient {
      */
     pub fn handle_ip_packet(
         &mut self, pkt: &mut packet::ip::v4::Packet<&[u8]>) -> Result<Vec<u8>, HandleIPError> {
-        println!("Totally handling a packet rn");
+        //println!("Totally handling a packet rn");
+        let sender = pkt.source();
+        let dest = pkt.destination();
+        
+        debug!("Handling packet from {} to {}", sender, dest);
+
+        let mut port: u16 = 0;
+
+        // Not sure if we actually need to handle the packets depending on the protocol
+        match pkt.protocol() {
+            ip::Protocol::Icmp => {
+                if let Ok(icmp) = icmp::Packet::new(pkt.payload()) {
+                    if let Ok(icmp) = icmp.echo() {
+                        debug!(
+                            "Received ICMP: Source={:?} | Dest={:?} | Seq={:?}", 
+                            pkt.source(),
+                            pkt.destination(),
+                            icmp.sequence(), 
+                        );
+
+                        let reply = ip::v4::Builder::default()
+                            .id(0x42).unwrap()
+                            .ttl(64).unwrap()
+                            .source(pkt.destination()).unwrap()
+                            .destination(pkt.source()).unwrap()
+                            .icmp().unwrap()
+                            .echo().unwrap()
+                            .reply().unwrap()
+                            .identifier(icmp.identifier()).unwrap()
+                            .sequence(icmp.sequence()).unwrap()
+                            .payload(icmp.payload()).unwrap()
+                            .build().unwrap();
+                        return Ok(reply);
+                    }
+                }
+            },
+            ip::Protocol::Tcp => {
+                if let Ok(tcp) = tcp::Packet::new(pkt.payload()) {
+                    debug!(
+                        "Received TCP: Source={:?} | Dest={:?} | Seq={:?} | Ack={:?}",
+                        tcp.source(),
+                        tcp.destination(),
+                        tcp.sequence(),
+                        tcp.acknowledgment()
+                    );
+                    port = tcp.destination();
+                }
+            },
+            ip::Protocol::Udp => {
+                if let Ok(udp) = udp::Packet::new(pkt.payload()) {
+                    debug!(
+                        "Received UDP: Source={} | Dest={}",
+                        udp.source(),
+                        udp.destination()
+                    );
+                    port = udp.destination();
+                }
+            }
+            _ => {}
+        }
+        // Get a client IP Connect stream (create one of needed)
+        if port == 0 {
+            return Err(HandleIPError {message: "Protocol not implemented".to_owned()});
+        }
+        let streamID = match self.get_or_create_client_stream(port, pkt.source()) {
+            Ok(v) => v,
+            Err(e) => {
+                return Err(HandleIPError {message: e.to_string()});
+            }
+        };
+
+        // Got the correct stream, now we can finally send our content
+        self.send_ip_to_quicstream(streamID, pkt);
+
+        // TODO: Do we have to send anything back instantly?
         Ok(vec![0, 0, 0])
         //todo!();
+    }
+
+    fn send_ip_to_quicstream(&self, streamID: u64, pkt: &mut packet::ip::v4::Packet<&[u8]>) {
+        // TODO
+        todo!()
+    }
+
+    fn get_or_create_client_stream(&self, port: u16, source: Ipv4Addr) -> Result<u64, QUICStreamError> {
+        // Check if given packet already has a stream
+        let binding = self.clients.lock().unwrap();
+        let c = match binding.get(&source) {
+            Some(v) => v,
+            None => {
+                // create a new client 
+                // TODO
+                todo!()
+            }
+        };
+
+        let binding = c.streams.lock().unwrap();
+        match binding.get(&port) {
+            Some(v) => Ok(v.clone()),
+            None => {
+                // Create a new stream and put into client
+                executor::block_on(self.create_connect_ip_stream());
+                
+                // TODO
+                todo!()
+                // Err(QUICStreamError { message: "Could not get stream!".to_owned()})
+            }
+        }
+    }
+
+    /**
+     * Creates a new CONNECT-IP stream and adds it to the existing streams
+     * Returns the streams ID when successful.
+     */
+    async fn create_connect_ip_stream(&self) -> Result<u64, HandleIPError> {
+        // create commect-ip message
+        // TODO: Get authority (address of connect server)
+        let headers = vec![
+            quiche::h3::Header::new(b":method", b"CONNECT"),
+            quiche::h3::Header::new(b":protocol", b"connect-ip"),
+            quiche::h3::Header::new(b":scheme", b"https"), // TODO: Should always be https?
+            quiche::h3::Header::new(b":authority", b""), // TODO
+            quiche::h3::Header::new(b"path", b"/.well-known/masque/ip/*/*/"), 
+            quiche::h3::Header::new(b"connect-ip-version", b"3"),
+        ];
+
+        // Now send content via http3_sender
+        let (stream_id_sender, mut stream_id_receiver) = mpsc::channel(1);
+        let (response_sender, mut response_receiver) = mpsc::unbounded_channel::<Content>();
+        
+        self.http3_sender.as_ref().unwrap().lock().unwrap().send(
+            ToSend { 
+                stream_id: u64::MAX, 
+                content: Content::Request { headers: headers, stream_id_sender: stream_id_sender }, 
+                finished: false }
+        )
+        .unwrap_or_else(|e| error!("sending http3 request failed: {:?}", e));
+
+        let stream_id = stream_id_receiver
+                .recv()
+                .await.expect("stream_id receiver error");
+        
+        {
+            let mut streams = self.streams.lock().unwrap();
+            streams.insert(stream_id, response_sender);
+            // TODO: potential race condition: the response could be received before connect_streams is even inserted and get dropped
+        }
+
+        // TODO: Await response from the server.
+
+        Ok(stream_id)
+        
     }
 
     /**
