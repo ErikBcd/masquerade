@@ -1,12 +1,12 @@
 use std::{
-    collections::HashMap, error::Error, io::Read, sync::{mpsc, Arc, Mutex}, time::Duration
+    collections::HashMap, error::Error, io::{Read, Write}, sync::{Arc, Mutex}, time::Duration
 };
 
 use log::*;
 use packet::ip;
 use quiche::Connection;
 use tun2::platform::posix::{Reader, Writer};
-use tokio::{sync::mpsc::{unbounded_channel, UnboundedSender}, time};
+use tokio::{sync::mpsc::{self, unbounded_channel, UnboundedSender}, time};
 
 use crate::ip_connect::IPConnectClient;
 
@@ -46,17 +46,20 @@ impl std::fmt::Display for UdpBindError {
 impl Error for UdpBindError {}
 
 #[derive(Debug, Clone)]
-pub struct HandleIPError;
+pub struct HandleIPError {
+    pub message: String,
+}
+
 impl std::fmt::Display for HandleIPError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "get_udp(server_addr) has failed!")
+        write!(f, "Unable to handle IP message: {}", self.message)
     }
 }
 impl Error for HandleIPError {}
 
 #[derive(Debug, Clone)]
 pub struct IPError {
-    message: String,
+    pub message: String,
 }
 
 impl std::fmt::Display for IPError {
@@ -64,6 +67,21 @@ impl std::fmt::Display for IPError {
         write!(
             f,
             "get_udp(server_addr) has failed! Error: {}",
+            self.message
+        )
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct QUICStreamError {
+    pub message: String,
+}
+
+impl std::fmt::Display for QUICStreamError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Could not creat IP connect stream! Error: {}",
             self.message
         )
     }
@@ -102,57 +120,24 @@ pub fn handle_ip_t(
 ) -> Result<(), IPError> {
     loop {
         if let Ok(pkt) = rx.recv() {
-            println!("Received.. something. ");
             match ip::Packet::new(pkt.as_slice()) {
                 Ok(ip::Packet::V4(mut pkt)) => {
-                    client
+                    debug!("Received IPv4 packet");
+                    let response = client
                         .lock()
                         .unwrap()
                         .handle_ip_packet(&mut pkt)
                         .expect("Error handling ip packet");
-                    /*
-                    match pkt.protocol() {
-                        ip::Protocol::Icmp => {
-                            if let Ok(icmp) = icmp::Packet::new(pkt.payload()) {
-                                println!("It's a possible icmp packet!");
-                                if let Ok(icmp) = icmp.echo() {
-                                    println!("{:?} - {:?}", icmp.sequence(), pkt.destination());
-                                    let reply = ip::v4::Builder::default()
-                                        .id(0x42).unwrap()
-                                        .ttl(64).unwrap()
-                                        .source(pkt.destination()).unwrap()
-                                        .destination(pkt.source()).unwrap()
-                                        .icmp().unwrap()
-                                        .echo().unwrap()
-                                        .reply().unwrap()
-                                        .identifier(icmp.identifier()).unwrap()
-                                        .sequence(icmp.sequence()).unwrap()
-                                        .payload(icmp.payload()).unwrap()
-                                        .build().unwrap();
-                                    writer.write_all(&reply[..])
-                                        .expect("Error writing to writer");
-                                }
-                            }
-                        },
-                        ip::Protocol::Tcp => {
-                            if let Ok(tcp) = tcp::Packet::new(pkt.payload()) {
-                                println!(
-                                    "Received TCP: Source={:?} | Dest={:?} | Seq={:?} | Ack={:?}",
-                                    tcp.source(),
-                                    tcp.destination(),
-                                    tcp.sequence(),
-                                    tcp.acknowledgment()
-                                );
-                            }
-                        },
-                        _ => {}
-                    }
-                    */
+                    // Send the response created by the handler
+                    // TODO: Maybe we want to create a responder thread that checks a message queue 
+                    //       and sends any messages that are in there.
+                    //writer.write(&response[..])
+                    //    .expect("Error writing to writer!");
+                }
+                Ok(ip::Packet::V6(mut pkt)) => {
+                    debug!("Received IPv6 packet");
                 }
                 Err(err) => println!("Received an invalid packet: {:?}", err),
-                _ => {
-                    println!("receive pkt {:?}", pkt);
-                }
             }
         }
     }
