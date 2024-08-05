@@ -119,14 +119,14 @@ impl Capsule {
         let mut oct = OctetsMut::with_slice(&mut buffer);
 
         match &self.capsule_type {
-            AddressAssign => {
-                self.as_address_assign().unwrap().serialize(&mut oct)
+            CapsuleType::AddressAssign(v) => {
+                v.serialize(&mut oct);
             }
-            AddressRequest => {
-                self.as_address_request().unwrap().serialize(&mut oct)
+            CapsuleType::AddressRequest(v) => {
+                v.serialize(&mut oct);
             },
-            RouteAdvertisement => {
-                self.as_route_advertisement().unwrap().serialize(&mut oct)
+            CapsuleType::RouteAdvertisement(v) => {
+                v.serialize(&mut oct);
             },
         };
         
