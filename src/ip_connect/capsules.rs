@@ -24,11 +24,11 @@ pub enum CapsuleType {
 }
 
 #[derive(PartialEq, Debug)]
-pub enum IP_Length {
+pub enum IpLength {
     V6(u128),
     V4(u32),
 }
-impl std::fmt::Display for IP_Length {
+impl std::fmt::Display for IpLength {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "{:?}", self)
     }
@@ -46,7 +46,7 @@ pub struct AddressAssign {
 pub struct AssignedAddress {
     pub request_id: u64,
     pub ip_version: u8, // either 4 or 6
-    pub ip_address: IP_Length,
+    pub ip_address: IpLength,
     pub ip_prefix_len: u8,
 }
 
@@ -58,7 +58,7 @@ pub struct AddressRequest {
 pub struct RequestedAddress {
     request_id: u64,
     ip_version: u8,        // either 4 or 6
-    ip_address: IP_Length, // length depends on ip_version
+    ip_address: IpLength, // length depends on ip_version
     ip_prefix_len: u8,
 }
 
@@ -69,8 +69,8 @@ pub struct RouteAdvertisement {
 
 pub struct AddressRange {
     ip_version: u8,
-    start_ip: IP_Length, // must be less or equal to end_ip
-    end_ip: IP_Length,
+    start_ip: IpLength, // must be less or equal to end_ip
+    end_ip: IpLength,
     ip_proto: u8, // 0 means any traffic is allowed. ICMP is always allowed
 }
 
@@ -207,10 +207,10 @@ impl AddressAssign {
             buf.put_varint(s.request_id).unwrap();
             buf.put_u8(s.ip_version).unwrap();
             match s.ip_address {
-                IP_Length::V4(v) => {
+                IpLength::V4(v) => {
                     buf.put_u32(v).unwrap();
                 },
-                IP_Length::V6(v) => {
+                IpLength::V6(v) => {
                     buf.put_bytes(&v.to_be_bytes()).unwrap();
                 }
             }
@@ -264,10 +264,10 @@ impl AddressRequest {
             buf.put_varint(s.request_id).unwrap();
             buf.put_u8(s.ip_version).unwrap();
             match s.ip_address {
-                IP_Length::V4(v) => {
+                IpLength::V4(v) => {
                     buf.put_u32(v).unwrap();
                 },
-                IP_Length::V6(v) => {
+                IpLength::V6(v) => {
                     buf.put_bytes(&v.to_be_bytes()).unwrap();
                 }
             }
@@ -317,18 +317,18 @@ impl RouteAdvertisement {
         for s in &self.addr_ranges {
             buf.put_u8(s.ip_version).unwrap();
             match s.start_ip {
-                IP_Length::V4(v) => {
+                IpLength::V4(v) => {
                     buf.put_u32(v).unwrap();
                 },
-                IP_Length::V6(v) => {
+                IpLength::V6(v) => {
                     buf.put_bytes(&v.to_be_bytes()).unwrap();
                 }
             }
             match s.end_ip {
-                IP_Length::V4(v) => {
+                IpLength::V4(v) => {
                     buf.put_u32(v).unwrap();
                 },
-                IP_Length::V6(v) => {
+                IpLength::V6(v) => {
                     buf.put_bytes(&v.to_be_bytes()).unwrap();
                 }
             }
@@ -341,13 +341,13 @@ impl RouteAdvertisement {
 /**
  * Reads an ip from the current position of the given octet.
  */
-fn read_ip(oct: &mut Octets, ip_ver: &u8) -> Result<IP_Length, CapsuleParseError> {
+fn read_ip(oct: &mut Octets, ip_ver: &u8) -> Result<IpLength, CapsuleParseError> {
     let addr = match ip_ver {
-        4 => IP_Length::V4(
+        4 => IpLength::V4(
             oct.get_u32()
                 .map_err(|_| CapsuleParseError::BufferTooShort)?,
         ),
-        6 => IP_Length::V6(
+        6 => IpLength::V6(
             oct.get_u128()
                 .map_err(|_| CapsuleParseError::BufferTooShort)?,
         ),

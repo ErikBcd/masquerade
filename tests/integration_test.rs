@@ -1,5 +1,5 @@
 use log::error;
-use masquerade_proxy::ip_connect::capsules::{AddressAssign, AssignedAddress, Capsule, IP_Length};
+use masquerade_proxy::ip_connect::capsules::{AddressAssign, AssignedAddress, Capsule, IpLength};
 use octets::OctetsMut;
 use tokio::time::timeout;
 use std::{net::Ipv4Addr, str::FromStr, time::Duration};
@@ -77,7 +77,7 @@ async fn capsule_parsing() {
     let ass_addr = AssignedAddress {
         request_id: 0,
         ip_version: 4,
-        ip_address: IP_Length::V4(Ipv4Addr::new(192, 168, 0, 45).into()),
+        ip_address: IpLength::V4(Ipv4Addr::new(192, 168, 0, 45).into()),
         ip_prefix_len: 24
     };
     let addr_assign_real = AddressAssign {
