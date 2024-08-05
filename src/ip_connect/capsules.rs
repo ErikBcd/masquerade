@@ -52,27 +52,27 @@ pub struct AssignedAddress {
 }
 
 pub struct AddressRequest {
-    length: u64,
-    requested: Vec<RequestedAddress>,
+    pub length: u64,
+    pub requested: Vec<RequestedAddress>,
 }
 // Requesting an ip address like 0.0.0.0 or :: means sender doesn't have preference
 pub struct RequestedAddress {
-    request_id: u64,
-    ip_version: u8,        // either 4 or 6
-    ip_address: IpLength, // length depends on ip_version
-    ip_prefix_len: u8,
+    pub request_id: u64,
+    pub ip_version: u8,       // either 4 or 6
+    pub ip_address: IpLength, // length depends on ip_version
+    pub ip_prefix_len: u8,
 }
 
 pub struct RouteAdvertisement {
-    length: u64,
-    addr_ranges: Vec<AddressRange>
+    pub length: u64,
+    pub addr_ranges: Vec<AddressRange>,
 }
 
 pub struct AddressRange {
-    ip_version: u8,
-    start_ip: IpLength, // must be less or equal to end_ip
-    end_ip: IpLength,
-    ip_proto: u8, // 0 means any traffic is allowed. ICMP is always allowed
+    pub ip_version: u8,
+    pub start_ip: IpLength, // must be less or equal to end_ip
+    pub end_ip: IpLength,
+    pub ip_proto: u8, // 0 means any traffic is allowed. ICMP is always allowed
 }
 
 impl Capsule {
@@ -102,22 +102,20 @@ impl Capsule {
                 Ok(v) => CapsuleType::RouteAdvertisement(v),
                 Err(e) => return Err(e),
             },
-            _ => return {
-                Err(CapsuleParseError::InvalidCapsuleType)
-            },
+            _ => return { Err(CapsuleParseError::InvalidCapsuleType) },
         };
 
-        Ok(Capsule { 
+        Ok(Capsule {
             capsule_id: capsule_type_id,
-            capsule_type: c_type })
+            capsule_type: c_type,
+        })
     }
 
     /**
      * Serializes this capsule
      * Can be sent in a HTTP/3 DATA message as the payload.
      */
-    pub fn serialize(&self, buf: &mut [u8]) ->  Vec<u8> {
-        // TODO: Implement this
+    pub fn serialize(&self, buf: &mut [u8]) -> Vec<u8> {
         let mut oct = OctetsMut::with_slice(buf);
 
         oct.put_varint(self.capsule_id).unwrap();
@@ -128,16 +126,15 @@ impl Capsule {
             }
             CapsuleType::AddressRequest(v) => {
                 v.serialize(&mut oct);
-            },
+            }
             CapsuleType::RouteAdvertisement(v) => {
                 v.serialize(&mut oct);
-            },
+            }
         };
-        
+
         return oct.to_vec();
     }
 
-   
     pub fn as_address_assign(&self) -> Option<&AddressAssign> {
         if let CapsuleType::AddressAssign(ref address_assign) = self.capsule_type {
             Some(address_assign)
@@ -161,7 +158,6 @@ impl Capsule {
             None
         }
     }
-    
 }
 
 impl AddressAssign {
@@ -213,7 +209,7 @@ impl AddressAssign {
             match s.ip_address {
                 IpLength::V4(v) => {
                     buf.put_u32(v).unwrap();
-                },
+                }
                 IpLength::V6(v) => {
                     buf.put_bytes(&v.to_be_bytes()).unwrap();
                 }
@@ -270,7 +266,7 @@ impl AddressRequest {
             match s.ip_address {
                 IpLength::V4(v) => {
                     buf.put_u32(v).unwrap();
-                },
+                }
                 IpLength::V6(v) => {
                     buf.put_bytes(&v.to_be_bytes()).unwrap();
                 }
@@ -303,11 +299,16 @@ impl RouteAdvertisement {
                 .get_u8()
                 .map_err(|_| CapsuleParseError::BufferTooShort)?;
 
-            adv.push(AddressRange { ip_version: ip_ver, start_ip: start, end_ip: end, ip_proto: proto });
+            adv.push(AddressRange {
+                ip_version: ip_ver,
+                start_ip: start,
+                end_ip: end,
+                ip_proto: proto,
+            });
         }
         Ok(RouteAdvertisement {
             length: length,
-            addr_ranges: adv
+            addr_ranges: adv,
         })
     }
 
@@ -323,7 +324,7 @@ impl RouteAdvertisement {
             match s.start_ip {
                 IpLength::V4(v) => {
                     buf.put_u32(v).unwrap();
-                },
+                }
                 IpLength::V6(v) => {
                     buf.put_bytes(&v.to_be_bytes()).unwrap();
                 }
@@ -331,7 +332,7 @@ impl RouteAdvertisement {
             match s.end_ip {
                 IpLength::V4(v) => {
                     buf.put_u32(v).unwrap();
-                },
+                }
                 IpLength::V6(v) => {
                     buf.put_bytes(&v.to_be_bytes()).unwrap();
                 }
