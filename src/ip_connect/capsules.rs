@@ -17,51 +17,57 @@ impl std::fmt::Display for CapsuleParseError {
 
 impl std::error::Error for CapsuleParseError {}
 
-enum CapsuleType {
+pub enum CapsuleType {
     AddressAssign(AddressAssign),
     AddressRequest(AddressRequest),
     RouteAdvertisement(RouteAdvertisement),
 }
 
-enum IP_Length {
+#[derive(PartialEq, Debug)]
+pub enum IP_Length {
     V6(u128),
     V4(u32),
 }
-
-struct Capsule {
-    capsule_type: CapsuleType,
+impl std::fmt::Display for IP_Length {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
 }
 
-struct AddressAssign {
-    length: u64,
-    assigned_address: Vec<AssignedAddress>,
+pub struct Capsule {
+    pub capsule_type: CapsuleType,
 }
 
-struct AssignedAddress {
-    request_id: u64,
-    ip_version: u8, // either 4 or 6
-    ip_address: IP_Length,
-    ip_prefix_len: u8,
+pub struct AddressAssign {
+    pub length: u64,
+    pub assigned_address: Vec<AssignedAddress>,
 }
 
-struct AddressRequest {
+pub struct AssignedAddress {
+    pub request_id: u64,
+    pub ip_version: u8, // either 4 or 6
+    pub ip_address: IP_Length,
+    pub ip_prefix_len: u8,
+}
+
+pub struct AddressRequest {
     length: u64,
     requested: Vec<RequestedAddress>,
 }
 // Requesting an ip address like 0.0.0.0 or :: means sender doesn't have preference
-struct RequestedAddress {
+pub struct RequestedAddress {
     request_id: u64,
     ip_version: u8,        // either 4 or 6
     ip_address: IP_Length, // length depends on ip_version
     ip_prefix_len: u8,
 }
 
-struct RouteAdvertisement {
+pub struct RouteAdvertisement {
     length: u64,
     addr_ranges: Vec<AddressRange>
 }
 
-struct AddressRange {
+pub struct AddressRange {
     ip_version: u8,
     start_ip: IP_Length, // must be less or equal to end_ip
     end_ip: IP_Length,
@@ -72,7 +78,7 @@ impl Capsule {
     /**
      * Parses the body of a DATA type HTTP/3 packet.
      */
-    pub fn new(mut buf: &[u8], len: u32) -> Result<Capsule, CapsuleParseError> {
+    pub fn new(buf: &[u8]) -> Result<Capsule, CapsuleParseError> {
         //varint_parse_len(first)
         let mut oct = Octets::with_slice(buf);
 
@@ -80,22 +86,24 @@ impl Capsule {
             .get_varint()
             .map_err(|_| CapsuleParseError::BufferTooShort)?;
         let c_type = match capsule_type_id {
-            0x01 => {
+            1 => {
                 // ADDRESS_ASSIGN
                 match AddressAssign::new(&mut oct) {
                     Ok(v) => CapsuleType::AddressAssign(v),
                     Err(e) => return Err(e),
                 }
             }
-            0x02 => match AddressRequest::new(&mut oct) {
+            2 => match AddressRequest::new(&mut oct) {
                 Ok(v) => CapsuleType::AddressRequest(v),
                 Err(e) => return Err(e),
             },
-            0x03 => match RouteAdvertisement::new(&mut oct) {
+            3 => match RouteAdvertisement::new(&mut oct) {
                 Ok(v) => CapsuleType::RouteAdvertisement(v),
                 Err(e) => return Err(e),
             },
-            _ => return Err(CapsuleParseError::InvalidCapsuleType),
+            _ => return {
+                Err(CapsuleParseError::InvalidCapsuleType)
+            },
         };
 
         Ok(Capsule { capsule_type: c_type })
@@ -160,7 +168,7 @@ impl AddressAssign {
             .get_varint()
             .map_err(|_| CapsuleParseError::BufferTooShort)?;
         let mut adresses: Vec<AssignedAddress> = Vec::new();
-        while oct.off() < oct.len() - 1 {
+        while oct.off() < (length - 1).try_into().unwrap() {
             let req_id = oct
                 .get_varint()
                 .map_err(|_| CapsuleParseError::BufferTooShort)?;
@@ -217,7 +225,7 @@ impl AddressRequest {
             .get_varint()
             .map_err(|_| CapsuleParseError::BufferTooShort)?;
         let mut adresses: Vec<RequestedAddress> = Vec::new();
-        while oct.off() < oct.len() - 1 {
+        while oct.off() < (length - 1).try_into().unwrap() {
             let req_id = oct
                 .get_varint()
                 .map_err(|_| CapsuleParseError::BufferTooShort)?;
@@ -274,7 +282,7 @@ impl RouteAdvertisement {
             .get_varint()
             .map_err(|_| CapsuleParseError::BufferTooShort)?;
         let mut adv: Vec<AddressRange> = Vec::new();
-        while oct.off() < oct.len() - 1 {
+        while oct.off() < (length - 1).try_into().unwrap() {
             let ip_ver = oct
                 .get_u8()
                 .map_err(|_| CapsuleParseError::BufferTooShort)?;
