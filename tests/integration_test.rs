@@ -1,5 +1,5 @@
 use log::error;
-use masquerade_proxy::ip_connect::capsules::{AddressAssign, AssignedAddress, Capsule, IpLength};
+use masquerade_proxy::ip_connect::capsules::{AddressAssign, AddressRequest, AssignedAddress, Capsule, IpLength, RequestedAddress};
 use octets::OctetsMut;
 use tokio::time::timeout;
 use std::{net::Ipv4Addr, str::FromStr, time::Duration};
@@ -55,7 +55,7 @@ async fn end_to_end_socks5_udp_test() {
  * Simple test to check if capsule parsing and serialization works
  */
 #[test_log::test(tokio::test)]
-async fn capsule_parsing() {
+async fn addr_assign_capsule_parsing() {
     // first create example capsule ADDRESS_ASSIGN
     let mut buffer = [0; 128];
 
@@ -135,4 +135,85 @@ async fn capsule_parsing() {
     // TODO: Test for other capsule types and the serialization
 }
 
+/**
+ * Simple test to check if capsule parsing and serialization for 
+ * ADRESS_REQUEST works
+ */
+#[test_log::test(tokio::test)]
+async fn addr_request_capsule_parsing() {
+    // first create example capsule ADDRESS_ASSIGN
+    let mut buffer = [0; 128];
 
+    {
+        let mut addr_request = OctetsMut::with_slice(&mut buffer);
+
+        assert!(addr_request.put_varint(2).is_ok()); // Type
+        assert!(addr_request.put_varint(9).is_ok()); // Length
+        assert!(addr_request.put_varint(0).is_ok()); // Request ID
+        assert!(addr_request.put_u8(4).is_ok()); // IP Version 4
+        assert!(addr_request.put_u32(Ipv4Addr::new(192, 168, 0, 45).into()).is_ok()); // IP 192.168.0.45
+        assert!(addr_request.put_u8(24).is_ok()); // ip prefix
+    }
+    println!("Raw Testdata: {:?}", buffer);
+
+    let cap = Capsule::new(&buffer)
+        .map_err(|e| error!("Could not parse capsule! {:?}", e));
+
+    let ass_addr = RequestedAddress {
+        request_id: 0,
+        ip_version: 4,
+        ip_address: IpLength::V4(Ipv4Addr::new(192, 168, 0, 45).into()),
+        ip_prefix_len: 24
+    };
+    let addr_request_real = AddressRequest {
+        length: 9,
+        requested: vec![ass_addr]
+    };
+    
+    // Ensure both are the same
+    assert_eq!(
+        &cap.as_ref().unwrap().as_address_request().unwrap().length, 
+        &addr_request_real.length, 
+        "Testing on length: {} | {}",
+        &cap.as_ref().unwrap().as_address_request().unwrap().length, 
+        &addr_request_real.length, 
+    );
+
+    assert_eq!(
+        &cap.as_ref().unwrap().as_address_request().unwrap().requested[0].request_id, 
+        &addr_request_real.requested[0].request_id, 
+        "Testing for request ID: {} | {}",
+        &cap.as_ref().unwrap().as_address_request().unwrap().requested[0].request_id, 
+        &addr_request_real.requested[0].request_id, 
+    );
+
+    assert_eq!(
+        &cap.as_ref().unwrap().as_address_request().unwrap().requested[0].ip_version, 
+        &addr_request_real.requested[0].ip_version, 
+        "Testing for ip_version: {} | {}",
+        &cap.as_ref().unwrap().as_address_request().unwrap().requested[0].ip_version, 
+        &addr_request_real.requested[0].ip_version, 
+    );
+
+    assert_eq!(
+        &cap.as_ref().unwrap().as_address_request().unwrap().requested[0].ip_address, 
+        &addr_request_real.requested[0].ip_address, 
+        "Testing for IP: {} | {}",
+        &cap.as_ref().unwrap().as_address_request().unwrap().requested[0].ip_address, 
+        &addr_request_real.requested[0].ip_address, 
+    );
+
+    assert_eq!(
+        &cap.as_ref().unwrap().as_address_request().unwrap().requested[0].ip_prefix_len, 
+        &addr_request_real.requested[0].ip_prefix_len, 
+        "Testing for ip_prefix: {} | {}",
+        &cap.as_ref().unwrap().as_address_request().unwrap().requested[0].ip_prefix_len, 
+        &addr_request_real.requested[0].ip_prefix_len, 
+    );
+
+    // Test serialization
+    let mut testbuf = [0; 128];
+    cap.unwrap().serialize(&mut testbuf);
+
+    assert_eq!(testbuf, buffer, "Testing deserialization: Serialized={:?} | Original={:?}", testbuf, buffer);
+}
