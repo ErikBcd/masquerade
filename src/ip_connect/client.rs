@@ -10,7 +10,7 @@ use tun2::platform::Device;
 use futures::executor;
 
 use crate::common::*;
-use crate::ip_connect_util::*;
+use crate::ip_connect::util::*;
 pub struct IPConnectClientStarter {
     client: Arc<Mutex<IPConnectClient>>
 }
@@ -38,20 +38,20 @@ impl IPConnectClientStarter {
         let _t2 = std::thread::spawn(
             move || handle_ip_t(local_client, rx, writer));
 
-        //debug!("Spawning HTTP/3 handler");
-        //let local_client = self.client.clone();
-        //let _t3 = std::thread::spawn(
-        //    move || handle_http3(local_client)
-        //);
+        debug!("Spawning HTTP/3 handler");
+        let local_client = self.client.clone();
+        let _t3 = std::thread::spawn(
+            move || handle_http3(local_client)
+        );
 
         // TODO: Threads should inform us that they are finished, 
         //       while() loop might be unnecessarily CPU intensive
-        //while !_t1.is_finished() && !_t2.is_finished() && !_t3.is_finished() {
-            
-        //}
-        while !_t1.is_finished() && !_t2.is_finished() {
+        while !_t1.is_finished() && !_t2.is_finished() && !_t3.is_finished() {
             
         }
+        //while !_t1.is_finished() && !_t2.is_finished() {
+            
+        //}
     }
 }
 

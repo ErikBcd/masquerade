@@ -1,4 +1,4 @@
-use masquerade_proxy::ip_connect::IPConnectClientStarter;
+use masquerade_proxy::ip_connect::client::IPConnectClientStarter;
 
 use std::env;
 use std::error::Error;

@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap, error::Error, io::{Read, Write}, sync::{Arc, Mutex}, time::Duration
+    collections::HashMap, error::Error, io::Read, sync::{Arc, Mutex}, time::Duration
 };
 
 use log::*;
@@ -8,7 +8,7 @@ use quiche::Connection;
 use tun2::platform::posix::{Reader, Writer};
 use tokio::{sync::mpsc::{self, unbounded_channel, UnboundedSender}, time};
 
-use crate::ip_connect::IPConnectClient;
+use crate::ip_connect::client::IPConnectClient;
 
 #[derive(Debug)]
 pub enum Content {
