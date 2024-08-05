@@ -1,4 +1,4 @@
-use octets::Octets;
+use octets::{Octets, OctetsMut};
 
 #[derive(Debug)]
 pub enum CapsuleParseError {
@@ -100,6 +100,56 @@ impl Capsule {
 
         Ok(Capsule { capsule_type: c_type })
     }
+
+    /**
+     * Serializes this capsule
+     * Can be sent in a HTTP/3 DATA message as the payload.
+     */
+    pub fn serialize(&self) ->  Vec<u8> {
+        // TODO: Implement this
+        let mut buffer: Vec<u8> = vec![];
+        let mut oct = OctetsMut::with_slice(&mut buffer);
+
+        match &self.capsule_type {
+            AddressAssign => {
+                self.as_address_assign().unwrap().serialize(&mut oct)
+            }
+            AddressRequest => {
+                self.as_address_request().unwrap().serialize(&mut oct)
+            },
+            RouteAdvertisement => {
+                self.as_route_advertisement().unwrap().serialize(&mut oct)
+            },
+        };
+        
+        return oct.to_vec();
+    }
+
+   
+    pub fn as_address_assign(&self) -> Option<&AddressAssign> {
+        if let CapsuleType::AddressAssign(ref address_assign) = self.capsule_type {
+            Some(address_assign)
+        } else {
+            None
+        }
+    }
+
+    pub fn as_address_request(&self) -> Option<&AddressRequest> {
+        if let CapsuleType::AddressRequest(ref address_request) = self.capsule_type {
+            Some(address_request)
+        } else {
+            None
+        }
+    }
+
+    pub fn as_route_advertisement(&self) -> Option<&RouteAdvertisement> {
+        if let CapsuleType::RouteAdvertisement(ref route_advertisement) = self.capsule_type {
+            Some(route_advertisement)
+        } else {
+            None
+        }
+    }
+    
 }
 
 impl AddressAssign {
@@ -137,6 +187,28 @@ impl AddressAssign {
             assigned_address: adresses,
         })
     }
+
+    /**
+     * Serializes this capsule
+     * Can be sent in a HTTP/3 DATA message as the payload.
+     */
+    pub fn serialize(&self, buf: &mut OctetsMut) {
+        buf.put_varint(self.length).unwrap();
+
+        for s in &self.assigned_address {
+            buf.put_varint(s.request_id).unwrap();
+            buf.put_u8(s.ip_version).unwrap();
+            match s.ip_address {
+                IP_Length::V4(v) => {
+                    buf.put_u32(v).unwrap();
+                },
+                IP_Length::V6(v) => {
+                    buf.put_bytes(&v.to_be_bytes()).unwrap();
+                }
+            }
+            buf.put_u8(s.ip_prefix_len).unwrap();
+        }
+    }
 }
 
 impl AddressRequest {
@@ -172,6 +244,28 @@ impl AddressRequest {
             requested: adresses,
         })
     }
+
+    /**
+     * Serializes this capsule
+     * Can be sent in a HTTP/3 DATA message as the payload.
+     */
+    pub fn serialize(&self, buf: &mut OctetsMut) {
+        buf.put_varint(self.length).unwrap();
+
+        for s in &self.requested {
+            buf.put_varint(s.request_id).unwrap();
+            buf.put_u8(s.ip_version).unwrap();
+            match s.ip_address {
+                IP_Length::V4(v) => {
+                    buf.put_u32(v).unwrap();
+                },
+                IP_Length::V6(v) => {
+                    buf.put_bytes(&v.to_be_bytes()).unwrap();
+                }
+            }
+            buf.put_u8(s.ip_prefix_len).unwrap();
+        }
+    }
 }
 
 impl RouteAdvertisement {
@@ -204,8 +298,41 @@ impl RouteAdvertisement {
             addr_ranges: adv
         })
     }
+
+    /**
+     * Serializes this capsule
+     * Can be sent in a HTTP/3 DATA message as the payload.
+     */
+    pub fn serialize(&self, buf: &mut OctetsMut) {
+        buf.put_varint(self.length).unwrap();
+
+        for s in &self.addr_ranges {
+            buf.put_u8(s.ip_version).unwrap();
+            match s.start_ip {
+                IP_Length::V4(v) => {
+                    buf.put_u32(v).unwrap();
+                },
+                IP_Length::V6(v) => {
+                    buf.put_bytes(&v.to_be_bytes()).unwrap();
+                }
+            }
+            match s.end_ip {
+                IP_Length::V4(v) => {
+                    buf.put_u32(v).unwrap();
+                },
+                IP_Length::V6(v) => {
+                    buf.put_bytes(&v.to_be_bytes()).unwrap();
+                }
+            }
+
+            buf.put_u8(s.ip_proto).unwrap();
+        }
+    }
 }
 
+/**
+ * Reads an ip from the current position of the given octet.
+ */
 fn read_ip(oct: &mut Octets, ip_ver: &u8) -> Result<IP_Length, CapsuleParseError> {
     let addr = match ip_ver {
         4 => IP_Length::V4(
