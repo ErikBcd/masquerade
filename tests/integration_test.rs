@@ -126,6 +126,12 @@ async fn capsule_parsing() {
         &addr_assign_real.assigned_address[0].ip_prefix_len, 
     );
 
+    // Test serialization
+    let mut testbuf = [0; 128];
+    cap.unwrap().serialize(&mut testbuf);
+
+    assert_eq!(testbuf, buffer, "Testing deserialization: Serialized={:?} | Original={:?}", testbuf, buffer);
+
     // TODO: Test for other capsule types and the serialization
 }
 
