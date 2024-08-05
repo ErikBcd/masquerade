@@ -35,6 +35,7 @@ impl std::fmt::Display for IpLength {
 }
 
 pub struct Capsule {
+    pub capsule_id: u64,
     pub capsule_type: CapsuleType,
 }
 
@@ -106,17 +107,20 @@ impl Capsule {
             },
         };
 
-        Ok(Capsule { capsule_type: c_type })
+        Ok(Capsule { 
+            capsule_id: capsule_type_id,
+            capsule_type: c_type })
     }
 
     /**
      * Serializes this capsule
      * Can be sent in a HTTP/3 DATA message as the payload.
      */
-    pub fn serialize(&self) ->  Vec<u8> {
+    pub fn serialize(&self, buf: &mut [u8]) ->  Vec<u8> {
         // TODO: Implement this
-        let mut buffer: Vec<u8> = vec![];
-        let mut oct = OctetsMut::with_slice(&mut buffer);
+        let mut oct = OctetsMut::with_slice(buf);
+
+        oct.put_varint(self.capsule_id).unwrap();
 
         match &self.capsule_type {
             CapsuleType::AddressAssign(v) => {
