@@ -2,7 +2,7 @@ use std::{collections::HashMap, net::{Ipv4Addr, SocketAddr, ToSocketAddrs}, sync
 
 use log::*;
 use packet::{builder::Builder, icmp, ip, tcp, udp, Packet};
-use quiche::Connection;
+use quiche::{h3::NameValue, Connection};
 use ring::rand::{SecureRandom, SystemRandom};
 use tokio::{net::UdpSocket, sync::mpsc::{self, UnboundedSender}};
 use tun2::platform::Device;
@@ -22,11 +22,19 @@ impl IPConnectClientStarter {
         IPConnectClientStarter {client: Arc::new(Mutex::new(IPConnectClient::new()))}
     }
 
-    pub async fn init(&mut self, server_addr: &String, bind_addr: &String) {
+    pub async fn run(&mut self, server_addr: &String, bind_addr: &String) {
+        // This creates & connects the TUN interface, the QUIC connection and the http3 stream
         self.client.lock().unwrap().init(server_addr, bind_addr).await;
-    }
 
-    pub async fn run(&mut self) {
+        // Immediately spawn the h3 handler
+        // We expect the server to send ADDRESS_ASSIGN and ROUTE_ADVERTISEMENT 
+        // right after the init
+        debug!("Spawning HTTP/3 handler");
+        let local_client = self.client.clone();
+        let _t3 = std::thread::spawn(
+            move || handle_http3(local_client) 
+        );
+
         let local_client = self.client.clone();
         let dev = local_client.lock().unwrap()
             .create_tun().await.expect("Could not create TUN device!");
@@ -40,37 +48,25 @@ impl IPConnectClientStarter {
         let _t2 = std::thread::spawn(
             move || handle_ip_t(local_client, rx, writer));
 
-        debug!("Spawning HTTP/3 handler");
-        let local_client = self.client.clone();
-        let _t3 = std::thread::spawn(
-            move || handle_http3(local_client)
-        );
-
         // TODO: Threads should inform us that they are finished, 
         //       while() loop might be unnecessarily CPU intensive
         while !_t1.is_finished() && !_t2.is_finished() && !_t3.is_finished() {
             
         }
-        //while !_t1.is_finished() && !_t2.is_finished() {
-            
-        //}
     }
 }
 
-/**
- * A client that sent data via the TUN interface
- * It has a list of streams which correspond to a number of ports
- */
-struct IPClient {
-    sender: UnboundedSender<Content>,
-    streamid: u64
+pub struct QuicStream {
+    pub stream: Arc<Mutex<UnboundedSender<Content>>>,
+    pub stream_id: u64,
+    pub flow_id: u64,
 }
 
 pub struct IPConnectClient {
     pub connection: Option<Connection>,
     pub udp_socket: Option<UdpSocket>,
-    http3_sender: Option<Arc<Mutex<UnboundedSender<ToSend>>>>,
-    ipv4_clients: HashMap<u32, IPClient> 
+    pub http3_sender: Option<Arc<Mutex<UnboundedSender<ToSend>>>>,
+    pub stream: Option<QuicStream>,
 }
 
 impl IPConnectClient {
@@ -79,14 +75,20 @@ impl IPConnectClient {
             connection: None,
             udp_socket: None,
             http3_sender: None,
-            ipv4_clients: HashMap::new(),
+            stream: None,
         }
     }
 
     pub async fn init(&mut self, server_addr: &String, bind_addr: &String) {
-        // TODO: Disabled for testing
-        //self.get_udp(bind_addr).await.expect("Could not create udp socket!");
-        //self.connect_quic(server_addr).await.expect("Could not connect to QUIC masquerade server!");
+        self.get_udp(bind_addr)
+            .await
+            .expect("Could not create udp socket!");
+        self.connect_quic(server_addr)
+            .await
+            .expect("Could not connect to QUIC masquerade server!");
+        self.create_connect_ip_stream()
+            .await
+            .unwrap_or_else(|e| error!("Creating the connect-ip stream failed: {}", e));
     }
 
     /**
@@ -218,53 +220,28 @@ impl IPConnectClient {
             }
             _ => {}
         }
+        
+        todo!();
+    }
 
-        // TODO: On a new message, how do we handle existing clients?
-        //       Do we inform the application of it's new ip address? Or do we map the IP somehow?
-        let client = match self.get_or_create_client_stream(pkt.source()) {
-            Ok(v) => v,
-            Err(e) => {
-                return Err(HandleIPError {message: e.to_string()});
-            }
-        };
-
-        // Got the correct stream, now we can finally send our content
-        self.send_ip_to_quicstream(&client, pkt);
-
-        // TODO: Do we have to send anything back instantly?
-        Ok(vec![0, 0, 0])
-        //todo!();
+    pub fn handle_capsule(&mut self, capsule: Capsule) {
+        todo!()
     }
 
     /**
      * Sends a ipv4 packet to a stream.
      * Will encapsulate the packet into a DATAGRAM
      */
-    fn send_ip_to_quicstream(&self, client: &IPClient, pkt: &mut packet::ip::v4::Packet<&[u8]>) {
+    fn send_ip_to_quicstream(&self, pkt: &mut packet::ip::v4::Packet<&[u8]>) {
         // TODO
         todo!()
     }
 
     /**
-     * Checks if a client with the given IP address already exists 
-     * If not we create one, including it's stream.
+     * Creates a new CONNECT-IP stream and sets it as the currently active stream.
+     * This will also spawn the http3 handler that will wait for new packets.
      */
-    fn get_or_create_client_stream(&self, source: Ipv4Addr) -> Result<&IPClient, QUICStreamError> {
-        // Check if given packet already has a stream
-        match self.ipv4_clients.get(&source.into()) {
-            Some(v) => Ok(&v), // TODO: Test this thorougly
-            None => {
-                Ok(executor::block_on(self.create_connect_ip_stream(source))
-                    .expect("could not create a new ip connect client!"))
-            }
-        }
-    }
-
-    /**
-     * Creates a new CONNECT-IP stream and adds it to the existing streams
-     * Returns the streams ID when successful.
-     */
-    async fn create_connect_ip_stream(&self, source: Ipv4Addr) -> Result<&IPClient, HandleIPError> {
+    async fn create_connect_ip_stream(&mut self) -> Result<(), HandleIPError> {
         // create commect-ip message
         // TODO: Get authority (address of connect server)
         let headers = vec![
@@ -279,7 +256,7 @@ impl IPConnectClient {
         // Now send content via http3_sender
         let (stream_id_sender, mut stream_id_receiver) = mpsc::channel(1);
         let (response_sender, mut response_receiver) = mpsc::unbounded_channel::<Content>();
-        
+
         self.http3_sender.as_ref().unwrap().lock().unwrap().send(
             ToSend { 
                 stream_id: u64::MAX, 
@@ -291,15 +268,67 @@ impl IPConnectClient {
         let stream_id = stream_id_receiver
                 .recv()
                 .await.expect("stream_id receiver error");
-        let mut client = IPClient {
-            sender: response_sender,
-            streamid: stream_id
-        };
+        let flow_id = stream_id / 4;
 
-        // TODO: Now save the new client. Responses from the server will be caught by the 
-        //       http/3 receive thread.
-        //       Below code can be transferred once the http/3 receiver thread is closer to being done.
+        // Save this stream we just created
+        {
+            self.stream = Some(QuicStream {
+                stream: Arc::new(Mutex::new(response_sender)),
+                stream_id: stream_id,
+                flow_id: flow_id
+            });
+        }
+        
+        let mut succeeded = false;
 
+        let response = response_receiver
+            .recv()
+            .await
+            .expect("http3 response receiver error");
+
+        // Check if the response was positive
+        // We expect the status code to be in 2xx range
+        if let Content::Headers { headers } = response {
+            debug!(
+                "Got response {:?}",
+                hdrs_to_strings(&headers)
+            );
+
+            let mut status = None;
+            for hdr in headers {
+                match hdr.name() {
+                    b":status" => {
+                        status = Some(hdr.value().to_owned())
+                    }
+                    _ => (),
+                }
+            }
+
+            if let Some(status) = status {
+                if let Ok(status_str) =
+                    std::str::from_utf8(&status)
+                {
+                    if let Ok(status_code) =
+                        status_str.parse::<i32>()
+                    {
+                        if status_code >= 200
+                            && status_code < 300
+                        {
+                            succeeded = true;
+                            debug!("CONNECT-IP connection established for flow {}", flow_id);
+                        }
+                    }
+                }
+            }
+        } else {
+            error!("received others when expecting headers for connect");
+        }
+
+        if !succeeded {
+            error!("http3 CONNECT UDP failed");
+            self.stream = None;
+            return Err(HandleIPError { message: "http3 CONNECT UDP failed".to_string() });
+        }
         // Now send address assign capsule via data stream
 
         let addr_request = RequestedAddress {
@@ -331,20 +360,18 @@ impl IPConnectClient {
                 finished: false }
         ).unwrap_or_else(|e| error!("sending http3 data capsule failed: {:?}", e));
 
-        // TODO: Wait for IP answer
-        // After that we expect a route advertisement as well
-
-
-
         todo!()
-        
     }
 
     /**
      * Creates a new QUIC connection and connects to the given server.
      */
     async fn connect_quic(&mut self, server_addr: &String) -> Result<Connection, quiche::Error> {
-        let server_name = format!("https://{}", server_addr); // TODO: avoid duplicate https://
+        let mut http_start = "";
+        if !server_addr.starts_with("https://") {
+            http_start = "https://";
+        }
+        let server_name = format!("{}{}",http_start, server_addr); 
 
         // Resolve server address.
         let url = url::Url::parse(&server_name).unwrap();
@@ -404,6 +431,10 @@ impl IPConnectClient {
         debug!("written {}", write);
 
         todo!();
+    }
+
+    pub fn get_pending_quic_messages(&self) -> Vec<Vec<u8>> {
+        todo!()
     }
 }
 

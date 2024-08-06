@@ -3,12 +3,13 @@ use std::{
 };
 
 use log::*;
+use octets::varint_len;
 use packet::ip;
 use quiche::Connection;
 use tun2::platform::posix::{Reader, Writer};
 use tokio::{sync::mpsc::{self, unbounded_channel, UnboundedSender}, time};
 
-use crate::ip_connect::client::IPConnectClient;
+use crate::{common::{hdrs_to_strings, MAX_DATAGRAM_SIZE}, ip_connect::{capsules::Capsule, client::IPConnectClient}};
 
 #[derive(Debug)]
 pub enum Content {
@@ -131,8 +132,6 @@ pub fn handle_ip_t(
                     // Send the response created by the handler
                     // TODO: Maybe we want to create a responder thread that checks a message queue 
                     //       and sends any messages that are in there.
-                    //writer.write(&response[..])
-                    //    .expect("Error writing to writer!");
                 }
                 Ok(ip::Packet::V6(mut pkt)) => {
                     debug!("Received IPv6 packet");
@@ -143,71 +142,173 @@ pub fn handle_ip_t(
     }
 }
 
+/**
+ * Handles incoming http3 messages and sends messages that have appeared.
+ */
 pub fn handle_http3(
     client: Arc<Mutex<IPConnectClient>>
 ) {
-    // TODO: How long do we even allow this to be?
     let mut buf = [0; 65535];
-    // create new http3 connection and then wait for events
-    let mut http3_conn: Option<quiche::h3::Connection> = None;
-    let (http3_sender, mut http3_receiver) = unbounded_channel::<ToSend>();
-    let connect_streams: Arc<Mutex<HashMap<u64, UnboundedSender<Content>>>> =
-        Arc::new(Mutex::new(HashMap::new()));
-    let connect_sockets: Arc<Mutex<HashMap<u64, UnboundedSender<Content>>>> =
-        Arc::new(Mutex::new(HashMap::new()));
-    let mut http3_retry_send: Option<ToSend> = None;
-    let mut interval = time::interval(Duration::from_millis(20));
-    interval.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
-    if client.lock().unwrap().connection.is_none() {
-        error!("Wanted to handle http3, but connection was none!");
-    }
-
-    // TODO: Does the connection stay locked this way?
-    // Also: This isn't copied, right?
+    let mut out = [0; MAX_DATAGRAM_SIZE];
     let mut binding = client.lock().unwrap();
     let mut conn = binding.connection.as_mut().unwrap();
+    let mut binding = client.lock().unwrap();
+    let mut udp_socket = binding.udp_socket.as_mut().unwrap();
 
+    let mut http3_conn: Option<quiche::h3::Connection> = None;
     loop {
         if conn.is_closed() {
             info!("connection closed, {:?}", conn.stats());
             break;
         }
-        handle_h3_dgram(&mut buf, &connect_sockets, conn);
 
-        // TODO: handle h3 connection data
-
-    }
-}
-
-fn handle_h3_dgram(
-    buf: &mut [u8], 
-    connect_sockets: &Arc<Mutex<HashMap<u64, UnboundedSender<Content>>>>, 
-    conn: &mut Connection) 
-    {
-    while let Ok(len) = conn.dgram_recv(buf) {
-        let mut b = octets::Octets::with_slice(buf);
-        if let Ok(flow_id) = b.get_varint() {
-            info!(
-                "Received DATAGRAM flow_id={} len={} buf={:02x?}",
-                flow_id,
-                len,
-                buf[0..len].to_vec()
+        if conn.is_established() && http3_conn.is_none() {
+            let h3_config = quiche::h3::Config::new().unwrap();
+            http3_conn = Some(
+                quiche::h3::Connection::with_transport(&mut conn, &h3_config)
+                .expect("Unable to create HTTP/3 connection, check the server's uni stream limit and window size"),
             );
-
-            let flow_id_len: usize = (flow_id.checked_ilog10().unwrap_or(0) + 1)
-                .try_into()
-                .unwrap();
-            info!("flow_id_len={}", flow_id_len);
-            let connect_sockets = connect_sockets.lock().unwrap();
-            if let Some(sender) = connect_sockets.get(&flow_id) {
-                sender
-                    .send(Content::Datagram {
-                        payload: buf[flow_id_len..len].to_vec(),
-                    })
-                    .unwrap_or_else(|e| error!("Could not send dgram payload {:?}", e));
-            }
-        } else {
-            error!("Could not get varint from dgram!");
         }
+
+        // First check for datagrams
+        while let Ok(len) = conn.dgram_recv(&mut buf) {
+            let mut b = octets::Octets::with_slice(&mut buf);
+            if let Ok(flow_id) = b.get_varint() {
+                let context_id = match b.get_varint() {
+                    Ok(v) => v,
+                    Err(e) => {
+                        debug!("DATAGRAM without context ID: {}", e);
+                        continue;
+                    }
+                };
+                // TODO: Handle context IDs, for now we only accept 0
+                if context_id != 0 {
+                    continue;
+                }
+                let header_len = varint_len(flow_id) + varint_len(context_id);
+                match ip::Packet::new(buf[header_len..len].to_vec().as_slice()) {
+                    Ok(ip::Packet::V4(mut pkt)) => {
+                        debug!("Received IPv4 packet via http3");
+                        // TODO: Send packet to TUN interface
+                        //       Do we have to do anything else before that? 
+                        //       Might need to change the IP depending on the servers answer
+                        //       to our address request
+                    }
+                    Ok(ip::Packet::V6(_)) => {
+                        debug!("Received IPv6 packet via http3 (not implemented yet)");
+                        continue;
+                    }
+                    Err(err) => {
+                        debug!("Received an invalid packet: {:?}", err)
+                    },
+                }
+            }
+        }
+
+
+            // handle QUIC received data
+        let recvd = futures::executor::block_on(udp_socket.recv_from(&mut buf));
+        
+        let (read, from) = match recvd {
+            Ok(v) => v,
+            Err(e) => {
+                error!("error when reading from UDP socket: {:?}", e);
+                continue
+            },
+        };
+        debug!("received {} bytes", read);
+        let recv_info = quiche::RecvInfo {
+            to: udp_socket.local_addr().unwrap(),
+            from,
+        };
+
+        // Process potentially coalesced packets.
+        let read = match conn.recv(&mut buf[..read], recv_info) {
+            Ok(v) => v,
+
+            Err(e) => {
+                error!("QUIC recv failed: {:?}", e);
+                continue
+            },
+        };
+        debug!("processed {} bytes", read);
+
+        if let Some(http3_conn) = &mut http3_conn {
+            // Process HTTP/3 events.
+            loop {
+                debug!("polling on http3 connection");
+                match http3_conn.poll(&mut conn) {
+                    Ok((stream_id, quiche::h3::Event::Headers { list, .. })) => {
+                        info!("got response headers {:?} on stream id {}", hdrs_to_strings(&list), stream_id);
+                        // TODO: Can we just ignore headers that occur now?
+                    },
+
+                    Ok((stream_id, quiche::h3::Event::Data)) => {
+                        debug!("received stream data");
+                        while let Ok(read) = http3_conn.recv_body(&mut conn, stream_id, &mut buf) {
+                            // we only receive capsules via data, so parse this capsule
+                            match Capsule::new(&buf) {
+                                Ok(v) => {
+                                    client.lock().unwrap().handle_capsule(v);
+                                },
+                                Err(e) => {
+                                    debug!("Couldn't parse capsule: {}", e);
+                                }
+                            }
+
+                        }
+                    },
+
+                    Ok((stream_id, quiche::h3::Event::Finished)) => {
+                        info!("finished received, stream id: {} closing", stream_id);
+                        // Shut down the stream
+                        // TODO: If this stream is the main connect-ip stream, we have to exit or 
+                        //       create a new one
+                        if conn.stream_finished(stream_id) {
+                            debug!("stream {} finished", stream_id);
+                        } else {
+                            conn.stream_shutdown(stream_id, quiche::Shutdown::Read, 0)
+                                .unwrap_or_else(|e| error!("stream shutdown read failed: {:?}", e));
+                            conn.stream_shutdown(stream_id, quiche::Shutdown::Write, 0)
+                                .unwrap_or_else(|e| error!("stream shutdown write failed: {:?}", e));
+                        }
+
+                    },
+
+                    Ok((stream_id, quiche::h3::Event::Reset(e))) => {
+                        error!("request was reset by peer with {}, stream id: {} closed", e, stream_id);
+                        // Shut down the stream
+                        // TODO: If this stream is the main connect-ip stream, we have to exit or 
+                        //       create a new one
+                        if conn.stream_finished(stream_id) {
+                            debug!("stream {} finished", stream_id);
+                        } else {
+                            conn.stream_shutdown(stream_id, quiche::Shutdown::Read, 0)
+                                .unwrap_or_else(|e| error!("stream shutdown read failed: {:?}", e));
+                            conn.stream_shutdown(stream_id, quiche::Shutdown::Write, 0)
+                                .unwrap_or_else(|e| error!("stream shutdown write failed: {:?}", e));
+                        }
+                        
+                    },
+                    Ok((_, quiche::h3::Event::PriorityUpdate)) => unreachable!(),
+
+                    Ok((goaway_id, quiche::h3::Event::GoAway)) => {
+                        info!("GOAWAY id={}", goaway_id);
+                    },
+
+                    Err(quiche::h3::Error::Done) => {
+                        debug!("poll done");
+                        break;
+                    },
+
+                    Err(e) => {
+                        error!("HTTP/3 processing failed: {:?}", e);
+                        break;
+                    },
+                };
+            }
+        }
+        
+        
     }
 }

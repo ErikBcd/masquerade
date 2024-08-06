@@ -17,8 +17,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .unwrap_or_else(|| "127.0.0.1:8899".to_string());
 
     let mut client = IPConnectClientStarter::new();
-    client.init(&server_name, &bind_addr).await;
-    client.run().await;
+    client.run(&server_name, &bind_addr).await;
 
     Ok(())
 }
