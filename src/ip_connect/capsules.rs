@@ -102,7 +102,7 @@ impl Capsule {
                 Ok(v) => CapsuleType::RouteAdvertisement(v),
                 Err(e) => return Err(e),
             },
-            _ => return { Err(CapsuleParseError::InvalidCapsuleType) },
+            _ => return Err(CapsuleParseError::InvalidCapsuleType),
         };
 
         Ok(Capsule {

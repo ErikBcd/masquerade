@@ -11,6 +11,8 @@ use futures::executor;
 
 use crate::common::*;
 use crate::ip_connect::util::*;
+
+use super::capsules::{AddressAssign, AddressRequest, AssignedAddress, Capsule, IpLength, RequestedAddress};
 pub struct IPConnectClientStarter {
     client: Arc<Mutex<IPConnectClient>>
 }
@@ -60,15 +62,15 @@ impl IPConnectClientStarter {
  * It has a list of streams which correspond to a number of ports
  */
 struct IPClient {
-    streams: Arc<Mutex<HashMap<u16, u64>>>
+    sender: UnboundedSender<Content>,
+    streamid: u64
 }
 
 pub struct IPConnectClient {
     pub connection: Option<Connection>,
     pub udp_socket: Option<UdpSocket>,
-    streams: Arc<Mutex<HashMap<u64, UnboundedSender<Content>>>>,
-    clients: Arc<Mutex<HashMap<Ipv4Addr, IPClient>>>, // Maps clients to streams based on their ip addr
     http3_sender: Option<Arc<Mutex<UnboundedSender<ToSend>>>>,
+    ipv4_clients: HashMap<u32, IPClient> 
 }
 
 impl IPConnectClient {
@@ -76,9 +78,8 @@ impl IPConnectClient {
         IPConnectClient {
             connection: None,
             udp_socket: None,
-            streams: Arc::new(Mutex::new(HashMap::new())),
-            clients: Arc::new(Mutex::new(HashMap::new())),
-            http3_sender: None
+            http3_sender: None,
+            ipv4_clients: HashMap::new(),
         }
     }
 
@@ -167,9 +168,7 @@ impl IPConnectClient {
         
         debug!("Handling packet from {} to {}", sender, dest);
 
-        let mut port: u16 = 0;
-
-        // Not sure if we actually need to handle the packets depending on the protocol
+        // TODO: Remove this, it's only for debugging 
         match pkt.protocol() {
             ip::Protocol::Icmp => {
                 if let Ok(icmp) = icmp::Packet::new(pkt.payload()) {
@@ -206,7 +205,6 @@ impl IPConnectClient {
                         tcp.sequence(),
                         tcp.acknowledgment()
                     );
-                    port = tcp.destination();
                 }
             },
             ip::Protocol::Udp => {
@@ -216,16 +214,14 @@ impl IPConnectClient {
                         udp.source(),
                         udp.destination()
                     );
-                    port = udp.destination();
                 }
             }
             _ => {}
         }
-        // Get a client IP Connect stream (create one of needed)
-        if port == 0 {
-            return Err(HandleIPError {message: "Protocol not implemented".to_owned()});
-        }
-        let streamID = match self.get_or_create_client_stream(port, pkt.source()) {
+
+        // TODO: On a new message, how do we handle existing clients?
+        //       Do we inform the application of it's new ip address? Or do we map the IP somehow?
+        let client = match self.get_or_create_client_stream(pkt.source()) {
             Ok(v) => v,
             Err(e) => {
                 return Err(HandleIPError {message: e.to_string()});
@@ -233,40 +229,33 @@ impl IPConnectClient {
         };
 
         // Got the correct stream, now we can finally send our content
-        self.send_ip_to_quicstream(streamID, pkt);
+        self.send_ip_to_quicstream(&client, pkt);
 
         // TODO: Do we have to send anything back instantly?
         Ok(vec![0, 0, 0])
         //todo!();
     }
 
-    fn send_ip_to_quicstream(&self, streamID: u64, pkt: &mut packet::ip::v4::Packet<&[u8]>) {
+    /**
+     * Sends a ipv4 packet to a stream.
+     * Will encapsulate the packet into a DATAGRAM
+     */
+    fn send_ip_to_quicstream(&self, client: &IPClient, pkt: &mut packet::ip::v4::Packet<&[u8]>) {
         // TODO
         todo!()
     }
 
-    fn get_or_create_client_stream(&self, port: u16, source: Ipv4Addr) -> Result<u64, QUICStreamError> {
+    /**
+     * Checks if a client with the given IP address already exists 
+     * If not we create one, including it's stream.
+     */
+    fn get_or_create_client_stream(&self, source: Ipv4Addr) -> Result<&IPClient, QUICStreamError> {
         // Check if given packet already has a stream
-        let binding = self.clients.lock().unwrap();
-        let c = match binding.get(&source) {
-            Some(v) => v,
+        match self.ipv4_clients.get(&source.into()) {
+            Some(v) => Ok(&v), // TODO: Test this thorougly
             None => {
-                // create a new client 
-                // TODO
-                todo!()
-            }
-        };
-
-        let binding = c.streams.lock().unwrap();
-        match binding.get(&port) {
-            Some(v) => Ok(v.clone()),
-            None => {
-                // Create a new stream and put into client
-                executor::block_on(self.create_connect_ip_stream());
-                
-                // TODO
-                todo!()
-                // Err(QUICStreamError { message: "Could not get stream!".to_owned()})
+                Ok(executor::block_on(self.create_connect_ip_stream(source))
+                    .expect("could not create a new ip connect client!"))
             }
         }
     }
@@ -275,7 +264,7 @@ impl IPConnectClient {
      * Creates a new CONNECT-IP stream and adds it to the existing streams
      * Returns the streams ID when successful.
      */
-    async fn create_connect_ip_stream(&self) -> Result<u64, HandleIPError> {
+    async fn create_connect_ip_stream(&self, source: Ipv4Addr) -> Result<&IPClient, HandleIPError> {
         // create commect-ip message
         // TODO: Get authority (address of connect server)
         let headers = vec![
@@ -302,16 +291,52 @@ impl IPConnectClient {
         let stream_id = stream_id_receiver
                 .recv()
                 .await.expect("stream_id receiver error");
-        
-        {
-            let mut streams = self.streams.lock().unwrap();
-            streams.insert(stream_id, response_sender);
-            // TODO: potential race condition: the response could be received before connect_streams is even inserted and get dropped
-        }
+        let mut client = IPClient {
+            sender: response_sender,
+            streamid: stream_id
+        };
 
-        // TODO: Await response from the server.
+        // TODO: Now save the new client. Responses from the server will be caught by the 
+        //       http/3 receive thread.
+        //       Below code can be transferred once the http/3 receiver thread is closer to being done.
 
-        Ok(stream_id)
+        // Now send address assign capsule via data stream
+
+        let addr_request = RequestedAddress {
+            request_id: 0,
+            ip_version: 4,
+            ip_address: IpLength::V4(
+                Ipv4Addr::new(0, 0, 0, 0).into()
+            ),
+            ip_prefix_len: 32
+        };
+
+        let request_capsule = AddressRequest {
+            length: 9,
+            requested: vec![addr_request]
+        };
+
+        let cap = Capsule {
+            capsule_id: 1,
+            capsule_type: super::capsules::CapsuleType::AddressRequest(request_capsule)
+        };
+
+        let mut buf = [0; 9];
+        cap.serialize(&mut buf);
+
+        self.http3_sender.as_ref().unwrap().lock().unwrap().send(
+            ToSend { 
+                stream_id: stream_id, 
+                content: Content::Data { data: buf.to_vec() }, 
+                finished: false }
+        ).unwrap_or_else(|e| error!("sending http3 data capsule failed: {:?}", e));
+
+        // TODO: Wait for IP answer
+        // After that we expect a route advertisement as well
+
+
+
+        todo!()
         
     }
 
