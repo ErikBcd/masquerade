@@ -1,4 +1,4 @@
-use std::{collections::HashMap, net::{Ipv4Addr, SocketAddr, ToSocketAddrs}, sync::{Arc, Mutex}, u64};
+use std::{net::{Ipv4Addr, SocketAddr, ToSocketAddrs}, sync::{Arc, Mutex}};
 
 use log::*;
 use packet::{builder::Builder, icmp, ip, tcp, udp, Packet};
@@ -7,12 +7,11 @@ use ring::rand::{SecureRandom, SystemRandom};
 use tokio::{net::UdpSocket, sync::mpsc::{self, UnboundedSender}};
 use tun2::platform::Device;
 
-use futures::executor;
 
 use crate::common::*;
 use crate::ip_connect::util::*;
 
-use super::capsules::{AddressAssign, AddressRequest, AssignedAddress, Capsule, IpLength, RequestedAddress};
+use super::capsules::{AddressRequest, Capsule, IpLength, RequestedAddress};
 pub struct IPConnectClientStarter {
     client: Arc<Mutex<IPConnectClient>>
 }
@@ -232,8 +231,12 @@ impl IPConnectClient {
      * Sends a ipv4 packet to a stream.
      * Will encapsulate the packet into a DATAGRAM
      */
-    fn send_ip_to_quicstream(&self, pkt: &mut packet::ip::v4::Packet<&[u8]>) {
+    pub fn send_ip_to_quicstream(&self, pkt: &mut packet::ip::v4::Packet<&[u8]>) {
         // TODO
+        todo!()
+    }
+
+    pub fn send_ip_to_tun(&self, pkt: &mut packet::ip::v4::Packet<&[u8]>) {
         todo!()
     }
 

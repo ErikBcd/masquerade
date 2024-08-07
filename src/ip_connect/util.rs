@@ -1,13 +1,12 @@
 use std::{
-    collections::HashMap, error::Error, io::Read, sync::{Arc, Mutex}, time::Duration
+    error::Error, io::Read, sync::{Arc, Mutex}
 };
 
 use log::*;
 use octets::varint_len;
 use packet::ip;
-use quiche::Connection;
 use tun2::platform::posix::{Reader, Writer};
-use tokio::{sync::mpsc::{self, unbounded_channel, UnboundedSender}, time};
+use tokio::sync::mpsc::{self};
 
 use crate::{common::{hdrs_to_strings, MAX_DATAGRAM_SIZE}, ip_connect::{capsules::Capsule, client::IPConnectClient}};
 
@@ -153,7 +152,7 @@ pub fn handle_http3(
     let mut binding = client.lock().unwrap();
     let mut conn = binding.connection.as_mut().unwrap();
     let mut binding = client.lock().unwrap();
-    let mut udp_socket = binding.udp_socket.as_mut().unwrap();
+    let udp_socket = binding.udp_socket.as_ref().unwrap();
 
     let mut http3_conn: Option<quiche::h3::Connection> = None;
     loop {
@@ -193,6 +192,10 @@ pub fn handle_http3(
                         //       Do we have to do anything else before that? 
                         //       Might need to change the IP depending on the servers answer
                         //       to our address request
+                        {
+                            let binding = client.lock().unwrap();
+                            binding.send_ip_to_tun(&mut pkt);
+                        }
                     }
                     Ok(ip::Packet::V6(_)) => {
                         debug!("Received IPv6 packet via http3 (not implemented yet)");
@@ -205,8 +208,7 @@ pub fn handle_http3(
             }
         }
 
-
-            // handle QUIC received data
+        // handle QUIC received data
         let recvd = futures::executor::block_on(udp_socket.recv_from(&mut buf));
         
         let (read, from) = match recvd {
@@ -309,6 +311,6 @@ pub fn handle_http3(
             }
         }
         
-        
+        // TODO: Check if we have any messages to write back to the server
     }
 }
