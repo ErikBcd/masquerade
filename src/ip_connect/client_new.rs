@@ -3,23 +3,25 @@ use std::net::ToSocketAddrs;
 use std::sync::mpsc::{Receiver, Sender};
 
 use log::*;
-use packet::{ip, Packet};
+use octets::varint_len;
+use packet::{ip, AsPacket, Packet};
 use quiche::Connection;
 use ring::rand::{SecureRandom, SystemRandom};
 use tokio::net::unix::SocketAddr;
 use tokio::net::UdpSocket;
-use tokio::sync::mpsc;
+use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tun2::platform::posix::{Reader, Writer};
 use tun2::platform::Device;
 
 use crate::common::*;
+use crate::ip_connect::capsules::Capsule;
 use crate::ip_connect::util::*;
 
 /**
  * Receives raw IP messages from a TUN.
  * Will send received messages to the ip_handler_t
  */
-pub async fn ip_receiver_t(tx: Sender<Vec<u8>>, mut reader: Reader) {
+pub async fn ip_receiver_t(tx: UnboundedSender<Vec<u8>>, mut reader: Reader) {
     let mut buf = [0; 4096];
     loop {
         let size = reader.read(&mut buf).expect("Could not read from reader");
@@ -38,15 +40,17 @@ pub async fn ip_receiver_t(tx: Sender<Vec<u8>>, mut reader: Reader) {
  * Receives IP Packets from rx.
  * Will then handle these packets accordingly and send messages to quic_dispatcher_t
  */
-pub async fn ip_handler_t(ip_recv: Receiver<Vec<u8>>, dispatch_sender: Sender<Vec<u8>>) {
+pub async fn ip_handler_t(
+    ip_recv: &mut UnboundedReceiver<Vec<u8>>,
+    dispatch_sender: UnboundedSender<Vec<u8>>,
+) {
     loop {
-        if let Ok(pkt) = ip_recv.recv() {
+        if let Some(pkt) = ip_recv.recv().await {
             match ip::Packet::new(pkt.as_slice()) {
                 Ok(ip::Packet::V4(mut pkt)) => {
                     debug!("Received IPv4 packet");
-                    // TODO: Send the parsed packet to the quic_dispatcher_t
                     match dispatch_sender.send(encapsulate_ipv4(pkt)) {
-                        Ok(()) => {},
+                        Ok(()) => {}
                         Err(e) => {
                             error!("Error sending to ip dispatch: {}", e);
                         }
@@ -69,7 +73,7 @@ pub fn encapsulate_ipv4(pkt: packet::ip::v4::Packet<&[u8]>) -> Vec<u8> {
  * Receives QUIC messages from a connection.
  * Sends these messages to the handler.
  */
-pub async fn quic_receiver_t(tx: Sender<Vec<u8>>, conn: Connection) {
+pub async fn quic_receiver_t(tx: UnboundedSender<Vec<u8>>, conn: Connection) {
     todo!()
 }
 
@@ -79,9 +83,9 @@ pub async fn quic_receiver_t(tx: Sender<Vec<u8>>, conn: Connection) {
  * TUN dispatcher or the QUIC dispatcher.
  */
 pub async fn quic_handler_t(
-    quic_receiver: Receiver<Vec<u8>>,
-    quic_dispatcher: Sender<Vec<u8>>,
-    ip_dispatcher: Sender<Vec<u8>>,
+    quic_receiver: UnboundedReceiver<Vec<u8>>,
+    quic_dispatcher: UnboundedSender<Vec<u8>>,
+    ip_dispatcher: UnboundedSender<Vec<u8>>,
 ) {
     todo!()
 }
@@ -89,11 +93,179 @@ pub async fn quic_handler_t(
 /**
  * Receives ready-to-send ip packets and then sends them.
  */
-pub async fn ip_dispatcher_t(rx: Receiver<Vec<u8>>, mut writer: Writer) {
+pub async fn ip_dispatcher_t(rx: &mut UnboundedReceiver<Vec<u8>>, mut writer: Writer) {
     loop {
-        if let Ok(pkt) = rx.recv() {
+        if let Some(pkt) = rx.recv().await {
             writer.write(&pkt).expect("Could not write packet to TUN!");
         }
+    }
+}
+
+/**
+ * A general handler of a quic connection.
+ * Will set up the connection and then call functions to handle quic packets.
+ * Then sends all messages that need to be sent to the http3_sender
+ */
+pub async fn quic_conn_handler(
+    http3_sender: UnboundedSender<ToSend>,
+    ip_sender: UnboundedSender<Vec<u8>>,
+    mut conn: Connection,
+    udp_socket: UdpSocket,
+) {
+    let mut buf = [0; 65535];
+    let mut out = [0; MAX_DATAGRAM_SIZE];
+
+    let mut http3_conn: Option<quiche::h3::Connection> = None;
+
+    loop {
+        if conn.is_closed() {
+            info!("connection closed, {:?}", conn.stats());
+            break;
+        }
+
+        // Process datagram related events
+        // We only expect datagrams that contain ip payloads
+        while let Ok(len) = conn.dgram_recv(&mut buf) {
+            let mut b = octets::Octets::with_slice(&mut buf);
+            if let Ok(flow_id) = b.get_varint() {
+                let context_id = match b.get_varint() {
+                    Ok(v) => v,
+                    Err(e) => {
+                        debug!("DATAGRAM without context ID: {}", e);
+                        continue;
+                    }
+                };
+                // TODO: Handle context IDs, for now we only accept 0
+                if context_id != 0 {
+                    continue;
+                }
+                let header_len = varint_len(flow_id) + varint_len(context_id);
+                match ip::Packet::new(buf[header_len..len].to_vec().as_slice()) {
+                    Ok(ip::Packet::V4(_)) => {
+                        debug!("Received IPv4 packet via http3");
+                        // TODO: Send packet to TUN interface
+                        //       Do we have to do anything else before that?
+                        //       Might need to change the IP depending on the servers answer
+                        //       to our address request
+                        match ip_sender.send(buf[header_len..len].to_vec()) {
+                            Ok(()) => {}
+                            Err(e) => {
+                                debug!("Couldn't send ip packet to ip sender: {}", e);
+                            }
+                        }
+                    }
+                    Ok(ip::Packet::V6(_)) => {
+                        debug!("Received IPv6 packet via http3 (not implemented yet)");
+                        continue;
+                    }
+                    Err(err) => {
+                        debug!("Received an invalid packet: {:?}", err)
+                    }
+                }
+            }
+        }
+
+        // Handle received QUIC data
+        let (read, from) = match udp_socket.recv_from(&mut buf).await {
+            Ok(v) => v,
+            Err(e) => {
+                error!("error when reading from UDP socket: {:?}", e);
+                continue;
+            }
+        };
+
+        debug!("received {} bytes", read);
+        let recv_info = quiche::RecvInfo {
+            to: udp_socket.local_addr().unwrap(),
+            from,
+        };
+
+        // Process potentially coalesced packets.
+        let read = match conn.recv(&mut buf[..read], recv_info) {
+            Ok(v) => v,
+
+            Err(e) => {
+                error!("QUIC recv failed: {:?}", e);
+                continue
+            },
+        };
+        debug!("processed {} bytes", read);
+
+        if let Some(http3_conn) = &mut http3_conn {
+            loop {
+                debug!("polling on http3 connection");
+                match http3_conn.poll(&mut conn) {
+                    Ok((stream_id, quiche::h3::Event::Headers { list, .. })) => {
+                        info!("got response headers {:?} on stream id {}", hdrs_to_strings(&list), stream_id);
+                        // TODO: Can we just ignore headers that occur now?
+                    },
+
+                    Ok((stream_id, quiche::h3::Event::Data)) => {
+                        debug!("received stream data");
+                        while let Ok(read) = http3_conn.recv_body(&mut conn, stream_id, &mut buf) {
+                            // we only receive capsules via data, so parse this capsule
+                            match Capsule::new(&buf) {
+                                Ok(v) => {
+                                    // TODO: handle the capsule
+                                    todo!()
+                                },
+                                Err(e) => {
+                                    debug!("Couldn't parse capsule: {}", e);
+                                }
+                            }
+                        }
+                    },
+
+                    Ok((stream_id, quiche::h3::Event::Finished)) => {
+                        info!("finished received, stream id: {} closing", stream_id);
+                        // Shut down the stream
+                        // TODO: If this stream is the main connect-ip stream, we have to exit or 
+                        //       create a new one
+                        if conn.stream_finished(stream_id) {
+                            debug!("stream {} finished", stream_id);
+                        } else {
+                            conn.stream_shutdown(stream_id, quiche::Shutdown::Read, 0)
+                                .unwrap_or_else(|e| error!("stream shutdown read failed: {:?}", e));
+                            conn.stream_shutdown(stream_id, quiche::Shutdown::Write, 0)
+                                .unwrap_or_else(|e| error!("stream shutdown write failed: {:?}", e));
+                        }
+
+                    },
+
+                    Ok((stream_id, quiche::h3::Event::Reset(e))) => {
+                        error!("request was reset by peer with {}, stream id: {} closed", e, stream_id);
+                        // Shut down the stream
+                        // TODO: If this stream is the main connect-ip stream, we have to exit or 
+                        //       create a new one
+                        if conn.stream_finished(stream_id) {
+                            debug!("stream {} finished", stream_id);
+                        } else {
+                            conn.stream_shutdown(stream_id, quiche::Shutdown::Read, 0)
+                                .unwrap_or_else(|e| error!("stream shutdown read failed: {:?}", e));
+                            conn.stream_shutdown(stream_id, quiche::Shutdown::Write, 0)
+                                .unwrap_or_else(|e| error!("stream shutdown write failed: {:?}", e));
+                        }
+                        
+                    },
+                    Ok((_, quiche::h3::Event::PriorityUpdate)) => unreachable!(),
+
+                    Ok((goaway_id, quiche::h3::Event::GoAway)) => {
+                        info!("GOAWAY id={}", goaway_id);
+                    },
+
+                    Err(quiche::h3::Error::Done) => {
+                        debug!("poll done");
+                        break;
+                    },
+
+                    Err(e) => {
+                        error!("HTTP/3 processing failed: {:?}", e);
+                        break;
+                    },
+                };
+            }
+        }
+
     }
 }
 
@@ -102,10 +274,16 @@ pub async fn ip_dispatcher_t(rx: Receiver<Vec<u8>>, mut writer: Writer) {
  * the given udp socket
  * //TODO: Actually a udp socket? or maybe something else?
  */
-pub async fn quic_dispatcher_t(rx: Receiver<Vec<u8>>) {
+pub async fn quic_dispatcher_t(rx: UnboundedReceiver<Vec<u8>>) {
     todo!()
 }
 
+struct QuicClient {
+    conn: Connection,
+    http3_conn: Option<quiche::h3::Connection>,
+    http3_sender: UnboundedSender<ToSend>,
+    http3_receiver: UnboundedReceiver<ToSend>,
+}
 pub struct ConnectIPClient;
 
 impl ConnectIPClient {
@@ -119,8 +297,7 @@ impl ConnectIPClient {
             }
         };
 
-        let mut quic_conn = 
-            match self.create_quic_conn(&mut socket, server_addr).await {
+        let mut quic_conn = match self.create_quic_conn(&mut socket, server_addr).await {
             Ok(v) => v,
             Err(e) => {
                 error!("could not create quic connection: {}", e);
@@ -143,17 +320,17 @@ impl ConnectIPClient {
         // 4) Create receivers/senders and start threads
 
         // IP
-        let (ip_sender, ip_recv) = std::sync::mpsc::channel();
-        let (to_quic_dispatch, quic_dispatch_reader) = std::sync::mpsc::channel();
-        let (to_quic_handler, quic_handler_reader) = std::sync::mpsc::channel();
-        let (to_ip_dispatch, ip_dispatch_reader) = std::sync::mpsc::channel();
+        let (ip_sender, mut ip_recv) = tokio::sync::mpsc::unbounded_channel();
+        let (to_quic_dispatch, quic_dispatch_reader) = tokio::sync::mpsc::unbounded_channel();
+        let (to_quic_handler, quic_handler_reader) = tokio::sync::mpsc::unbounded_channel();
+        let (to_ip_dispatch, mut ip_dispatch_reader) = tokio::sync::mpsc::unbounded_channel();
         let to_ip_dispatch_clone = to_ip_dispatch.clone();
 
         // Spawn all threads. Stop once the first one finishes.
         tokio::select! {
             _ = ip_receiver_t(ip_sender, reader) => {},
-            _ = ip_handler_t(ip_recv, to_ip_dispatch_clone) => {},
-            _ = ip_dispatcher_t(ip_dispatch_reader, writer) => {},
+            _ = ip_handler_t(&mut ip_recv, to_ip_dispatch_clone) => {},
+            _ = ip_dispatcher_t(&mut ip_dispatch_reader, writer) => {},
             _ = quic_receiver_t(to_quic_handler, quic_conn) => {},
             _ = quic_handler_t(quic_handler_reader, to_quic_dispatch, to_ip_dispatch) => {},
             _ = quic_dispatcher_t(quic_dispatch_reader) => {},
