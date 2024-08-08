@@ -1,5 +1,5 @@
 use std::{
-    error::Error, io::Read, sync::{Arc, Mutex}
+    error::Error, io::Read, net::Ipv4Addr, sync::{Arc, Mutex}
 };
 
 use log::*;
@@ -85,6 +85,17 @@ impl std::fmt::Display for QUICStreamError {
             self.message
         )
     }
+}
+
+/**
+ * Sets the source ip address of a given IPv4 buffer to 
+ * the given adress.
+ */
+pub fn set_ipv4_pkt_source(pkt: &mut Vec<u8>, ip: &Ipv4Addr) {
+    pkt[12] = ip.octets()[0];
+    pkt[13] = ip.octets()[1];
+    pkt[14] = ip.octets()[2];
+    pkt[15] = ip.octets()[3];
 }
 
 /**
