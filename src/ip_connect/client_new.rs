@@ -122,12 +122,11 @@ pub async fn ip_handler_t(
 }
 
 pub fn encapsulate_ipv4(pkt: Vec<u8>, stream_id: &u64) -> ToSend {
-    let res = ToSend {
+    ToSend {
         stream_id: stream_id.clone(),
         content: Content::Datagram { payload: pkt },
         finished: false,
-    };
-    todo!();
+    }
 }
 
 /**
