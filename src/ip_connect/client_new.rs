@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, ToSocketAddrs};
 use std::sync::mpsc::{Receiver, Sender};
@@ -9,14 +9,13 @@ use packet::{ip, AsPacket, AsPacketMut, Packet, PacketMut};
 use quiche::h3::NameValue;
 use quiche::Connection;
 use ring::rand::{SecureRandom, SystemRandom};
-use tokio::net::unix::SocketAddr;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tun2::platform::posix::{Reader, Writer};
 use tun2::platform::Device;
 
 use crate::common::*;
-use crate::ip_connect::capsules::Capsule;
+use crate::ip_connect::capsules::{AddressRequest, Capsule, IpLength, RequestedAddress};
 use crate::ip_connect::util::*;
 
 /**
@@ -44,8 +43,6 @@ pub struct ConnectIpInfo {
     pub flow_id: u64,
     pub local_ip: Ipv4Addr,
     pub assigned_ip: Ipv4Addr,
-    pub source_to_dest_ip: HashMap<Ipv4Addr, Ipv4Addr>,
-    pub dest_to_source_ip: HashMap<Ipv4Addr, Ipv4Addr>,
 }
 
 pub struct IpMessage {
@@ -95,7 +92,8 @@ pub async fn ip_handler_t(
                 set_ipv4_pkt_source(&mut pkt.message, &conn_info.assigned_ip);
                 match pkt.dir {
                     Direction::ToServer => {
-                        match quic_dispatch.send(encapsulate_ipv4(pkt.message, &conn_info.flow_id)) {
+                        match quic_dispatch.send(encapsulate_ipv4(pkt.message, &conn_info.flow_id))
+                        {
                             Ok(()) => {}
                             Err(e) => {
                                 error!("Error sending to quic dispatch: {}", e);
@@ -161,6 +159,7 @@ pub async fn quic_conn_handler(
     let (http3_sender, mut http3_receiver) = mpsc::unbounded_channel::<ToSend>();
     let mut http3_conn: Option<quiche::h3::Connection> = None;
     let mut stream: Option<QuicStream> = None;
+    let mut assigned_addr: Option<Ipv4Addr> = None;
 
     loop {
         if conn.is_closed() {
@@ -217,13 +216,43 @@ pub async fn quic_conn_handler(
                 quiche::h3::Connection::with_transport(&mut conn, &h3_config)
                 .expect("Unable to create HTTP/3 connection, check the server's uni stream limit and window size"),
             );
+
             stream = match establish_ip_connect(&http3_sender).await {
                 Ok(v) => Some(v),
                 Err(e) => {
                     error!("Could not establish ip_connect: {:?}", e);
                     return;
                 }
-            }
+            };
+
+            // Now we ask for an address
+            let addr_request = RequestedAddress {
+                request_id: 0,
+                ip_version: 4,
+                ip_address: IpLength::V4(Ipv4Addr::new(0, 0, 0, 0).into()),
+                ip_prefix_len: 32,
+            };
+
+            let request_capsule = AddressRequest {
+                length: 9,
+                requested: vec![addr_request],
+            };
+
+            let cap = Capsule {
+                capsule_id: 1,
+                capsule_type: super::capsules::CapsuleType::AddressRequest(request_capsule),
+            };
+
+            let mut buf = [0; 9];
+            cap.serialize(&mut buf);
+
+            http3_sender
+                .send(ToSend {
+                    stream_id: stream.unwrap().stream_id,
+                    content: Content::Data { data: buf.to_vec() },
+                    finished: false,
+                })
+                .unwrap_or_else(|e| error!("sending http3 data capsule failed: {:?}", e));
         }
         // Handle received QUIC data
         let (read, from) = match udp_socket.recv_from(&mut buf).await {
@@ -430,40 +459,137 @@ pub async fn establish_ip_connect(
  * Receives ready-to-send QUIC messages and sends them to
  * Connection
  * Waits first for the QUIC connection to be established, including the http3 conn.
+ *  - rx              : Receiver for any messages that shall be sent to the http3 conn
+ *  - quic_sender_recv: Receives an http3_sender once the connection is ready
+ *  - conn            : The quic connection, used for sending datagrams
  */
 pub async fn quic_dispatcher_t(
     mut rx: UnboundedReceiver<ToSend>,
-    mut conn_info_recv: UnboundedReceiver<ConnectIpInfo>,
+    mut quic_sender_recv: UnboundedReceiver<quiche::h3::Connection>,
     conn: &mut Connection,
 ) {
     // First wait for the connection info the QUIC handler provides
     // With that you can exchange ip's and everything
     // Wait till the QUIC server sends us connection information
-    let mut conn_info: Option<ConnectIpInfo> = None;
-    while conn_info.is_none() {
-        conn_info = conn_info_recv.recv().await;
+    let mut http3_conn: Option<quiche::h3::Connection> = None;
+    while http3_conn.is_none() {
+        http3_conn = quic_sender_recv.recv().await;
     }
-
+    let mut http3_conn = http3_conn.unwrap();
+    let mut to_send_queue: VecDeque<ToSend> = VecDeque::new();
     loop {
         if let Some(pkt) = rx.recv().await {
-            // If packet is a datagram (which should be the case most of the time)
-            // send it via send_h3_dgram directly to the quic connection.
-            if let Content::Datagram { payload } = pkt.content {
-                send_h3_dgram(conn, pkt.stream_id, &payload)
-                    .expect("could not send HTTP/3 datagram!");
-            } else {
-                match conn_info.as_ref().unwrap().http_sender.send(pkt) {
-                    Ok(()) => {}
-                    Err(e) => {
-                        error!("Could not send ToSend to http_sender: {:?}", e);
-                        return;
+            to_send_queue.push_back(pkt);
+            // Send all packets in the deque
+            // WARN: If a packet fails over and over this will loop forever and block everything.
+            while !to_send_queue.is_empty() {
+                let mut pkt = to_send_queue.pop_front().unwrap();
+                let result = match &pkt.content {
+                    Content::Headers { headers: _ } => {
+                        unreachable!("We should not be getting headers!")
+                    }
+                    Content::Request {
+                        headers,
+                        stream_id_sender,
+                    } => match http3_conn.send_request(conn, &headers, pkt.finished) {
+                        Ok(stream_id) => {
+                            stream_id_sender.send(stream_id).await.unwrap_or_else(|e| 
+                                error!("could not send stream_id back to receiver: {}", e)
+                            );
+                            Ok(())
+                        }
+                        Err(e) => {
+                            error!("sending h3 request failed: {}", e);
+                            Err(e)
+                        }
+                    },
+                    Content::Data { data } => {
+                        debug!("sending http3 data of {} bytes", data.len());
+                        let mut written = 0;
+                        loop {
+                            if written >= data.len() {
+                                break Ok(());
+                            }
+                            match http3_conn.send_body(
+                                conn,
+                                pkt.stream_id,
+                                &data[written..],
+                                pkt.finished,
+                            ) {
+                                Ok(v) => written += v,
+                                Err(e) => {
+                                    // Failed to send the packet. If adequate, try resending later
+                                    pkt = ToSend {
+                                        stream_id: pkt.stream_id,
+                                        content: Content::Data {
+                                            data: data[written..].to_vec(),
+                                        },
+                                        finished: pkt.finished,
+                                    };
+                                    break Err(e);
+                                }
+                            }
+                            debug!("written http3 data {} of {} bytes", written, data.len());
+                        }
+                    }
+                    Content::Datagram { payload } => {
+                        debug!("Sending HTTP/3 datagram of {} bytes!", payload.len());
+                        match send_h3_dgram(conn, pkt.stream_id, &payload) {
+                            Ok(_) => Ok(()),
+                            Err(e) => Err(e.into()),
+                        }
+                    }
+                    Content::Finished => {
+                        debug!("Shutting down stream!");
+                        match conn.stream_shutdown(pkt.stream_id, quiche::Shutdown::Read, 0) {
+                            Ok(_) => {}
+                            Err(quiche::Error::Done) => {}
+                            Err(e) => {
+                                error!("could not shutdown stream: {}", e);
+                            }
+                        }
+
+                        match conn.stream_shutdown(pkt.stream_id, quiche::Shutdown::Write, 0) {
+                            Ok(_) => {}
+                            Err(quiche::Error::Done) => {}
+                            Err(e) => {
+                                error!("could not shutdown stream: {}", e);
+                            }
+                        }
+                        Ok(())
                     }
                 };
+                match result {
+                    Ok(_) => {}
+                    Err(quiche::h3::Error::StreamBlocked | quiche::h3::Error::Done) => {
+                        debug!(
+                            "Connection {} stream {} stream blocked, retry later",
+                            conn.trace_id(),
+                            pkt.stream_id
+                        );
+                        to_send_queue.push_front(pkt);
+                        break;
+                    }
+                    Err(e) => {
+                        error!(
+                            "Connection {} stream {} send failed {:?}",
+                            conn.trace_id(),
+                            pkt.stream_id,
+                            e
+                        );
+                        if !conn.stream_finished(pkt.stream_id) {
+                            conn.stream_shutdown(pkt.stream_id, quiche::Shutdown::Read, 0)
+                                .unwrap_or_else(|e| error!("stream shutdown read failed: {:?}", e));
+                            conn.stream_shutdown(pkt.stream_id, quiche::Shutdown::Write, 0)
+                                .unwrap_or_else(|e| {
+                                    error!("stream shutdown write failed: {:?}", e)
+                                });
+                        }
+                    }
+                }
             }
         }
     }
-
-    todo!()
 }
 
 struct QuicClient {
