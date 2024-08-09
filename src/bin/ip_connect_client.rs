@@ -1,5 +1,4 @@
-use masquerade_proxy::ip_connect::client::IPConnectClientStarter;
-use masquerade_proxy::ip_connect::client_new::ConnectIPClient;
+use masquerade_proxy::ip_connect::client::ConnectIPClient;
 
 use std::env;
 use std::error::Error;
@@ -16,9 +15,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let bind_addr = env::args()
         .nth(2)
         .unwrap_or_else(|| "127.0.0.1:8899".to_string());
-
-    //let mut client = IPConnectClientStarter::new();
-    //client.run(&server_name, &bind_addr).await;
 
     let newclient = ConnectIPClient;
     newclient.run(&server_name, &bind_addr).await;
