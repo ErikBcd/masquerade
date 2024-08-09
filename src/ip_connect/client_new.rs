@@ -2,6 +2,7 @@ use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, ToSocketAddrs};
 use std::sync::mpsc::{Receiver, Sender};
+use std::sync::Arc;
 
 use log::*;
 use octets::varint_len;
@@ -11,6 +12,7 @@ use quiche::Connection;
 use ring::rand::{SecureRandom, SystemRandom};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
+use tokio::sync::Mutex;
 use tun2::platform::posix::{Reader, Writer};
 use tun2::platform::Device;
 
@@ -150,6 +152,7 @@ pub async fn ip_dispatcher_t(rx: &mut UnboundedReceiver<Vec<u8>>, mut writer: Wr
 pub async fn quic_conn_handler(
     ip_sender: UnboundedSender<Vec<u8>>,
     info_sender: UnboundedSender<ConnectIpInfo>,
+    quic_dispatcher: UnboundedSender<Arc<Mutex<Option<quiche::h3::Connection>>>>,
     mut conn: Connection,
     udp_socket: UdpSocket,
 ) {
@@ -157,9 +160,10 @@ pub async fn quic_conn_handler(
     let mut out = [0; MAX_DATAGRAM_SIZE];
 
     let (http3_sender, mut http3_receiver) = mpsc::unbounded_channel::<ToSend>();
-    let mut http3_conn: Option<quiche::h3::Connection> = None;
+    let mut http3_conn: Arc<Mutex<Option<quiche::h3::Connection>>> = Arc::new(Mutex::new(None));
     let mut stream: Option<QuicStream> = None;
     let mut assigned_addr: Option<Ipv4Addr> = None;
+    let mut got_h3_conn = false;
 
     loop {
         if conn.is_closed() {
@@ -210,12 +214,13 @@ pub async fn quic_conn_handler(
         }
 
         // Check if the http3 connection has been established
-        if conn.is_established() && http3_conn.is_none() {
+        if conn.is_established() && !got_h3_conn {
             let h3_config = quiche::h3::Config::new().unwrap();
-            http3_conn = Some(
+            http3_conn = Arc::new(Mutex::new(Some(
                 quiche::h3::Connection::with_transport(&mut conn, &h3_config)
                 .expect("Unable to create HTTP/3 connection, check the server's uni stream limit and window size"),
-            );
+            )));
+            got_h3_conn = true;
 
             stream = match establish_ip_connect(&http3_sender).await {
                 Ok(v) => Some(v),
@@ -224,6 +229,11 @@ pub async fn quic_conn_handler(
                     return;
                 }
             };
+
+            // We can now notify the quic dispatcher that it can get to work
+            quic_dispatcher
+                .send(http3_conn.clone())
+                .expect("Could not send http3 conn to quic dispatcher!");
 
             // Now we ask for an address
             let addr_request = RequestedAddress {
@@ -279,11 +289,13 @@ pub async fn quic_conn_handler(
             }
         };
         debug!("processed {} bytes", read);
-
-        if let Some(http3_conn) = &mut http3_conn {
+        //if let Some(http3_conn) = &mut http3_conn {
+        if got_h3_conn {
+            //let http3_conn_clone = http3_conn.clone().as_ref().unwrap();
             loop {
                 debug!("polling on http3 connection");
-                match http3_conn.poll(&mut conn) {
+                let http3_incoming = http3_conn.lock().await.as_mut().unwrap().poll(&mut conn);
+                match http3_incoming {
                     Ok((stream_id, quiche::h3::Event::Headers { list, .. })) => {
                         info!(
                             "got response headers {:?} on stream id {}",
@@ -295,7 +307,13 @@ pub async fn quic_conn_handler(
 
                     Ok((stream_id, quiche::h3::Event::Data)) => {
                         debug!("received stream data");
-                        while let Ok(read) = http3_conn.recv_body(&mut conn, stream_id, &mut buf) {
+                        while let Ok(read) = http3_conn
+                            .lock()
+                            .await
+                            .as_mut()
+                            .unwrap()
+                            .recv_body(&mut conn, stream_id, &mut buf)
+                        {
                             // we only receive capsules via data, so parse this capsule
                             match Capsule::new(&buf) {
                                 Ok(v) => {
@@ -366,6 +384,11 @@ pub async fn quic_conn_handler(
     }
 }
 
+/**
+ * Establishes the CONNECT-IP connection.
+ * Sends the necessary requests to the server and awaits the response
+ * Returns a QuicStream struct if the connection succeeded, or an HandleIPError if it failed.
+ */
 pub async fn establish_ip_connect(
     http3_sender: &UnboundedSender<ToSend>,
 ) -> Result<QuicStream, HandleIPError> {
@@ -457,7 +480,8 @@ pub async fn establish_ip_connect(
 
 /**
  * Receives ready-to-send QUIC messages and sends them to
- * Connection
+ * the QUIC Connection
+ * Will try to resend DATA packets till either the connection breaks down or the packets are all sent.
  * Waits first for the QUIC connection to be established, including the http3 conn.
  *  - rx              : Receiver for any messages that shall be sent to the http3 conn
  *  - quic_sender_recv: Receives an http3_sender once the connection is ready
@@ -465,13 +489,13 @@ pub async fn establish_ip_connect(
  */
 pub async fn quic_dispatcher_t(
     mut rx: UnboundedReceiver<ToSend>,
-    mut quic_sender_recv: UnboundedReceiver<quiche::h3::Connection>,
+    mut quic_sender_recv: UnboundedReceiver<Arc<Mutex<Option<quiche::h3::Connection>>>>,
     conn: &mut Connection,
 ) {
     // First wait for the connection info the QUIC handler provides
     // With that you can exchange ip's and everything
     // Wait till the QUIC server sends us connection information
-    let mut http3_conn: Option<quiche::h3::Connection> = None;
+    let mut http3_conn: Option<Arc<Mutex<Option<quiche::h3::Connection>>>> = None;
     while http3_conn.is_none() {
         http3_conn = quic_sender_recv.recv().await;
     }
@@ -491,18 +515,25 @@ pub async fn quic_dispatcher_t(
                     Content::Request {
                         headers,
                         stream_id_sender,
-                    } => match http3_conn.send_request(conn, &headers, pkt.finished) {
-                        Ok(stream_id) => {
-                            stream_id_sender.send(stream_id).await.unwrap_or_else(|e| 
-                                error!("could not send stream_id back to receiver: {}", e)
-                            );
-                            Ok(())
+                    } => {
+                        debug!("Sending http3 request..");
+                        match http3_conn.lock().await.as_mut().unwrap().send_request(
+                            conn,
+                            &headers,
+                            pkt.finished,
+                        ) {
+                            Ok(stream_id) => {
+                                stream_id_sender.send(stream_id).await.unwrap_or_else(|e| {
+                                    error!("could not send stream_id back to receiver: {}", e)
+                                });
+                                Ok(())
+                            }
+                            Err(e) => {
+                                error!("sending h3 request failed: {}", e);
+                                Err(e)
+                            }
                         }
-                        Err(e) => {
-                            error!("sending h3 request failed: {}", e);
-                            Err(e)
-                        }
-                    },
+                    }
                     Content::Data { data } => {
                         debug!("sending http3 data of {} bytes", data.len());
                         let mut written = 0;
@@ -510,7 +541,7 @@ pub async fn quic_dispatcher_t(
                             if written >= data.len() {
                                 break Ok(());
                             }
-                            match http3_conn.send_body(
+                            match http3_conn.lock().await.as_mut().unwrap().send_body(
                                 conn,
                                 pkt.stream_id,
                                 &data[written..],
@@ -592,12 +623,6 @@ pub async fn quic_dispatcher_t(
     }
 }
 
-struct QuicClient {
-    conn: Connection,
-    http3_conn: Option<quiche::h3::Connection>,
-    http3_sender: UnboundedSender<ToSend>,
-    http3_receiver: UnboundedReceiver<ToSend>,
-}
 pub struct ConnectIPClient;
 
 impl ConnectIPClient {
