@@ -8,11 +8,6 @@ Very early prototype with no thorough testing, missing a lot of features, poorly
 
 This fork aims to build up on the original masquerade implementation for the sake of improvement and evaluation.
 
-### Todo:
- * ~~Fix socks-udp (Broke when updating to the latest quiche version)~~ Done!
- * Fix cases where connections aren't shut down properly
- * Refactor some things (Code is hard to read in some places, Error handling is missing)
-
 # Connect-IP branch
 
 This branch is for implementing the CONNECT-IP method as defined in [RFC 9484](https://datatracker.ietf.org/doc/rfc9484/).
