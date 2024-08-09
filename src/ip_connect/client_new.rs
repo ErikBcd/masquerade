@@ -1,6 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, ToSocketAddrs};
+use std::ops::{Deref, DerefMut};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
 
@@ -56,13 +57,19 @@ pub struct IpMessage {
  * Receives raw IP messages from a TUN.
  * Will send received messages to the ip_handler_t
  */
-pub async fn ip_receiver_t(tx: UnboundedSender<Vec<u8>>, mut reader: Reader) {
+pub async fn ip_receiver_t(tx: UnboundedSender<IpMessage>, mut reader: Reader) {
     let mut buf = [0; 4096];
     loop {
         let size = reader.read(&mut buf).expect("Could not read from reader");
         let pkt = &buf[..size];
         use std::io::{Error, ErrorKind::Other};
-        match tx.send(pkt.to_vec()).map_err(|e| Error::new(Other, e)) {
+        match tx
+            .send(IpMessage {
+                message: pkt.to_vec(),
+                dir: Direction::ToServer,
+            })
+            .map_err(|e| Error::new(Other, e))
+        {
             Ok(_) => {}
             Err(e) => {
                 debug!("tx send error: {}", e);
@@ -76,10 +83,10 @@ pub async fn ip_receiver_t(tx: UnboundedSender<Vec<u8>>, mut reader: Reader) {
  * Will then handle these packets accordingly and send messages to quic_dispatcher_t
  */
 pub async fn ip_handler_t(
-    ip_recv: &mut UnboundedReceiver<IpMessage>,
-    conn_info_recv: &mut UnboundedReceiver<ConnectIpInfo>,
-    quic_dispatch: UnboundedSender<ToSend>,
-    ip_dispatch: UnboundedSender<Vec<u8>>,
+    mut ip_recv: UnboundedReceiver<IpMessage>, // Other side is ip_receiver_t
+    mut conn_info_recv: UnboundedReceiver<ConnectIpInfo>, // Other side is quic_handler_t
+    quic_dispatch: UnboundedSender<ToSend>,    // other side is quic_dispatcher_t
+    ip_dispatch: UnboundedSender<Vec<u8>>,     // other side is ip_dispatcher_t
 ) {
     // Wait till the QUIC server sends us connection information
     let mut conn_info: Option<ConnectIpInfo> = None;
@@ -121,6 +128,9 @@ pub async fn ip_handler_t(
     }
 }
 
+/**
+ * Creates a ToSend struct for sending IP from a given IP packet and stream_id
+ */
 pub fn encapsulate_ipv4(pkt: Vec<u8>, stream_id: &u64) -> ToSend {
     ToSend {
         stream_id: stream_id.clone(),
@@ -150,30 +160,30 @@ pub async fn ip_dispatcher_t(rx: &mut UnboundedReceiver<Vec<u8>>, mut writer: Wr
  * Sends resulting messages to either ip_handler_t or quic_dispatch_t.
  */
 pub async fn quic_conn_handler(
-    ip_sender: UnboundedSender<Vec<u8>>,
-    info_sender: UnboundedSender<ConnectIpInfo>,
+    ip_sender: UnboundedSender<IpMessage>, // other side is ip_dispatcher_t
+    info_sender: UnboundedSender<ConnectIpInfo>, // other side is the ip_handler_t
     quic_dispatcher: UnboundedSender<Arc<Mutex<Option<quiche::h3::Connection>>>>,
-    mut conn: Connection,
+    http3_sender: UnboundedSender<ToSend>, // Other side is the quic_dispatcher_t
+    conn: Arc<Mutex<Connection>>,
     udp_socket: UdpSocket,
 ) {
     let mut buf = [0; 65535];
     let mut out = [0; MAX_DATAGRAM_SIZE];
 
-    let (http3_sender, mut http3_receiver) = mpsc::unbounded_channel::<ToSend>();
     let mut http3_conn: Arc<Mutex<Option<quiche::h3::Connection>>> = Arc::new(Mutex::new(None));
     let mut stream: Option<QuicStream> = None;
     let mut assigned_addr: Option<Ipv4Addr> = None;
     let mut got_h3_conn = false;
 
     loop {
-        if conn.is_closed() {
-            info!("connection closed, {:?}", conn.stats());
+        if conn.lock().await.is_closed() {
+            info!("connection closed, {:?}", conn.lock().await.stats());
             break;
         }
 
         // Process datagram related events
         // We only expect datagrams that contain ip payloads
-        while let Ok(len) = conn.dgram_recv(&mut buf) {
+        while let Ok(len) = conn.lock().await.dgram_recv(&mut buf) {
             let mut b = octets::Octets::with_slice(&mut buf);
             if let Ok(flow_id) = b.get_varint() {
                 let context_id = match b.get_varint() {
@@ -195,7 +205,10 @@ pub async fn quic_conn_handler(
                         //       Do we have to do anything else before that?
                         //       Might need to change the IP depending on the servers answer
                         //       to our address request
-                        match ip_sender.send(buf[header_len..len].to_vec()) {
+                        match ip_sender.send(IpMessage {
+                            message: buf[header_len..len].to_vec(),
+                            dir: Direction::ToClient,
+                        }) {
                             Ok(()) => {}
                             Err(e) => {
                                 debug!("Couldn't send ip packet to ip sender: {}", e);
@@ -214,10 +227,12 @@ pub async fn quic_conn_handler(
         }
 
         // Check if the http3 connection has been established
-        if conn.is_established() && !got_h3_conn {
+        if conn.lock().await.is_established() && !got_h3_conn {
             let h3_config = quiche::h3::Config::new().unwrap();
+            let conn_clone = conn.clone();
+            let mut conn_clone = conn_clone.lock().await;
             http3_conn = Arc::new(Mutex::new(Some(
-                quiche::h3::Connection::with_transport(&mut conn, &h3_config)
+                quiche::h3::Connection::with_transport(&mut conn_clone, &h3_config)
                 .expect("Unable to create HTTP/3 connection, check the server's uni stream limit and window size"),
             )));
             got_h3_conn = true;
@@ -280,7 +295,7 @@ pub async fn quic_conn_handler(
         };
 
         // Process potentially coalesced packets.
-        let read = match conn.recv(&mut buf[..read], recv_info) {
+        let read = match conn.lock().await.recv(&mut buf[..read], recv_info) {
             Ok(v) => v,
 
             Err(e) => {
@@ -294,7 +309,9 @@ pub async fn quic_conn_handler(
             //let http3_conn_clone = http3_conn.clone().as_ref().unwrap();
             loop {
                 debug!("polling on http3 connection");
-                let http3_incoming = http3_conn.lock().await.as_mut().unwrap().poll(&mut conn);
+                let conn_clone = conn.clone();
+                let mut conn_clone = conn_clone.lock().await;
+                let http3_incoming = http3_conn.lock().await.as_mut().unwrap().poll(&mut conn_clone);
                 match http3_incoming {
                     Ok((stream_id, quiche::h3::Event::Headers { list, .. })) => {
                         info!(
@@ -307,12 +324,14 @@ pub async fn quic_conn_handler(
 
                     Ok((stream_id, quiche::h3::Event::Data)) => {
                         debug!("received stream data");
+                        let conn_clone = conn.clone();
+                        let mut conn_clone = conn_clone.lock().await;
                         while let Ok(read) = http3_conn
                             .lock()
                             .await
                             .as_mut()
                             .unwrap()
-                            .recv_body(&mut conn, stream_id, &mut buf)
+                            .recv_body(&mut conn_clone, stream_id, &mut buf)
                         {
                             // we only receive capsules via data, so parse this capsule
                             match Capsule::new(&buf) {
@@ -332,12 +351,12 @@ pub async fn quic_conn_handler(
                         // Shut down the stream
                         // TODO: If this stream is the main connect-ip stream, we have to exit or
                         //       create a new one
-                        if conn.stream_finished(stream_id) {
+                        if conn.lock().await.stream_finished(stream_id) {
                             debug!("stream {} finished", stream_id);
                         } else {
-                            conn.stream_shutdown(stream_id, quiche::Shutdown::Read, 0)
+                            conn.lock().await.stream_shutdown(stream_id, quiche::Shutdown::Read, 0)
                                 .unwrap_or_else(|e| error!("stream shutdown read failed: {:?}", e));
-                            conn.stream_shutdown(stream_id, quiche::Shutdown::Write, 0)
+                            conn.lock().await.stream_shutdown(stream_id, quiche::Shutdown::Write, 0)
                                 .unwrap_or_else(|e| {
                                     error!("stream shutdown write failed: {:?}", e)
                                 });
@@ -352,12 +371,12 @@ pub async fn quic_conn_handler(
                         // Shut down the stream
                         // TODO: If this stream is the main connect-ip stream, we have to exit or
                         //       create a new one
-                        if conn.stream_finished(stream_id) {
+                        if conn.lock().await.stream_finished(stream_id) {
                             debug!("stream {} finished", stream_id);
                         } else {
-                            conn.stream_shutdown(stream_id, quiche::Shutdown::Read, 0)
+                            conn.lock().await.stream_shutdown(stream_id, quiche::Shutdown::Read, 0)
                                 .unwrap_or_else(|e| error!("stream shutdown read failed: {:?}", e));
-                            conn.stream_shutdown(stream_id, quiche::Shutdown::Write, 0)
+                            conn.lock().await.stream_shutdown(stream_id, quiche::Shutdown::Write, 0)
                                 .unwrap_or_else(|e| {
                                     error!("stream shutdown write failed: {:?}", e)
                                 });
@@ -490,7 +509,7 @@ pub async fn establish_ip_connect(
 pub async fn quic_dispatcher_t(
     mut rx: UnboundedReceiver<ToSend>,
     mut quic_sender_recv: UnboundedReceiver<Arc<Mutex<Option<quiche::h3::Connection>>>>,
-    conn: &mut Connection,
+    mut conn: Arc<Mutex<Connection>>,
 ) {
     // First wait for the connection info the QUIC handler provides
     // With that you can exchange ip's and everything
@@ -517,8 +536,10 @@ pub async fn quic_dispatcher_t(
                         stream_id_sender,
                     } => {
                         debug!("Sending http3 request..");
+                        let conn_clone = conn.clone();
+                        let mut conn_clone = conn_clone.lock().await;
                         match http3_conn.lock().await.as_mut().unwrap().send_request(
-                            conn,
+                            conn_clone.deref_mut(),
                             &headers,
                             pkt.finished,
                         ) {
@@ -541,8 +562,10 @@ pub async fn quic_dispatcher_t(
                             if written >= data.len() {
                                 break Ok(());
                             }
+                            let conn_clone = conn.clone();
+                            let mut conn_clone = conn_clone.lock().await;
                             match http3_conn.lock().await.as_mut().unwrap().send_body(
-                                conn,
+                                conn_clone.deref_mut(),
                                 pkt.stream_id,
                                 &data[written..],
                                 pkt.finished,
@@ -565,14 +588,16 @@ pub async fn quic_dispatcher_t(
                     }
                     Content::Datagram { payload } => {
                         debug!("Sending HTTP/3 datagram of {} bytes!", payload.len());
-                        match send_h3_dgram(conn, pkt.stream_id, &payload) {
+                        let conn_clone = conn.clone();
+                        let mut conn_clone = conn_clone.lock().await;
+                        match send_h3_dgram(conn_clone.deref_mut(), pkt.stream_id, &payload) {
                             Ok(_) => Ok(()),
                             Err(e) => Err(e.into()),
                         }
                     }
                     Content::Finished => {
                         debug!("Shutting down stream!");
-                        match conn.stream_shutdown(pkt.stream_id, quiche::Shutdown::Read, 0) {
+                        match conn.lock().await.stream_shutdown(pkt.stream_id, quiche::Shutdown::Read, 0) {
                             Ok(_) => {}
                             Err(quiche::Error::Done) => {}
                             Err(e) => {
@@ -580,7 +605,7 @@ pub async fn quic_dispatcher_t(
                             }
                         }
 
-                        match conn.stream_shutdown(pkt.stream_id, quiche::Shutdown::Write, 0) {
+                        match conn.lock().await.stream_shutdown(pkt.stream_id, quiche::Shutdown::Write, 0) {
                             Ok(_) => {}
                             Err(quiche::Error::Done) => {}
                             Err(e) => {
@@ -595,7 +620,7 @@ pub async fn quic_dispatcher_t(
                     Err(quiche::h3::Error::StreamBlocked | quiche::h3::Error::Done) => {
                         debug!(
                             "Connection {} stream {} stream blocked, retry later",
-                            conn.trace_id(),
+                            conn.lock().await.trace_id(),
                             pkt.stream_id
                         );
                         to_send_queue.push_front(pkt);
@@ -604,14 +629,14 @@ pub async fn quic_dispatcher_t(
                     Err(e) => {
                         error!(
                             "Connection {} stream {} send failed {:?}",
-                            conn.trace_id(),
+                            conn.lock().await.trace_id(),
                             pkt.stream_id,
                             e
                         );
-                        if !conn.stream_finished(pkt.stream_id) {
-                            conn.stream_shutdown(pkt.stream_id, quiche::Shutdown::Read, 0)
+                        if !conn.lock().await.stream_finished(pkt.stream_id) {
+                            conn.lock().await.stream_shutdown(pkt.stream_id, quiche::Shutdown::Read, 0)
                                 .unwrap_or_else(|e| error!("stream shutdown read failed: {:?}", e));
-                            conn.stream_shutdown(pkt.stream_id, quiche::Shutdown::Write, 0)
+                            conn.lock().await.stream_shutdown(pkt.stream_id, quiche::Shutdown::Write, 0)
                                 .unwrap_or_else(|e| {
                                     error!("stream shutdown write failed: {:?}", e)
                                 });
@@ -643,6 +668,9 @@ impl ConnectIPClient {
                 return;
             }
         };
+        // We need two connections in different threads, so we put it in a Arc<Mutex<>>
+        let mut quic_conn = Arc::new(Mutex::new(quic_conn));
+        let mut quic_conn_clone = quic_conn.clone();
         // 2) Setup Connect IP stream
 
         // 3) Create TUN
@@ -656,28 +684,32 @@ impl ConnectIPClient {
 
         let (mut reader, mut writer) = dev.split();
 
-        // 4) Create receivers/senders and start threads
-        /*
+        // 4) Create receivers/senders
 
-        // IP
+        // ip_sender for ip_receiver_t, ip_recv for ip_handler_t
         let (ip_sender, mut ip_recv) = tokio::sync::mpsc::unbounded_channel();
-        let (to_quic_dispatch, quic_dispatch_reader) = tokio::sync::mpsc::unbounded_channel();
-        //let (to_quic_handler, quic_handler_reader) = tokio::sync::mpsc::unbounded_channel();
-        let (to_ip_dispatch, mut ip_dispatch_reader) = tokio::sync::mpsc::unbounded_channel();
-        let (info_sender, info_retriever) = tokio::sync::mpsc::unbounded_channel();
-        let to_ip_dispatch_clone = to_ip_dispatch.clone();
+        let (quic_dispatch, mut quic_dispatch_reader) = tokio::sync::mpsc::unbounded_channel();
+        let (ip_dispatch, mut ip_dispatch_reader) = tokio::sync::mpsc::unbounded_channel();
+        let (conn_info_sender, mut conn_info_recv) = tokio::sync::mpsc::unbounded_channel();
+        let (http3_sender, mut http3_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (quic_info_sender, mut quic_info_receiver) = tokio::sync::mpsc::unbounded_channel();
 
-        // Spawn all threads. Stop once the first one finishes.
+        // Copies of senders
+        let ip_from_quic_sender = ip_sender.clone();
+
         tokio::select! {
             _ = ip_receiver_t(ip_sender, reader) => {},
-            _ = ip_handler_t(&mut ip_recv, to_ip_dispatch_clone) => {},
-            _ = ip_dispatcher_t(&mut ip_dispatch_reader, writer) => {},
-           // _ = quic_receiver_t(to_quic_handler, quic_conn) => {},
-          //  _ = quic_handler_t(quic_handler_reader, to_quic_dispatch, to_ip_dispatch) => {},
-            _ = quic_conn_handler(to_quic_dispatch, info_sender, quic_conn, socket) => {},
-            _ = quic_dispatcher_t(quic_dispatch_reader, info_retriever) => {},
+            _ = ip_handler_t(ip_recv, conn_info_recv, quic_dispatch, ip_dispatch) => {},
+            _ = quic_conn_handler(
+                    ip_from_quic_sender,
+                    conn_info_sender,
+                    quic_info_sender,
+                    http3_sender,
+                    quic_conn,
+                    socket
+                ) => {},
+            _ = quic_dispatcher_t(quic_dispatch_reader, quic_info_receiver, quic_conn_clone) => {},
         }
-        */
     }
 
     async fn create_quic_conn(
