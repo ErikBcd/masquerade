@@ -1,13 +1,12 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, ToSocketAddrs};
-use std::ops::{Deref, DerefMut};
-use std::sync::mpsc::{Receiver, Sender};
+use std::ops::DerefMut;
 use std::sync::Arc;
 
 use log::*;
 use octets::varint_len;
-use packet::{ip, AsPacket, AsPacketMut, Packet, PacketMut};
+use packet::ip;
 use quiche::h3::NameValue;
 use quiche::Connection;
 use ring::rand::{SecureRandom, SystemRandom};
@@ -142,7 +141,7 @@ pub fn encapsulate_ipv4(pkt: Vec<u8>, stream_id: &u64) -> ToSend {
 /**
  * Receives ready-to-send ip packets and then sends them.
  */
-pub async fn ip_dispatcher_t(rx: &mut UnboundedReceiver<Vec<u8>>, mut writer: Writer) {
+pub async fn ip_dispatcher_t(mut rx: UnboundedReceiver<Vec<u8>>, mut writer: Writer) {
     loop {
         if let Some(pkt) = rx.recv().await {
             writer.write(&pkt).expect("Could not write packet to TUN!");
@@ -159,6 +158,7 @@ pub async fn ip_dispatcher_t(rx: &mut UnboundedReceiver<Vec<u8>>, mut writer: Wr
  * After that goes into loop, waits for new messages and handles them accordingly.
  * Sends resulting messages to either ip_handler_t or quic_dispatch_t.
  */
+// TODO: Handle incoming capsules, send ip information out once we have it (Address Assign etc)
 pub async fn quic_conn_handler(
     ip_sender: UnboundedSender<IpMessage>, // other side is ip_dispatcher_t
     info_sender: UnboundedSender<ConnectIpInfo>, // other side is the ip_handler_t
@@ -199,12 +199,13 @@ pub async fn quic_conn_handler(
                 }
                 let header_len = varint_len(flow_id) + varint_len(context_id);
                 match ip::Packet::new(buf[header_len..len].to_vec().as_slice()) {
-                    Ok(ip::Packet::V4(_)) => {
+                    Ok(ip::Packet::V4(v)) => {
                         debug!("Received IPv4 packet via http3");
-                        // TODO: Send packet to TUN interface
-                        //       Do we have to do anything else before that?
-                        //       Might need to change the IP depending on the servers answer
-                        //       to our address request
+                        // Check if the ip packet was valid first, if not we discard of it
+                        if !v.is_valid() {
+                            debug!("Received invalid ipv4 packet, discarding..");
+                            continue;
+                        }
                         match ip_sender.send(IpMessage {
                             message: buf[header_len..len].to_vec(),
                             dir: Direction::ToClient,
@@ -381,6 +382,7 @@ pub async fn quic_conn_handler(
                                     error!("stream shutdown write failed: {:?}", e)
                                 });
                         }
+                        got_h3_conn = false;
                     }
                     Ok((_, quiche::h3::Event::PriorityUpdate)) => unreachable!(),
 
@@ -509,7 +511,7 @@ pub async fn establish_ip_connect(
 pub async fn quic_dispatcher_t(
     mut rx: UnboundedReceiver<ToSend>,
     mut quic_sender_recv: UnboundedReceiver<Arc<Mutex<Option<quiche::h3::Connection>>>>,
-    mut conn: Arc<Mutex<Connection>>,
+    conn: Arc<Mutex<Connection>>,
 ) {
     // First wait for the connection info the QUIC handler provides
     // With that you can exchange ip's and everything
@@ -518,7 +520,7 @@ pub async fn quic_dispatcher_t(
     while http3_conn.is_none() {
         http3_conn = quic_sender_recv.recv().await;
     }
-    let mut http3_conn = http3_conn.unwrap();
+    let http3_conn = http3_conn.unwrap();
     let mut to_send_queue: VecDeque<ToSend> = VecDeque::new();
     loop {
         if let Some(pkt) = rx.recv().await {
@@ -661,7 +663,7 @@ impl ConnectIPClient {
             }
         };
 
-        let mut quic_conn = match self.create_quic_conn(&mut socket, server_addr).await {
+        let quic_conn = match self.create_quic_conn(&mut socket, server_addr).await {
             Ok(v) => v,
             Err(e) => {
                 error!("could not create quic connection: {}", e);
@@ -669,8 +671,8 @@ impl ConnectIPClient {
             }
         };
         // We need two connections in different threads, so we put it in a Arc<Mutex<>>
-        let mut quic_conn = Arc::new(Mutex::new(quic_conn));
-        let mut quic_conn_clone = quic_conn.clone();
+        let quic_conn = Arc::new(Mutex::new(quic_conn));
+        let quic_conn_clone = quic_conn.clone();
         // 2) Setup Connect IP stream
 
         // 3) Create TUN
@@ -682,24 +684,25 @@ impl ConnectIPClient {
             }
         };
 
-        let (mut reader, mut writer) = dev.split();
+        let (reader, writer) = dev.split();
 
         // 4) Create receivers/senders
 
         // ip_sender for ip_receiver_t, ip_recv for ip_handler_t
-        let (ip_sender, mut ip_recv) = tokio::sync::mpsc::unbounded_channel();
-        let (quic_dispatch, mut quic_dispatch_reader) = tokio::sync::mpsc::unbounded_channel();
-        let (ip_dispatch, mut ip_dispatch_reader) = tokio::sync::mpsc::unbounded_channel();
-        let (conn_info_sender, mut conn_info_recv) = tokio::sync::mpsc::unbounded_channel();
-        let (http3_sender, mut http3_receiver) = tokio::sync::mpsc::unbounded_channel();
-        let (quic_info_sender, mut quic_info_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (ip_sender, ip_recv) = tokio::sync::mpsc::unbounded_channel();
+        let (quic_dispatch, quic_dispatch_reader) = tokio::sync::mpsc::unbounded_channel();
+        let (ip_dispatch, ip_dispatch_reader) = tokio::sync::mpsc::unbounded_channel();
+        let (conn_info_sender, conn_info_recv) = tokio::sync::mpsc::unbounded_channel();
+        let (quic_info_sender, quic_info_receiver) = tokio::sync::mpsc::unbounded_channel();
 
         // Copies of senders
         let ip_from_quic_sender = ip_sender.clone();
+        let http3_sender = quic_dispatch.clone();
 
         tokio::select! {
             _ = ip_receiver_t(ip_sender, reader) => {},
             _ = ip_handler_t(ip_recv, conn_info_recv, quic_dispatch, ip_dispatch) => {},
+            _ = ip_dispatcher_t(ip_dispatch_reader, writer) => {},
             _ = quic_conn_handler(
                     ip_from_quic_sender,
                     conn_info_sender,
