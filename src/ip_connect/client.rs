@@ -40,7 +40,6 @@ pub struct QuicStream {
  * Includes converters for local ip's to destination ip's (and the other way around)
  */
 pub struct ConnectIpInfo {
-    pub http_sender: UnboundedSender<ToSend>,
     pub stream_id: u64,
     pub flow_id: u64,
     pub local_ip: Ipv4Addr,
@@ -173,6 +172,7 @@ pub async fn quic_conn_handler(
     let mut http3_conn: Arc<Mutex<Option<quiche::h3::Connection>>> = Arc::new(Mutex::new(None));
     let mut stream: Option<QuicStream> = None;
     let mut assigned_addr: Option<Ipv4Addr> = None;
+    let mut got_ip_addr = false;
     let mut got_h3_conn = false;
 
     loop {
@@ -274,7 +274,7 @@ pub async fn quic_conn_handler(
 
             http3_sender
                 .send(ToSend {
-                    stream_id: stream.unwrap().stream_id,
+                    stream_id: stream.as_ref().unwrap().stream_id,
                     content: Content::Data { data: buf.to_vec() },
                     finished: false,
                 })
@@ -327,6 +327,8 @@ pub async fn quic_conn_handler(
                         debug!("received stream data");
                         let conn_clone = conn.clone();
                         let mut conn_clone = conn_clone.lock().await;
+                        let mut incoming: Vec<u8> = Vec::new();
+                        let mut pos = 0;
                         while let Ok(read) = http3_conn
                             .lock()
                             .await
@@ -334,15 +336,49 @@ pub async fn quic_conn_handler(
                             .unwrap()
                             .recv_body(&mut conn_clone, stream_id, &mut buf)
                         {
+                            incoming.extend_from_slice(&buf[0..read]);
+                            pos += read;
+                        }
+                        // Finished reading data
+                        if pos == incoming.len() {
                             // we only receive capsules via data, so parse this capsule
-                            match Capsule::new(&buf) {
-                                Ok(v) => {
-                                    // TODO: handle the capsule
-                                    todo!()
-                                }
+                            let parsed = match Capsule::new(&incoming) {
+                                Ok(v) => v,
                                 Err(e) => {
                                     debug!("Couldn't parse capsule: {}", e);
+                                    break;
                                 }
+                            };
+                            match parsed.capsule_type {
+                                crate::ip_connect::capsules::CapsuleType::AddressAssign(c) => {
+                                    // TODO: Check if this packet is correctly structured
+                                    //       Potentially we also want to make sure that we can 
+                                    //       change our own IP later and notify clients about it?
+                                    //       Also: See if we can use the other values like the prefix
+                                    //       This should not be used like this in prod
+                                    if let IpLength::V4(ipv4) = c.assigned_address[0].ip_address {
+                                        assigned_addr = Some(Ipv4Addr::from(ipv4));
+                                        if !got_ip_addr {
+                                            // Send assigned ip to ip handler
+                                            let ci = ConnectIpInfo {
+                                                assigned_ip: assigned_addr.unwrap(),
+                                                flow_id: stream.as_ref().unwrap().flow_id, 
+                                                stream_id: stream.as_ref().unwrap().stream_id,
+                                                local_ip: assigned_addr.unwrap(), // TODO: 
+                                            };
+                                            info_sender.send(ci)
+                                                .expect("Could not send connect ip info to ip handler.");
+                                        }
+                                    } else {
+                                        panic!("Received an ipv6 address even tho we only allow ipv4");
+                                    }
+                                },
+                                crate::ip_connect::capsules::CapsuleType::AddressRequest(_) => {
+                                    // We should not be receiving this one.
+                                },
+                                crate::ip_connect::capsules::CapsuleType::RouteAdvertisement(_) => {
+
+                                },
                             }
                         }
                     }

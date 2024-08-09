@@ -2,7 +2,6 @@ use masquerade_proxy::ip_connect::client::ConnectIPClient;
 
 use std::env;
 use std::error::Error;
-use log::error;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
