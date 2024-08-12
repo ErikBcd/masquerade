@@ -69,8 +69,14 @@ pub fn generate_cid_and_reset_token<T: SecureRandom>(
 /**
  * Receives raw IP messages from a TUN.
  * Will send received messages to the ip_handler_t
+ * Arguments:
+ *  - ip_handler: Channel that handles received ip messages
+ *  - reader: Receiver for raw ip messages
  */
-pub async fn ip_receiver_t(tx: UnboundedSender<IpMessage>, mut reader: Reader) {
+pub async fn ip_receiver_t(
+    ip_handler: UnboundedSender<IpMessage>, 
+    mut reader: Reader //
+) {
     debug!("Started ip_receiver thread!");
     let mut buf = [0; 4096];
     loop {
@@ -78,7 +84,7 @@ pub async fn ip_receiver_t(tx: UnboundedSender<IpMessage>, mut reader: Reader) {
         //debug!("Read TUN message size {size}");
         let pkt = &buf[..size];
         use std::io::{Error, ErrorKind::Other};
-        match tx
+        match ip_handler
             .send(IpMessage {
                 message: pkt.to_vec(),
                 dir: Direction::ToServer,
@@ -286,128 +292,130 @@ pub async fn quic_conn_handler(
                 };
                 debug!("a processed {} bytes", read);
                 if let Some(http3_conn) = &mut http3_conn {
-                    debug!("polling on http3 connection");
-                    match http3_conn.poll(&mut conn) {
-                        Ok((stream_id, quiche::h3::Event::Headers { list, .. })) => {
-                            info!(
-                                "got response headers {:?} on stream id {}",
-                                hdrs_to_strings(&list),
-                                stream_id
-                            );
-                            // TODO: Can we just ignore headers that occur now?
-                        }
-
-                        Ok((stream_id, quiche::h3::Event::Data)) => {
-                            debug!("received stream data");
-                            let mut incoming: Vec<u8> = Vec::new();
-                            let mut pos = 0;
-                            while let Ok(read) = http3_conn_temp
-                                .lock()
-                                .await
-                                .as_mut()
-                                .unwrap()
-                                .recv_body(&mut conn, stream_id, &mut buf)
-                            {
-                                incoming.extend_from_slice(&buf[0..read]);
-                                pos += read;
+                    loop {
+                        debug!("polling on http3 connection");
+                        match http3_conn.poll(&mut conn) {
+                            Ok((stream_id, quiche::h3::Event::Headers { list, .. })) => {
+                                info!(
+                                    "got response headers {:?} on stream id {}",
+                                    hdrs_to_strings(&list),
+                                    stream_id
+                                );
+                                // TODO: Can we just ignore headers that occur now?
                             }
-                            // Finished reading data
-                            if pos == incoming.len() {
-                                // we only receive capsules via data, so parse this capsule
-                                let parsed = match Capsule::new(&incoming) {
-                                    Ok(v) => v,
-                                    Err(e) => {
-                                        debug!("Couldn't parse capsule: {}", e);
-                                        break;
-                                    }
-                                };
-                                match parsed.capsule_type {
-                                    crate::ip_connect::capsules::CapsuleType::AddressAssign(c) => {
-                                        // TODO: Check if this packet is correctly structured
-                                        //       Potentially we also want to make sure that we can
-                                        //       change our own IP later and notify clients about it?
-                                        //       Also: See if we can use the other values like the prefix
-                                        //       This should not be used like this in prod
-                                        if let IpLength::V4(ipv4) = c.assigned_address[0].ip_address {
-                                            assigned_addr = Some(Ipv4Addr::from(ipv4));
-                                            if !got_ip_addr {
-                                                // Send assigned ip to ip handler
-                                                let ci = ConnectIpInfo {
-                                                    assigned_ip: assigned_addr.unwrap(),
-                                                    flow_id: stream.as_ref().unwrap().flow_id,
-                                                    stream_id: stream.as_ref().unwrap().stream_id,
-                                                    local_ip: assigned_addr.unwrap(), // TODO:
-                                                };
-                                                info_sender.send(ci)
-                                                    .expect("Could not send connect ip info to ip handler.");
-                                                got_ip_addr = true;
-                                            }
-                                        } else {
-                                            panic!("Received an ipv6 address even tho we only allow ipv4");
-                                        }
-                                    },
-                                    crate::ip_connect::capsules::CapsuleType::AddressRequest(_) => {
-                                        // We should not be receiving this one.
-                                    },
-                                    crate::ip_connect::capsules::CapsuleType::RouteAdvertisement(_) => {
 
-                                    },
+                            Ok((stream_id, quiche::h3::Event::Data)) => {
+                                debug!("received stream data");
+                                let mut incoming: Vec<u8> = Vec::new();
+                                let mut pos = 0;
+                                while let Ok(read) = http3_conn_temp
+                                    .lock()
+                                    .await
+                                    .as_mut()
+                                    .unwrap()
+                                    .recv_body(&mut conn, stream_id, &mut buf)
+                                {
+                                    incoming.extend_from_slice(&buf[0..read]);
+                                    pos += read;
+                                }
+                                // Finished reading data
+                                if pos == incoming.len() {
+                                    // we only receive capsules via data, so parse this capsule
+                                    let parsed = match Capsule::new(&incoming) {
+                                        Ok(v) => v,
+                                        Err(e) => {
+                                            debug!("Couldn't parse capsule: {}", e);
+                                            break;
+                                        }
+                                    };
+                                    match parsed.capsule_type {
+                                        crate::ip_connect::capsules::CapsuleType::AddressAssign(c) => {
+                                            // TODO: Check if this packet is correctly structured
+                                            //       Potentially we also want to make sure that we can
+                                            //       change our own IP later and notify clients about it?
+                                            //       Also: See if we can use the other values like the prefix
+                                            //       This should not be used like this in prod
+                                            if let IpLength::V4(ipv4) = c.assigned_address[0].ip_address {
+                                                assigned_addr = Some(Ipv4Addr::from(ipv4));
+                                                if !got_ip_addr {
+                                                    // Send assigned ip to ip handler
+                                                    let ci = ConnectIpInfo {
+                                                        assigned_ip: assigned_addr.unwrap(),
+                                                        flow_id: stream.as_ref().unwrap().flow_id,
+                                                        stream_id: stream.as_ref().unwrap().stream_id,
+                                                        local_ip: assigned_addr.unwrap(), // TODO:
+                                                    };
+                                                    info_sender.send(ci)
+                                                        .expect("Could not send connect ip info to ip handler.");
+                                                    got_ip_addr = true;
+                                                }
+                                            } else {
+                                                panic!("Received an ipv6 address even tho we only allow ipv4");
+                                            }
+                                        },
+                                        crate::ip_connect::capsules::CapsuleType::AddressRequest(_) => {
+                                            // We should not be receiving this one.
+                                        },
+                                        crate::ip_connect::capsules::CapsuleType::RouteAdvertisement(_) => {
+
+                                        },
+                                    }
                                 }
                             }
-                        }
 
-                        Ok((stream_id, quiche::h3::Event::Finished)) => {
-                            info!("finished received, stream id: {} closing", stream_id);
-                            // Shut down the stream
-                            // TODO: If this stream is the main connect-ip stream, we have to exit or
-                            //       create a new one
-                            if conn.stream_finished(stream_id) {
-                                debug!("stream {} finished", stream_id);
-                            } else {
-                                conn.stream_shutdown(stream_id, quiche::Shutdown::Read, 0)
-                                    .unwrap_or_else(|e| error!("stream shutdown read failed: {:?}", e));
-                                conn.stream_shutdown(stream_id, quiche::Shutdown::Write, 0)
-                                    .unwrap_or_else(|e| {
-                                        error!("stream shutdown write failed: {:?}", e)
-                                    });
+                            Ok((stream_id, quiche::h3::Event::Finished)) => {
+                                info!("finished received, stream id: {} closing", stream_id);
+                                // Shut down the stream
+                                // TODO: If this stream is the main connect-ip stream, we have to exit or
+                                //       create a new one
+                                if conn.stream_finished(stream_id) {
+                                    debug!("stream {} finished", stream_id);
+                                } else {
+                                    conn.stream_shutdown(stream_id, quiche::Shutdown::Read, 0)
+                                        .unwrap_or_else(|e| error!("stream shutdown read failed: {:?}", e));
+                                    conn.stream_shutdown(stream_id, quiche::Shutdown::Write, 0)
+                                        .unwrap_or_else(|e| {
+                                            error!("stream shutdown write failed: {:?}", e)
+                                        });
+                                }
                             }
-                        }
 
-                        Ok((stream_id, quiche::h3::Event::Reset(e))) => {
-                            error!(
-                                "request was reset by peer with {}, stream id: {} closed",
-                                e, stream_id
-                            );
-                            // Shut down the stream
-                            // TODO: If this stream is the main connect-ip stream, we have to exit or
-                            //       create a new one
-                            if conn.stream_finished(stream_id) {
-                                debug!("stream {} finished", stream_id);
-                            } else {
-                                conn.stream_shutdown(stream_id, quiche::Shutdown::Read, 0)
-                                    .unwrap_or_else(|e| error!("stream shutdown read failed: {:?}", e));
-                                conn.stream_shutdown(stream_id, quiche::Shutdown::Write, 0)
-                                    .unwrap_or_else(|e| {
-                                        error!("stream shutdown write failed: {:?}", e)
-                                    });
+                            Ok((stream_id, quiche::h3::Event::Reset(e))) => {
+                                error!(
+                                    "request was reset by peer with {}, stream id: {} closed",
+                                    e, stream_id
+                                );
+                                // Shut down the stream
+                                // TODO: If this stream is the main connect-ip stream, we have to exit or
+                                //       create a new one
+                                if conn.stream_finished(stream_id) {
+                                    debug!("stream {} finished", stream_id);
+                                } else {
+                                    conn.stream_shutdown(stream_id, quiche::Shutdown::Read, 0)
+                                        .unwrap_or_else(|e| error!("stream shutdown read failed: {:?}", e));
+                                    conn.stream_shutdown(stream_id, quiche::Shutdown::Write, 0)
+                                        .unwrap_or_else(|e| {
+                                            error!("stream shutdown write failed: {:?}", e)
+                                        });
+                                }
+                                got_h3_conn = false;
                             }
-                            got_h3_conn = false;
-                        }
-                        Ok((_, quiche::h3::Event::PriorityUpdate)) => unreachable!(),
+                            Ok((_, quiche::h3::Event::PriorityUpdate)) => unreachable!(),
 
-                        Ok((goaway_id, quiche::h3::Event::GoAway)) => {
-                            info!("GOAWAY id={}", goaway_id);
-                        }
+                            Ok((goaway_id, quiche::h3::Event::GoAway)) => {
+                                info!("GOAWAY id={}", goaway_id);
+                            }
 
-                        Err(quiche::h3::Error::Done) => {
-                            debug!("poll done");
-                            break;
-                        }
+                            Err(quiche::h3::Error::Done) => {
+                                debug!("poll done");
+                                break;
+                            }
 
-                        Err(e) => {
-                            error!("HTTP/3 processing failed: {:?}", e);
-                            break;
-                        }
+                            Err(e) => {
+                                error!("HTTP/3 processing failed: {:?}", e);
+                                break;
+                            }
+                        };
                     };
                 }
             },
@@ -1012,6 +1020,22 @@ impl ConnectIPClient {
             //&& !quic_disp_t.is_finished()
         {
             sleep(Duration::from_millis(10)).await;
+        }
+        // gracefully exit
+        if !ip_recv_t.is_finished() {
+            ip_recv_t.abort();
+        }
+
+        if !ip_h_t.is_finished() {
+            ip_h_t.abort();
+        }
+
+        if !ip_disp_t.is_finished() {
+            ip_disp_t.abort();
+        }
+
+        if !quic_h_t.is_finished() {
+            quic_h_t.abort();
         }
         debug!("ConnectIPClient exiting..");
     }
