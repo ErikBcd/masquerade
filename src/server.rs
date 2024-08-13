@@ -1,3 +1,4 @@
+use futures::channel::mpsc::UnboundedReceiver;
 use log::*;
 use quiche::h3::NameValue;
 
@@ -645,7 +646,14 @@ fn handle_http3_event(
                     .get(&flow_id)
                     .unwrap()
                     .send(data.to_vec())
-                    .expect("channel send failed");
+                    .expect("Send to udp connect handler failed.");
+            } else if connect_ip.contains_key(&flow_id) {
+                let data = &buf[flow_id_len..len];
+                connect_ip
+                    .get(&flow_id)
+                    .unwrap()
+                    .send(data.to_vec())
+                    .expect("Could not send datagram to ip handler.");
             } else {
                 debug!("received datagram on unknown flow: {}", flow_id)
             }
@@ -692,109 +700,19 @@ fn handle_http3_event(
                                 );
                                 let http3_sender_clone_1 = http3_sender.clone();
                                 let http3_sender_clone_2 = http3_sender.clone();
-                                let (udp_sender, mut udp_receiver) =
+                                let (udp_sender, udp_receiver) =
                                     mpsc::unbounded_channel::<Vec<u8>>();
                                 let flow_id = stream_id / 4;
                                 connect_sockets.insert(flow_id, udp_sender);
+                                
                                 tokio::spawn(async move {
-                                    let socket = match UdpSocket::bind("0.0.0.0:0").await {
-                                        Ok(v) => v,
-                                        Err(e) => {
-                                            error!("Error binding UDP socket: {:?}", e);
-                                            return;
-                                        }
-                                    };
-                                    if socket.connect(peer_addr).await.is_err() {
-                                        error!("Error connecting to UDP {}", peer_addr);
-                                        return;
-                                    };
-                                    let socket = Arc::new(socket);
-                                    let socket_clone = socket.clone();
-                                    let read_task = tokio::spawn(async move {
-                                        let mut buf = [0; 65527]; // max length of UDP Proxying Payload, ref: https://www.rfc-editor.org/rfc/rfc9298.html#name-http-datagram-payload-forma
-                                        loop {
-                                            let read = match socket_clone.recv(&mut buf).await {
-                                                Ok(v) => v,
-                                                Err(e) => {
-                                                    error!("Error reading from UDP {} on stream id {}: {}", peer_addr, stream_id, e);
-                                                    break;
-                                                }
-                                            };
-                                            if read == 0 {
-                                                debug!("UDP connection closed from {}", peer_addr); // do we need this check?
-                                                break;
-                                            }
-                                            debug!(
-                                                "read {} bytes from UDP from {} for flow {}",
-                                                read, peer_addr, flow_id
-                                            );
-                                            let data = wrap_udp_connect_payload(0, &buf[..read]);
-                                            http3_sender_clone_1
-                                                .send(ToSend {
-                                                    stream_id: flow_id,
-                                                    content: Content::Datagram { payload: data },
-                                                    finished: false }
-                                                )
-                                                .unwrap_or_else(|e| debug!("Sending udp connect payload to clone failed: {:?}", e));
-                                        }
-                                    });
-                                    let write_task = tokio::spawn(async move {
-                                        loop {
-                                            let data = match udp_receiver.recv().await {
-                                                Some(v) => v,
-                                                None => {
-                                                    debug!(
-                                                        "UDP receiver channel closed for flow {}",
-                                                        flow_id
-                                                    );
-                                                    break;
-                                                }
-                                            };
-                                            let (context_id, payload) = decode_var_int(&data);
-                                            assert_eq!(context_id, 0, "received UDP Proxying Datagram with non-zero Context ID");
-
-                                            trace!("start sending on UDP");
-                                            let bytes_written = match socket.send(payload).await {
-                                                Ok(v) => v,
-                                                Err(e) => {
-                                                    error!(
-                                                        "Error writing to UDP {} on flow id {}: {}",
-                                                        peer_addr, flow_id, e
-                                                    );
-                                                    return;
-                                                }
-                                            };
-                                            if bytes_written < payload.len() {
-                                                debug!("Partially sent {} bytes of UDP packet of length {}", bytes_written, payload.len());
-                                            }
-                                            debug!(
-                                                "written {} bytes from UDP to {} for flow {}",
-                                                payload.len(),
-                                                peer_addr,
-                                                flow_id
-                                            );
-                                        }
-                                    });
-                                    let headers = vec![quiche::h3::Header::new(b":status", b"200")];
-                                    http3_sender_clone_2
-                                        .send(ToSend {
-                                            stream_id,
-                                            content: Content::Headers { headers },
-                                            finished: false,
-                                        })
-                                        .expect("channel send failed");
-                                    match tokio::join!(read_task, write_task) {
-                                        (Err(e), Err(e2)) => {
-                                            debug!("Two errors occured when joining r/w tasks: {:?} | {:?}", e, e2);
-                                        },
-                                        (Err(e), _) => {
-                                            debug!("An error occured when joining r/w tasks: {:?}", e);
-                                        },
-                                        (_, Err(e)) => {
-                                            debug!("An error occured when joining r/w tasks: {:?}", e);
-                                        },
-                                        (_, _) => {}
-                                    };
+                                    udp_connect_handler(
+                                        peer_addr, 
+                                        stream_id, 
+                                        flow_id, 
+                                        http3_sender_clone_1, 
+                                        http3_sender_clone_2, 
+                                        udp_receiver).await;
                                 });
                             }
                         } else if protocol == Some(b"connect-ip") && scheme.is_some() && path.is_some() && !authority.is_empty() {
@@ -1073,4 +991,115 @@ fn remove_stream(
     }*/
     connect_streams.remove(&stream_id);
     //Ok(())
+}
+
+async fn udp_connect_handler(
+    peer_addr: SocketAddr, 
+    stream_id: u64, 
+    flow_id: u64, 
+    http3_sender_clone_1: UnboundedSender<ToSend>,
+    http3_sender_clone_2: UnboundedSender<ToSend>,
+    mut udp_receiver: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>
+) {
+    let socket = match UdpSocket::bind("0.0.0.0:0").await {
+        Ok(v) => v,
+        Err(e) => {
+            error!("Error binding UDP socket: {:?}", e);
+            return;
+        }
+    };
+    if socket.connect(peer_addr).await.is_err() {
+        error!("Error connecting to UDP {}", peer_addr);
+        return;
+    };
+    let peer_addr_clone = peer_addr.clone();
+    let socket = Arc::new(socket);
+    let socket_clone = socket.clone();
+    let read_task = tokio::spawn(async move {
+        let mut buf = [0; 65527]; // max length of UDP Proxying Payload, ref: https://www.rfc-editor.org/rfc/rfc9298.html#name-http-datagram-payload-forma
+        loop {
+            let read = match socket_clone.recv(&mut buf).await {
+                Ok(v) => v,
+                Err(e) => {
+                    error!("Error reading from UDP {} on stream id {}: {}", peer_addr_clone, stream_id, e);
+                    break;
+                }
+            };
+            if read == 0 {
+                debug!("UDP connection closed from {}", peer_addr_clone); // do we need this check?
+                break;
+            }
+            debug!(
+                "read {} bytes from UDP from {} for flow {}",
+                read, peer_addr_clone, flow_id
+            );
+            let data = wrap_udp_connect_payload(0, &buf[..read]);
+            http3_sender_clone_1
+                .send(ToSend {
+                    stream_id: flow_id,
+                    content: Content::Datagram { payload: data },
+                    finished: false }
+                )
+                .unwrap_or_else(|e| debug!("Sending udp connect payload to clone failed: {:?}", e));
+        }
+    });
+
+    let peer_addr_clone_2 = peer_addr.clone();
+    let write_task = tokio::spawn(async move {
+        loop {
+            let data = match udp_receiver.recv().await {
+                Some(v) => v,
+                None => {
+                    debug!(
+                        "UDP receiver channel closed for flow {}",
+                        flow_id
+                    );
+                    break;
+                }
+            };
+            let (context_id, payload) = decode_var_int(&data);
+            assert_eq!(context_id, 0, "received UDP Proxying Datagram with non-zero Context ID");
+
+            trace!("start sending on UDP");
+            let bytes_written = match socket.send(payload).await {
+                Ok(v) => v,
+                Err(e) => {
+                    error!(
+                        "Error writing to UDP {} on flow id {}: {}",
+                        peer_addr_clone_2, flow_id, e
+                    );
+                    return;
+                }
+            };
+            if bytes_written < payload.len() {
+                debug!("Partially sent {} bytes of UDP packet of length {}", bytes_written, payload.len());
+            }
+            debug!(
+                "written {} bytes from UDP to {} for flow {}",
+                payload.len(),
+                peer_addr_clone_2,
+                flow_id
+            );
+        }
+    });
+    let headers = vec![quiche::h3::Header::new(b":status", b"200")];
+    http3_sender_clone_2
+        .send(ToSend {
+            stream_id,
+            content: Content::Headers { headers },
+            finished: false,
+        })
+        .expect("channel send failed");
+    match tokio::join!(read_task, write_task) {
+        (Err(e), Err(e2)) => {
+            debug!("Two errors occured when joining r/w tasks: {:?} | {:?}", e, e2);
+        },
+        (Err(e), _) => {
+            debug!("An error occured when joining r/w tasks: {:?}", e);
+        },
+        (_, Err(e)) => {
+            debug!("An error occured when joining r/w tasks: {:?}", e);
+        },
+        (_, _) => {}
+    };
 }
