@@ -1,10 +1,10 @@
-use futures::channel::mpsc::UnboundedReceiver;
 use log::*;
 use quiche::h3::NameValue;
 use url::Url;
 
 use std::collections::HashMap;
 use std::error::Error;
+use std::io::{ErrorKind, Read, Write};
 use std::net::ToSocketAddrs;
 use std::net::{self, SocketAddr};
 use std::sync::Arc;
@@ -738,6 +738,15 @@ fn handle_http3_event(
                                 connect_ip.insert(flow_id, tun_sender);
 
                                 // spawn handler thread for this one
+                                tokio::spawn(async move {
+                                    connect_ip_handler(
+                                        stream_id,
+                                        flow_id,
+                                        http3_sender_clone_1,
+                                        http3_sender_clone_2,
+                                        tun_receiver,
+                                    ).await;
+                                });
                                 
                             }
                         } else if let Ok(target_url) = if authority.contains("://") {
@@ -1016,6 +1025,106 @@ async fn tcp_stream_handler(
         },
         (_, _) => {}
     };
+}
+
+fn set_ip_settings() {
+    todo!();
+}
+
+/**
+ * Creates a TUN socket and sets it up in the system.
+ * Will then create a writer and a reader thread which are connected to channels.
+ */
+async fn tun_socket_handler(
+    ip_handler: UnboundedSender<Vec<u8>>,
+    mut tun_sender: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+) {
+    // first create tun socket
+    let mut config = tun2::Configuration::default();
+
+    config
+        .address((10, 0, 0, 9))
+        .netmask((255, 255, 255, 0))
+        .destination((10, 0, 0, 1))
+        .up();
+
+    #[cfg(target_os = "linux")]
+    config.platform_config(|config| {
+        config.ensure_root_privileges(true);
+    });
+
+    let dev = tun2::create(&config);
+
+    set_ip_settings();
+
+    let (mut reader, mut writer) = dev.unwrap().split();
+    // create reader thread
+    // Reads from the TUN device and sends messages to connect_ip handler(s)
+    let read_t = tokio::spawn(async move {
+        let mut buf = [0; 4096];
+        loop {
+            let size = reader.read(&mut buf).expect("Could not read from reader");
+            let pkt = &buf[..size];
+            ip_handler.send(pkt.to_vec())
+                .expect("Could not send a message to ip handler channel!");
+        }
+    });
+
+    // create writer thread
+    // Waits for messages from the connect_ip handler(s) and sends them via TUN device
+    let write_t = tokio::spawn(async move {
+        loop {
+            if let Some(pkt) = tun_sender.recv().await {
+                // TODO: For now we make sure to only send ipv4 packets
+                // Get the version by looking at the first nibble
+                let version = pkt[0].reverse_bits() & 0b00001111;
+                if version == 4 {
+                    // All is okay, send the packet to the TUN interface
+                    // call write as long as needed to send the entire packet
+                    let mut pos = 0;
+                    while pos <= pkt.len() {
+                        let written = match writer.write(&pkt[pos..]) {
+                            Ok(n) => n,
+                            Err(e) => {
+                                if e.kind() == ErrorKind::Interrupted {
+                                    0
+                                } else {
+                                    panic!("Could not write to TUN device: {e}");
+                                }
+                            },
+                        };
+                        pos += written;
+                    }
+                } else if version == 6 {
+                    debug!("TUN Writer Received ipv6 packet, ignoring for now...");
+                } else {
+                    error!("TUN Writer received ip packet of unknown version: {}", version);
+                }
+            }
+        }
+    });
+    match tokio::join!(read_t, write_t) {
+        (Err(e), Err(e2)) => {
+            debug!("Two errors occured when joining r/w tasks: {:?} | {:?}", e, e2);
+        },
+        (Err(e), _) => {
+            debug!("An error occured when joining r/w tasks: {:?}", e);
+        },
+        (_, Err(e)) => {
+            debug!("An error occured when joining r/w tasks: {:?}", e);
+        },
+        (_, _) => {}
+    }
+}
+
+async fn connect_ip_handler(
+    stream_id: u64,
+    flow_id: u64,
+    http3_sender_clone_1: UnboundedSender<ToSend>,
+    http3_sender_clone_2: UnboundedSender<ToSend>,
+    mut tun_receiver: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>
+) {
+
 }
 
 async fn udp_connect_handler(
