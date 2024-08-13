@@ -1,4 +1,5 @@
 use log::*;
+use packet::ip;
 use quiche::h3::NameValue;
 use url::Url;
 
@@ -733,10 +734,16 @@ fn handle_http3_event(
                                 // one for reader thread, one for writer thread
                                 let http3_sender_clone_1 = http3_sender.clone();
                                 let http3_sender_clone_2 = http3_sender.clone();
+                                // TODO: We need to clone a TUN sender 
+                                //       to give it to the connect_ip_handler
                                 let (tun_sender, tun_receiver) = mpsc::unbounded_channel::<Vec<u8>>();
+                                let (ip_http3_sender, ip_http3_receiver) = mpsc::unbounded_channel::<Vec<u8>>();
                                 let flow_id = stream_id / 4;
-                                connect_ip.insert(flow_id, tun_sender);
-
+                                connect_ip.insert(flow_id, ip_http3_sender);
+                                // TODO: Create another hashmap with map<IP, ip_receiver>
+                                //       This will allow the tun handler to send received packets to
+                                //       the correct client.
+                                let (temp_tun_sender, temp_tun_recv) = mpsc::unbounded_channel::<Vec<u8>>();
                                 // spawn handler thread for this one
                                 tokio::spawn(async move {
                                     connect_ip_handler(
@@ -745,6 +752,8 @@ fn handle_http3_event(
                                         http3_sender_clone_1,
                                         http3_sender_clone_2,
                                         tun_receiver,
+                                        temp_tun_sender,
+                                        ip_http3_receiver,
                                     ).await;
                                 });
                                 
@@ -1122,9 +1131,81 @@ async fn connect_ip_handler(
     flow_id: u64,
     http3_sender_clone_1: UnboundedSender<ToSend>,
     http3_sender_clone_2: UnboundedSender<ToSend>,
-    mut tun_receiver: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>
+    mut tun_receiver: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+    mut tun_sender: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
+    mut http3_receiver: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>
 ) {
+    let read_task = tokio::spawn(async move {
+        let mut buf = [0; 65527]; // TODO: Check what the max length of a IP proxy payload is
+        loop {
+            // Check for packets in the tun receiver
+            // This receiver gets packets from the TUN interface that are supposed to be tunnelled
+            // to the proxy client.
+            // The packets are confirmed to be ipv4 packets so we don't need to worry about anything.
+            // Just create the http3 datagram and send the packet.
+            if let Some(pkt) = tun_receiver.recv().await {
+                let dgram = ToSend {
+                    stream_id: stream_id.clone(),
+                    content: Content::Datagram { payload: pkt },
+                    finished: false,
+                };
+                http3_sender_clone_1.send(dgram)
+                    .expect("Could not send datagram to http3 sender!");
+            }
+        }
+    });
 
+    let write_task = tokio::spawn(async move {
+        loop {
+            // Check for packets in the http3 receiver
+            // This receiver gets datagram bodies (which are just ip packets) from the client proxy 
+            // and handles them (sends them to the TUN interface)
+            if let Some(pkt) = http3_receiver.recv().await {
+                // Check first if the packet came in without errors
+                let test_pkt = pkt.clone();
+                match ip::Packet::new(test_pkt) {
+                    Ok(ip::Packet::V4(v)) => {
+                        debug!("Received IPv4 packet via http3");
+                        if !v.is_valid() {
+                            debug!("Received invalid ipv4 packet, discarding..");
+                            continue;
+                        }
+                        tun_sender.send(pkt)
+                            .expect("Wasn't able to send ip packet to tun handler");
+                    }
+                    Ok(ip::Packet::V6(_)) => {
+                        debug!("Received IPv6 packet via http3 (not implemented yet)");
+                        continue;
+                    }
+                    Err(err) => {
+                        debug!("Received an invalid packet: {:?}", err)
+                    }
+                }
+            }
+        }
+    });
+
+    // send ok to the client
+    let headers = vec![quiche::h3::Header::new(b":status", b"200")];
+    http3_sender_clone_2
+        .send(ToSend {
+            stream_id,
+            content: Content::Headers { headers },
+            finished: false,
+        })
+        .expect("channel send failed");
+    match tokio::join!(read_task, write_task) {
+        (Err(e), Err(e2)) => {
+            debug!("Two errors occured when joining r/w tasks: {:?} | {:?}", e, e2);
+        },
+        (Err(e), _) => {
+            debug!("An error occured when joining r/w tasks: {:?}", e);
+        },
+        (_, Err(e)) => {
+            debug!("An error occured when joining r/w tasks: {:?}", e);
+        },
+        (_, _) => {}
+    };
 }
 
 async fn udp_connect_handler(
