@@ -1,9 +1,41 @@
 use log::info;
 use quiche::h3::NameValue;
 
-use std::net::{self};
-
+use std::net::{self, Ipv4Addr};
+use crate::ip_connect::util::*;
 pub const MAX_DATAGRAM_SIZE: usize = 1350;
+
+/// Gets the next IPv4 address
+/// If the next address isn't allowed by the netmask an error is returned.
+/// 
+/// # Examples
+/// ```
+///     assert_eq!(
+///        get_next_ipv4(Ipv4Addr::new(192, 168, 0, 1), 0xFFFFFF00), 
+///        Ok(Ipv4Addr::new(192, 168, 0, 2)));
+///
+///     assert_eq!(
+///        get_next_ipv4(Ipv4Addr::new(192, 168, 0, 255), 0xFFFF0000), 
+///        Ok(Ipv4Addr::new(192, 168, 1, 0)));
+///
+///     assert_eq!(
+///        get_next_ipv4(Ipv4Addr::new(192, 168, 0, 255), 0xFFFFFF00), 
+///        Err(IPError { message: "Next address out of range!".to_owned()}));
+/// ```
+pub fn get_next_ipv4(
+    ip: Ipv4Addr,
+    netmask: u32,
+) -> Result<Ipv4Addr, IPError> {
+    let temp = ip.clone();
+    let mut val: u32 = u32::from(temp);
+    let compare = val.clone();
+    val += 1;
+    if (val & netmask) == (compare & netmask) {
+        Ok(Ipv4Addr::from(val))
+    } else {
+        Err(IPError { message: "Next address out of range!".to_owned() })
+    }
+}
 
 pub fn send_h3_dgram(
     conn: &mut quiche::Connection, flow_id: u64, dgram_content: &[u8],

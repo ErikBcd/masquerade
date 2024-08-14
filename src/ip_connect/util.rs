@@ -55,7 +55,7 @@ impl std::fmt::Display for HandleIPError {
 }
 impl Error for HandleIPError {}
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct IPError {
     pub message: String,
 }

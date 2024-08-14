@@ -1,10 +1,12 @@
 use log::error;
-use masquerade_proxy::ip_connect::capsules::*;
+use masquerade_proxy::ip_connect::{capsules::*, util::IPError};
 use octets::OctetsMut;
 use tokio::time::timeout;
 use std::{net::Ipv4Addr, str::FromStr, time::Duration};
 
 mod common;
+
+use masquerade_proxy::common::get_next_ipv4;
 
 // TODO: gracefully exit the tests (implement Drop for server and clients)
 
@@ -299,4 +301,21 @@ async fn route_advertisement_parsing_test() {
     cap.unwrap().serialize(&mut testbuf);
 
     assert_eq!(testbuf, buffer, "Testing deserialization: Serialized={:?} | Original={:?}", testbuf, buffer);
+}
+
+/// Simple test for the get_next_ipv4 function.
+/// 
+#[test_log::test(tokio::test)]
+async fn next_ip_test() {
+    assert_eq!(
+        get_next_ipv4(Ipv4Addr::new(192, 168, 0, 1), 0xFFFFFF00), 
+        Ok(Ipv4Addr::new(192, 168, 0, 2)));
+
+    assert_eq!(
+        get_next_ipv4(Ipv4Addr::new(192, 168, 0, 255), 0xFFFF0000), 
+        Ok(Ipv4Addr::new(192, 168, 1, 0)));
+
+    assert_eq!(
+        get_next_ipv4(Ipv4Addr::new(192, 168, 0, 255), 0xFFFFFF00), 
+        Err(IPError { message: "Next address out of range!".to_owned()}));
 }
