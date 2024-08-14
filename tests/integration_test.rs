@@ -62,7 +62,7 @@ async fn addr_assign_capsule_parsing_test() {
     {
         let mut addr_assign = OctetsMut::with_slice(&mut buffer);
 
-        assert!(addr_assign.put_varint(1).is_ok()); // Type
+        assert!(addr_assign.put_varint(ADDRESS_ASSIGN_ID).is_ok()); // Type
         assert!(addr_assign.put_varint(9).is_ok());// Length
         assert!(addr_assign.put_varint(0).is_ok()); // Request ID
         assert!(addr_assign.put_u8(4).is_ok()); // IP Version 4
@@ -147,7 +147,7 @@ async fn addr_request_capsule_parsing_test() {
     {
         let mut addr_request = OctetsMut::with_slice(&mut buffer);
 
-        assert!(addr_request.put_varint(2).is_ok()); // Type
+        assert!(addr_request.put_varint(ADDRESS_REQUEST_ID).is_ok()); // Type
         assert!(addr_request.put_varint(9).is_ok()); // Length
         assert!(addr_request.put_varint(0).is_ok()); // Request ID
         assert!(addr_request.put_u8(4).is_ok()); // IP Version 4
@@ -230,7 +230,7 @@ async fn route_advertisement_parsing_test() {
     {
         let mut addr_request = OctetsMut::with_slice(&mut buffer);
 
-        assert!(addr_request.put_varint(3).is_ok()); // Type
+        assert!(addr_request.put_varint(ROUTE_ADVERTISEMENT_ID).is_ok()); // Type
         assert!(addr_request.put_varint(12).is_ok()); // Length
         assert!(addr_request.put_u8(4).is_ok()); // IP Version 4
         assert!(addr_request.put_u32(Ipv4Addr::new(192, 168, 0, 45).into()).is_ok()); // IP 192.168.0.45

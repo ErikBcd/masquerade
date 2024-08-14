@@ -91,18 +91,18 @@ impl Capsule {
             .get_varint()
             .map_err(|_| CapsuleParseError::BufferTooShort)?;
         let c_type = match capsule_type_id {
-            1 => {
+            ADDRESS_ASSIGN_ID => {
                 // ADDRESS_ASSIGN
                 match AddressAssign::new(&mut oct) {
                     Ok(v) => CapsuleType::AddressAssign(v),
                     Err(e) => return Err(e),
                 }
             }
-            2 => match AddressRequest::new(&mut oct) {
+            ADDRESS_REQUEST_ID => match AddressRequest::new(&mut oct) {
                 Ok(v) => CapsuleType::AddressRequest(v),
                 Err(e) => return Err(e),
             },
-            3 => match RouteAdvertisement::new(&mut oct) {
+            ROUTE_ADVERTISEMENT_ID => match RouteAdvertisement::new(&mut oct) {
                 Ok(v) => CapsuleType::RouteAdvertisement(v),
                 Err(e) => return Err(e),
             },

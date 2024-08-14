@@ -20,7 +20,7 @@ use tun2::platform::posix::{Reader, Writer};
 use tun2::platform::Device;
 
 use crate::common::*;
-use crate::ip_connect::capsules::{AddressRequest, Capsule, IpLength, RequestedAddress};
+use crate::ip_connect::capsules::{AddressRequest, Capsule, IpLength, RequestedAddress, ADDRESS_REQUEST_ID};
 use crate::ip_connect::util::*;
 
 /**
@@ -711,7 +711,7 @@ async fn handle_ip_connect_stream(
                         };
 
                         let cap = Capsule {
-                            capsule_id: 1,
+                            capsule_id: ADDRESS_REQUEST_ID,
                             capsule_type: super::capsules::CapsuleType::AddressRequest(request_capsule),
                         };
 
