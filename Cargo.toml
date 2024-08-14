@@ -12,6 +12,7 @@ repository = "https://github.com/jromwu/masquerade"
 
 [lib]
 crate-type = ["lib"]
+doctest = false
 
 [dependencies]
 log = { version = "0.4", features = ["std"] }
