@@ -1,6 +1,7 @@
 use futures::lock::Mutex;
 use log::*;
 use packet::ip;
+use packet::ip::v4::Packet;
 use quiche::h3::NameValue;
 use tokio::task::JoinHandle;
 use url::Url;
@@ -11,6 +12,7 @@ use std::future::Future;
 use std::io::{ErrorKind, Read, Write};
 use std::net::{self, SocketAddr};
 use std::net::{Ipv4Addr, ToSocketAddrs};
+use std::process::Command;
 use std::sync::Arc;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -161,6 +163,14 @@ impl Server {
         // CONNECT-IP things
         // TODO: Un-hardcode this. Should just be the next free ip for the TUN interface.
         let mut current_ip = Ipv4Addr::new(10, 8, 0, 3);
+        let ip_connect_clients: Arc<Mutex<HashMap<Ipv4Addr, UnboundedSender<Vec<u8>>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let (tun_sender, tun_receiver) = mpsc::unbounded_channel::<Vec<u8>>();
+        // Create TUN handler (creates device automatically)
+        let ip_connect_clients_clone = ip_connect_clients.clone();
+        let _tun_thread = tokio::spawn(async move {
+            tun_socket_handler(ip_connect_clients_clone, tun_receiver).await;
+        });
 
         let local_addr = socket.local_addr().unwrap();
         'read: loop {
@@ -288,8 +298,16 @@ impl Server {
                 };
 
                 clients.insert(scid.clone(), tx);
-
-                tokio::spawn(async move { handle_client(client, current_ip.clone()).await });
+                let tun_sender_clone = tun_sender.clone();
+                let ip_connect_clients_clone = ip_connect_clients.clone();
+                tokio::spawn(async move {
+                    handle_client(
+                        client, 
+                        current_ip.clone(), 
+                        &tun_sender_clone,
+                        ip_connect_clients_clone
+                    ).await
+                });
                 current_ip = match get_next_ipv4(current_ip, 0xFFFF0000) {
                     Ok(v) => v,
                     Err(e) => {
@@ -330,17 +348,19 @@ impl Server {
 /**
  * Client handler that handles the connection for a single client
  */
-async fn handle_client(mut client: Client, client_ip: Ipv4Addr) {
+async fn handle_client(
+    mut client: Client,
+    client_ip: Ipv4Addr,
+    tun_sender: &tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
+    ip_connect_clients: Arc<Mutex<HashMap<Ipv4Addr, UnboundedSender<Vec<u8>>>>>,
+) {
     let mut http3_conn: Option<quiche::h3::Connection> = None;
     let mut connect_streams: HashMap<u64, UnboundedSender<Vec<u8>>> = HashMap::new(); // for TCP CONNECT
     let mut connect_sockets: HashMap<u64, UnboundedSender<Vec<u8>>> = HashMap::new(); // for CONNECT UDP
-                                                                                      // TODO: Theoretically each client only has one stream and one ip
-                                                                                      //       If a client tries to set up a new connect-ip session we should just replace the former one
     let mut connect_ip_session: Option<IpConnectSession> = None;
 
     let (http3_sender, mut http3_receiver) = mpsc::unbounded_channel::<ToSend>();
 
-    let mut buf = [0; 65535];
     let mut out = [0; MAX_DATAGRAM_SIZE];
 
     let timeout = 5000; // milliseconds
@@ -462,8 +482,9 @@ async fn handle_client(mut client: Client, client_ip: Ipv4Addr) {
                             &mut connect_sockets,
                             &mut connect_streams,
                             &mut connect_ip_session,
+                            &tun_sender,
                             &client_ip,
-                            &mut buf) {
+                            &ip_connect_clients).await {
                                 Ok(_) => {},
                                 Err(_) => {
                                     break;
@@ -638,22 +659,25 @@ fn create_http3_conn(client: &mut Client) -> Option<quiche::h3::Connection> {
     Some(h3_conn)
 }
 
+// TODO: Declutter this!
 /**
  * Processes an HTTP/3 event
  */
-fn handle_http3_event(
+async fn handle_http3_event(
     http3_conn: &mut quiche::h3::Connection,
     client: &mut Client,
     http3_sender: UnboundedSender<ToSend>,
     connect_sockets: &mut HashMap<u64, UnboundedSender<Vec<u8>>>,
     connect_streams: &mut HashMap<u64, UnboundedSender<Vec<u8>>>,
     connect_ip_session: &mut Option<IpConnectSession>,
+    tun_sender: &tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
     next_free_ip: &Ipv4Addr,
-    buf: &mut [u8; 65535],
+    connect_ip_clients: &Arc<Mutex<HashMap<Ipv4Addr, UnboundedSender<Vec<u8>>>>>,
 ) -> Result<(), ClientError> {
+    let mut buf = [0; 65535];
     // Process datagram-related events.
-    while let Ok(len) = client.conn.dgram_recv(buf) {
-        let mut b = octets::Octets::with_slice(buf);
+    while let Ok(len) = client.conn.dgram_recv(&mut buf) {
+        let mut b = octets::Octets::with_slice(&buf);
         if let Ok(flow_id) = b.get_varint() {
             info!(
                 "Received DATAGRAM flow_id={} len={} buf={:02x?}",
@@ -756,7 +780,6 @@ fn handle_http3_event(
                             && path.is_some()
                             && !authority.is_empty()
                         {
-                            // TODO: Implement connect-ip support
                             // Check the path
                             let path = path.unwrap();
                             // TODO: Do we need to handle the path differently in connect-ip?
@@ -769,12 +792,15 @@ fn handle_http3_event(
                                 );
                                 // acquire http3 and TUN sender clones
 
-                                // one for reader thread, one for writer thread
-                                let http3_sender_clone_1 = http3_sender.clone();
-                                // TODO: We need to clone a TUN sender
-                                //       to give it to the connect_ip_handler
-                                let (tun_sender, tun_receiver) =
+                                // For sending messages from the ip handler to the http3 sender
+                                let http3_sender_clone = http3_sender.clone();
+
+                                // These are for receiving messages from the TUN device
+                                let (tun_sender_from, from_tun_receiver) =
                                     mpsc::unbounded_channel::<Vec<u8>>();
+                                    connect_ip_clients.lock().await.insert(next_free_ip.clone(), tun_sender_from);
+
+                                // For sending received http3 messages to the ip connect handler
                                 let (ip_http3_sender, ip_http3_receiver) =
                                     mpsc::unbounded_channel::<Content>();
                                 let flow_id = stream_id / 4;
@@ -803,21 +829,19 @@ fn handle_http3_event(
                                     }),
                                 );
 
-                                // TODO: Create another hashmap with map<IP, ip_receiver>
-                                //       This will allow the tun handler to send received packets to
-                                //       the correct client.
-                                let (temp_tun_sender, temp_tun_recv) =
-                                    mpsc::unbounded_channel::<Vec<u8>>();
                                 // spawn handler thread for this one
                                 let assigned_ip = next_free_ip.clone();
+
+                                // For sending messages to the TUN device
+                                let tun_sender_clone = tun_sender.clone();
                                 connect_ip_session.as_mut().unwrap().handler_thread =
                                     Some(tokio::spawn(async move {
                                         connect_ip_handler(
                                             stream_id,
                                             flow_id,
-                                            http3_sender_clone_1,
-                                            tun_receiver,
-                                            temp_tun_sender,
+                                            http3_sender_clone,
+                                            from_tun_receiver,
+                                            tun_sender_clone,
                                             ip_http3_receiver,
                                             assigned_ip,
                                         )
@@ -873,7 +897,7 @@ fn handle_http3_event(
                 client.conn.trace_id(),
                 stream_id
             );
-            while let Ok(read) = http3_conn.recv_body(&mut client.conn, stream_id, buf) {
+            while let Ok(read) = http3_conn.recv_body(&mut client.conn, stream_id, &mut buf) {
                 if connect_streams.contains_key(&stream_id) {
                     debug!("got {} bytes of data on stream {}", read, stream_id);
                     trace!("{}", unsafe { std::str::from_utf8_unchecked(&buf[..read]) });
@@ -913,7 +937,7 @@ fn handle_http3_event(
         Ok((stream_id, quiche::h3::Event::Finished)) => {
             info!("finished received, stream id: {} closing", stream_id);
             // TODO: do we need to shutdown the stream on our side?
-            while let Ok(read) = http3_conn.recv_body(&mut client.conn, stream_id, buf) {
+            while let Ok(read) = http3_conn.recv_body(&mut client.conn, stream_id, &mut buf) {
                 if connect_streams.contains_key(&stream_id) {
                     debug!("got {} bytes of data on stream {}", read, stream_id);
                     trace!("{}", unsafe { std::str::from_utf8_unchecked(&buf[..read]) });
@@ -939,7 +963,7 @@ fn handle_http3_event(
                 e, stream_id
             );
             // TODO: do we need to shutdown the stream on our side?
-            while let Ok(read) = http3_conn.recv_body(&mut client.conn, stream_id, buf) {
+            while let Ok(read) = http3_conn.recv_body(&mut client.conn, stream_id, &mut buf) {
                 if connect_streams.contains_key(&stream_id) {
                     debug!("got {} bytes of data on stream {}", read, stream_id);
                     trace!("{}", unsafe { std::str::from_utf8_unchecked(&buf[..read]) });
@@ -1115,8 +1139,48 @@ async fn tcp_stream_handler(
     };
 }
 
-fn set_ip_settings() {
-    todo!();
+fn set_ip_settings() -> Result<(), Box<dyn Error>> {
+    let output = Command::new("sudo")
+        .arg("ip")
+        .arg("link")
+        .arg("set")
+        .arg("dev")
+        .arg("tun0")
+        .arg("up")
+        .output()?;
+
+    if !output.status.success() {
+        return Err(format!("Failed to bring up tun0: {:?}", String::from_utf8(output.stderr)).into());
+    }
+
+    let output = Command::new("sudo")
+        .arg("ip")
+        .arg("addr")
+        .arg("add")
+        .arg("10.8.0.1/24")
+        .arg("dev")
+        .arg("tun0")
+        .output()?;
+
+    if !output.status.success() {
+        return Err(format!("Failed to assign IP to tun0: {:?}", output.stderr).into());
+    }
+
+    Ok(())
+}
+
+fn destroy_tun_interface() {
+    let output = Command::new("sudo")
+        .arg("ip")
+        .arg("link")
+        .arg("delete")
+        .arg("tun0")
+        .output()
+        .expect("Failed to execute command to delete TUN interface");
+
+    if !output.status.success() {
+        eprintln!("Failed to delete TUN interface: {}", String::from_utf8_lossy(&output.stderr));
+    }
 }
 
 /**
@@ -1124,26 +1188,22 @@ fn set_ip_settings() {
  * Will then create a writer and a reader thread which are connected to channels.
  */
 async fn tun_socket_handler(
-    ip_handler: UnboundedSender<Vec<u8>>,
+    ip_handlers: Arc<Mutex<HashMap<Ipv4Addr, UnboundedSender<Vec<u8>>>>>,
     mut tun_sender: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
 ) {
     // first create tun socket
     let mut config = tun2::Configuration::default();
-
-    config
-        .address((10, 0, 0, 9))
-        .netmask((255, 255, 255, 0))
-        .destination((10, 0, 0, 1))
-        .up();
 
     #[cfg(target_os = "linux")]
     config.platform_config(|config| {
         config.ensure_root_privileges(true);
     });
 
-    let dev = tun2::create(&config);
+    config.tun_name("tun0");
 
-    set_ip_settings();
+    let dev = tun2::create(&config);
+    set_ip_settings().unwrap_or_else(|e| panic!("Error setting up TUN: {e}"));
+    
 
     let (mut reader, mut writer) = dev.unwrap().split();
     // create reader thread
@@ -1153,9 +1213,15 @@ async fn tun_socket_handler(
         loop {
             let size = reader.read(&mut buf).expect("Could not read from reader");
             let pkt = &buf[..size];
-            ip_handler
-                .send(pkt.to_vec())
-                .expect("Could not send a message to ip handler channel!");
+            // parse packet to get destination ip
+            // then send it to handler for dest ip
+            if let Ok(ip_pkt) = Packet::new(&pkt[..size]) {
+                if let Some(ip_handler_) = ip_handlers.lock().await.get(&ip_pkt.destination()) {
+                    ip_handler_
+                        .send(pkt.to_vec())
+                        .expect("Could not send a message to ip handler channel!");
+                }
+            }
         }
     });
 
@@ -1210,6 +1276,7 @@ async fn tun_socket_handler(
         }
         (_, _) => {}
     }
+    let _ = destroy_tun_interface();
 }
 
 async fn connect_ip_handler(
@@ -1217,7 +1284,7 @@ async fn connect_ip_handler(
     flow_id: u64,
     http3_sender: UnboundedSender<ToSend>,
     mut tun_receiver: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
-    mut tun_sender: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
+    tun_sender: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
     mut http3_receiver: tokio::sync::mpsc::UnboundedReceiver<Content>,
     assigned_ip: Ipv4Addr,
 ) {
@@ -1226,7 +1293,6 @@ async fn connect_ip_handler(
     let http3_sender_clone_3 = http3_sender.clone();
 
     let read_task = tokio::spawn(async move {
-        let mut buf = [0; 65527]; // TODO: Check what the max length of a IP proxy payload is
         loop {
             // Check for packets in the tun receiver
             // This receiver gets packets from the TUN interface that are supposed to be tunnelled
@@ -1235,7 +1301,7 @@ async fn connect_ip_handler(
             // Just create the http3 datagram and send the packet.
             if let Some(pkt) = tun_receiver.recv().await {
                 let dgram = ToSend {
-                    stream_id: stream_id.clone(),
+                    stream_id: flow_id.clone(),
                     content: Content::Datagram { payload: pkt },
                     finished: false,
                 };
