@@ -1,9 +1,35 @@
 use log::info;
 use quiche::h3::NameValue;
+use tokio::sync::mpsc;
 
 use std::net::{self, Ipv4Addr};
 use crate::ip_connect::util::*;
 pub const MAX_DATAGRAM_SIZE: usize = 1350;
+
+#[derive(Debug)]
+pub enum Content {
+    Request {
+        headers: Vec<quiche::h3::Header>,
+        stream_id_sender: mpsc::Sender<u64>,
+    },
+    Headers {
+        headers: Vec<quiche::h3::Header>,
+    },
+    Data {
+        data: Vec<u8>,
+    },
+    Datagram {
+        payload: Vec<u8>,
+    },
+    Finished,
+}
+
+#[derive(Debug)]
+pub struct ToSend {
+    pub stream_id: u64, // or flow_id for DATAGRAM
+    pub content: Content,
+    pub finished: bool,
+}
 
 /// Gets the next IPv4 address
 /// If the next address isn't allowed by the netmask an error is returned.

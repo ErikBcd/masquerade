@@ -26,27 +26,13 @@ use crate::common::*;
 use crate::ip_connect::capsules::{
     AddressAssign, AssignedAddress, Capsule, CapsuleType, IpLength, ADDRESS_ASSIGN_ID,
 };
+use crate::ip_connect::client::encapsulate_ipv4;
 
 #[derive(Debug)]
 pub enum ClientError {
     HandshakeFail,
     HttpFail,
     Other(String),
-}
-
-#[derive(PartialEq, Debug)]
-enum Content {
-    Headers { headers: Vec<quiche::h3::Header> },
-    Data { data: Vec<u8> },
-    Datagram { payload: Vec<u8> },
-    Finished,
-}
-
-#[derive(Debug)]
-struct ToSend {
-    stream_id: u64,
-    content: Content,
-    finished: bool,
 }
 
 struct QuicReceived {
@@ -381,6 +367,7 @@ async fn handle_client(
                 let http3_conn = http3_conn.as_mut().unwrap();
                 loop {
                     let result = match &to_send.content {
+                        Content::Request { headers: _, stream_id_sender: _} => unreachable!(),
                         Content::Headers { headers } => {
                             debug!("sending http3 response {:?}", hdrs_to_strings(&headers));
                             http3_conn.send_response(&mut client.conn, to_send.stream_id, headers, to_send.finished)
@@ -499,6 +486,7 @@ async fn handle_client(
                 let mut to_send = http3_retry_send.unwrap();
                 let http3_conn = http3_conn.as_mut().unwrap();
                 let result = match &to_send.content {
+                    Content::Request { headers: _, stream_id_sender: _ } => unreachable!(),
                     Content::Headers { headers } => {
                         debug!("retry sending http3 response {:?}", hdrs_to_strings(&headers));
                         http3_conn.send_response(&mut client.conn, to_send.stream_id, headers, to_send.finished)
@@ -1318,13 +1306,10 @@ async fn connect_ip_handler(
             // The packets are confirmed to be ipv4 packets so we don't need to worry about anything.
             // Just create the http3 datagram and send the packet.
             if let Some(pkt) = tun_receiver.recv().await {
-                let dgram = ToSend {
-                    stream_id: flow_id.clone(),
-                    content: Content::Datagram { payload: pkt },
-                    finished: false,
-                };
+                let to_send = encapsulate_ipv4(pkt, &flow_id);
+
                 http3_sender_clone_1
-                    .send(dgram)
+                    .send(to_send)
                     .expect("Could not send datagram to http3 sender!");
             }
         }
@@ -1337,6 +1322,7 @@ async fn connect_ip_handler(
             // and handles them (sends them to the TUN interface)
             if let Some(pkt) = http3_receiver.recv().await {
                 match pkt {
+                    Content::Request { headers: _, stream_id_sender: _ } => unreachable!(),
                     Content::Headers { headers: _ } => unreachable!(),
                     Content::Data { data } => {
                         // Parse and handle received capsule

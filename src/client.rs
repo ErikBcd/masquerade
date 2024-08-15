@@ -16,31 +16,6 @@ use log::*;
 
 use crate::common::*;
 
-#[derive(Debug)]
-pub enum Content {
-    Request {
-        headers: Vec<quiche::h3::Header>,
-        stream_id_sender: mpsc::Sender<u64>,
-    },
-    Headers {
-        headers: Vec<quiche::h3::Header>,
-    },
-    Data {
-        data: Vec<u8>,
-    },
-    Datagram {
-        payload: Vec<u8>,
-    },
-    Finished,
-}
-
-#[derive(Debug)]
-pub struct ToSend {
-    pub stream_id: u64, // or flow_id for DATAGRAM
-    pub content: Content,
-    pub finished: bool,
-}
-
 #[derive(Debug, Clone)]
 struct RunBeforeBindError;
 

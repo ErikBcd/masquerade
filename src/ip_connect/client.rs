@@ -156,9 +156,11 @@ pub async fn ip_handler_t(
  * Creates a ToSend struct for sending IP from a given IP packet and stream_id
  */
 pub fn encapsulate_ipv4(pkt: Vec<u8>, flow_id: &u64) -> ToSend {
+    let context_id = encode_var_int(0);
+    let payload = [&context_id, pkt.as_slice()].concat();
     ToSend {
         stream_id: flow_id.clone(),
-        content: Content::Datagram { payload: pkt },
+        content: Content::Datagram { payload: payload },
         finished: false,
     }
 }
