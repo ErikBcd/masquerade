@@ -1,7 +1,5 @@
-use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, ToSocketAddrs};
-use std::ops::DerefMut;
 use std::sync::Arc;
 use std::time::Duration;
 use std::u64;

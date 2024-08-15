@@ -1,11 +1,6 @@
 use std::{
-    error::Error, io::Read, net::Ipv4Addr, sync::{Arc, Mutex}
+    error::Error, net::Ipv4Addr
 };
-
-use tun2::platform::posix::{Reader, Writer};
-use tokio::sync::mpsc::{self};
-
-
 
 #[derive(Debug, Clone)]
 pub struct UdpBindError;

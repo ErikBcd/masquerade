@@ -8,7 +8,6 @@ use url::Url;
 
 use std::collections::HashMap;
 use std::error::Error;
-use std::future::Future;
 use std::io::{ErrorKind, Read, Write};
 use std::net::{self, SocketAddr};
 use std::net::{Ipv4Addr, ToSocketAddrs};

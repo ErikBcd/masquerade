@@ -2,7 +2,7 @@ use log::error;
 use masquerade_proxy::ip_connect::{capsules::*, util::IPError};
 use octets::OctetsMut;
 use tokio::time::timeout;
-use std::{net::Ipv4Addr, str::FromStr, time::Duration};
+use std::{net::Ipv4Addr, time::Duration};
 
 mod common;
 
