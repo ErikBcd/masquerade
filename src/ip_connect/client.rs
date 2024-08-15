@@ -20,7 +20,9 @@ use tun2::platform::posix::{Reader, Writer};
 use tun2::platform::Device;
 
 use crate::common::*;
-use crate::ip_connect::capsules::{AddressRequest, Capsule, IpLength, RequestedAddress, ADDRESS_REQUEST_ID};
+use crate::ip_connect::capsules::{
+    AddressRequest, Capsule, IpLength, RequestedAddress, ADDRESS_REQUEST_ID,
+};
 use crate::ip_connect::util::*;
 
 /**
@@ -105,7 +107,7 @@ pub async fn ip_receiver_t(
 pub async fn ip_handler_t(
     mut ip_recv: UnboundedReceiver<IpMessage>, // Other side is ip_receiver_t
     mut conn_info_recv: UnboundedReceiver<ConnectIpInfo>, // Other side is quic_handler_t
-    quic_dispatch: UnboundedSender<ToSend>,    // other side is quic_dispatcher_t
+    http3_dispatch: UnboundedSender<ToSend>,    // other side is quic_dispatcher_t
     ip_dispatch: UnboundedSender<Vec<u8>>,     // other side is ip_dispatcher_t
 ) {
     debug!("Started ip_handler thread!");
@@ -122,7 +124,7 @@ pub async fn ip_handler_t(
                 set_ipv4_pkt_source(&mut pkt.message, &conn_info.assigned_ip);
                 match pkt.dir {
                     Direction::ToServer => {
-                        match quic_dispatch.send(encapsulate_ipv4(pkt.message, &conn_info.flow_id))
+                        match http3_dispatch.send(encapsulate_ipv4(pkt.message, &conn_info.flow_id))
                         {
                             Ok(()) => {}
                             Err(e) => {
@@ -132,6 +134,7 @@ pub async fn ip_handler_t(
                     }
                     Direction::ToClient => {
                         // Send this to the ip dispatcher
+                        // TODO: Change destination IP back to local IP
                         match ip_dispatch.send(pkt.message) {
                             Ok(()) => {}
                             Err(e) => {
@@ -152,9 +155,9 @@ pub async fn ip_handler_t(
 /**
  * Creates a ToSend struct for sending IP from a given IP packet and stream_id
  */
-pub fn encapsulate_ipv4(pkt: Vec<u8>, stream_id: &u64) -> ToSend {
+pub fn encapsulate_ipv4(pkt: Vec<u8>, flow_id: &u64) -> ToSend {
     ToSend {
-        stream_id: stream_id.clone(),
+        stream_id: flow_id.clone(),
         content: Content::Datagram { payload: pkt },
         finished: false,
     }
@@ -163,9 +166,12 @@ pub fn encapsulate_ipv4(pkt: Vec<u8>, stream_id: &u64) -> ToSend {
 /**
  * Receives ready-to-send ip packets and then sends them.
  */
-pub async fn ip_dispatcher_t(mut rx: UnboundedReceiver<Vec<u8>>, mut writer: Writer) {
+pub async fn ip_dispatcher_t(
+    mut ip_dispatch_reader: UnboundedReceiver<Vec<u8>>,
+    mut writer: Writer,
+) {
     loop {
-        if let Some(pkt) = rx.recv().await {
+        if let Some(pkt) = ip_dispatch_reader.recv().await {
             writer.write(&pkt).expect("Could not write packet to TUN!");
         }
     }
@@ -182,9 +188,9 @@ pub async fn ip_dispatcher_t(mut rx: UnboundedReceiver<Vec<u8>>, mut writer: Wri
  */
 // TODO: Handle incoming capsules, send ip information out once we have it (Address Assign etc)
 pub async fn quic_conn_handler(
-    ip_sender: UnboundedSender<IpMessage>, // other side is ip_dispatcher_t
+    ip_handler: UnboundedSender<IpMessage>, // other side is ip_dispatcher_t
     info_sender: UnboundedSender<ConnectIpInfo>, // other side is the ip_handler_t
-    http3_sender: UnboundedSender<ToSend>, // Other side is the quic_dispatcher_t
+    http3_sender: UnboundedSender<ToSend>, 
     http3_receiver: &mut UnboundedReceiver<ToSend>,
     mut conn: Connection,
     udp_socket: UdpSocket,
@@ -193,13 +199,14 @@ pub async fn quic_conn_handler(
     let mut buf = [0; 65535];
     let mut out = [0; MAX_DATAGRAM_SIZE];
 
-    let http3_conn_temp: Arc<Mutex<Option<quiche::h3::Connection>>> =
-        Arc::new(Mutex::new(None));
+    let http3_conn_temp: Arc<Mutex<Option<quiche::h3::Connection>>> = Arc::new(Mutex::new(None));
     let mut http3_conn: Option<quiche::h3::Connection> = None;
 
-    let stream: Arc<Mutex<QuicStream>> = Arc::new(Mutex::new(
-        QuicStream { stream_sender: None, stream_id: None, flow_id: None }
-    ));
+    let stream: Arc<Mutex<QuicStream>> = Arc::new(Mutex::new(QuicStream {
+        stream_sender: None,
+        stream_id: None,
+        flow_id: None,
+    }));
 
     let mut assigned_addr: Option<Ipv4Addr> = None;
     let mut got_ip_addr = false;
@@ -243,7 +250,7 @@ pub async fn quic_conn_handler(
                             debug!("Received invalid ipv4 packet, discarding..");
                             continue;
                         }
-                        match ip_sender.send(IpMessage {
+                        match ip_handler.send(IpMessage {
                             message: buf[header_len..len].to_vec(),
                             dir: Direction::ToClient,
                         }) {
@@ -328,8 +335,10 @@ pub async fn quic_conn_handler(
                                             break;
                                         }
                                     };
+                                    
                                     match parsed.capsule_type {
                                         crate::ip_connect::capsules::CapsuleType::AddressAssign(c) => {
+                                            debug!("Received a AddressAssign capsule from the server!");
                                             // TODO: Check if this packet is correctly structured
                                             //       Potentially we also want to make sure that we can
                                             //       change our own IP later and notify clients about it?
@@ -337,6 +346,7 @@ pub async fn quic_conn_handler(
                                             //       This should not be used like this in prod
                                             if let IpLength::V4(ipv4) = c.assigned_address[0].ip_address {
                                                 assigned_addr = Some(Ipv4Addr::from(ipv4));
+                                                debug!("Got address: {:?}", assigned_addr);
                                                 if !got_ip_addr {
                                                     // Send assigned ip to ip handler
                                                     let ci = ConnectIpInfo {
@@ -354,9 +364,10 @@ pub async fn quic_conn_handler(
                                         },
                                         crate::ip_connect::capsules::CapsuleType::AddressRequest(_) => {
                                             // We should not be receiving this one.
+                                            error!("Received a AddressRequest capsule from the server!");
                                         },
                                         crate::ip_connect::capsules::CapsuleType::RouteAdvertisement(_) => {
-
+                                            error!("Received a RouteAdvertisement capsule from the server! Not implemented yet.");
                                         },
                                     }
                                 }
@@ -377,6 +388,8 @@ pub async fn quic_conn_handler(
                                             error!("stream shutdown write failed: {:?}", e)
                                         });
                                 }
+                                debug!("Connection with server ended, finishing up!");
+                                return;
                             }
 
                             Ok((stream_id, quiche::h3::Event::Reset(e))) => {
@@ -397,7 +410,7 @@ pub async fn quic_conn_handler(
                                             error!("stream shutdown write failed: {:?}", e)
                                         });
                                 }
-                                todo!();
+                                debug!("Connection with server ended, finishing up!");
                             }
                             Ok((_, quiche::h3::Event::PriorityUpdate)) => unreachable!(),
 
@@ -593,14 +606,12 @@ pub async fn quic_conn_handler(
                 .expect("Unable to create HTTP/3 connection, check the server's uni stream limit and window size"),
             );
 
-            // now we can create the ip connect stream 
+            // now we can create the ip connect stream
             let stream_clone = stream.clone();
             let http3_sender_clone = http3_sender.clone();
-            let _ip_connect_thread = tokio::spawn(
-                async move {
-                    handle_ip_connect_stream(http3_sender_clone, stream_clone).await;
-                }
-            );
+            let _ip_connect_thread = tokio::spawn(async move {
+                handle_ip_connect_stream(http3_sender_clone, stream_clone).await;
+            });
         }
 
         // Send pending QUIC packets
@@ -654,14 +665,18 @@ async fn handle_ip_connect_stream(
     let (stream_id_sender, mut stream_id_receiver) = mpsc::channel(1);
     let (response_sender, mut response_receiver) = mpsc::unbounded_channel::<Content>();
 
-    http3_sender.send(ToSend {
-        stream_id: u64::MAX,
-        content: Content::Request {
-            headers: headers,
-            stream_id_sender,
-        },
-        finished: false,
-    }).unwrap_or_else(|e| error!("Could not send http3 request to http3_receiver in QUIC handler: {e}"));
+    http3_sender
+        .send(ToSend {
+            stream_id: u64::MAX,
+            content: Content::Request {
+                headers: headers,
+                stream_id_sender,
+            },
+            finished: false,
+        })
+        .unwrap_or_else(|e| {
+            error!("Could not send http3 request to http3_receiver in QUIC handler: {e}")
+        });
 
     let stream_id = stream_id_receiver
         .recv()
@@ -683,7 +698,10 @@ async fn handle_ip_connect_stream(
 
     let mut succeeded = false;
     if let Content::Headers { headers } = response {
-        info!("Got response for connect-ip request: {:?}", hdrs_to_strings(&headers));
+        info!(
+            "Got response for connect-ip request: {:?}",
+            hdrs_to_strings(&headers)
+        );
         let mut status = None;
         for hdr in headers {
             match hdr.name() {
@@ -712,7 +730,9 @@ async fn handle_ip_connect_stream(
 
                         let cap = Capsule {
                             capsule_id: ADDRESS_REQUEST_ID,
-                            capsule_type: super::capsules::CapsuleType::AddressRequest(request_capsule),
+                            capsule_type: super::capsules::CapsuleType::AddressRequest(
+                                request_capsule,
+                            ),
                         };
 
                         let mut buf = [0; 9];
@@ -724,7 +744,9 @@ async fn handle_ip_connect_stream(
                                 content: Content::Data { data: buf.to_vec() },
                                 finished: false,
                             })
-                            .unwrap_or_else(|e| error!("sending http3 data capsule failed: {:?}", e));
+                            .unwrap_or_else(|e| {
+                                error!("sending http3 data capsule failed: {:?}", e)
+                            });
                         // the quic handler should do the rest
                         succeeded = true;
                     }
@@ -738,170 +760,6 @@ async fn handle_ip_connect_stream(
     if !succeeded {
         // TODO: We should inform the quic thread about this
         todo!()
-    }
-}
-
-/**
- * Receives ready-to-send QUIC messages and sends them to
- * the QUIC Connection
- * Will try to resend DATA packets till either the connection breaks down or the packets are all sent.
- * Waits first for the QUIC connection to be established, including the http3 conn.
- *  - rx              : Receiver for any messages that shall be sent to the http3 conn
- *  - quic_sender_recv: Receives an http3_sender once the connection is ready
- *  - conn            : The quic connection, used for sending datagrams
- */
-pub async fn quic_dispatcher_t(
-    mut rx: UnboundedReceiver<ToSend>,
-    mut quic_sender_recv: UnboundedReceiver<Arc<Mutex<Option<quiche::h3::Connection>>>>,
-    conn: Arc<Mutex<Connection>>,
-) {
-    // First wait for the connection info the QUIC handler provides
-    // With that you can exchange ip's and everything
-    // Wait till the QUIC server sends us connection information
-    let mut http3_conn: Option<Arc<Mutex<Option<quiche::h3::Connection>>>> = None;
-    while http3_conn.is_none() {
-        http3_conn = quic_sender_recv.recv().await;
-    }
-    let http3_conn = http3_conn.unwrap();
-    let mut to_send_queue: VecDeque<ToSend> = VecDeque::new();
-    loop {
-        if let Some(pkt) = rx.recv().await {
-            debug!("Received message to send to QUIC!");
-            to_send_queue.push_back(pkt);
-            // Send all packets in the deque
-            // WARN: If a packet fails over and over this will loop forever and block everything.
-            while !to_send_queue.is_empty() {
-                let mut pkt = to_send_queue.pop_front().unwrap();
-                let result = match &pkt.content {
-                    Content::Headers { headers: _ } => {
-                        unreachable!("We should not be getting headers!")
-                    }
-                    Content::Request {
-                        headers,
-                        stream_id_sender,
-                    } => {
-                        debug!("Sending http3 request..");
-                        let conn_clone = conn.clone();
-                        let mut conn_clone = conn_clone.lock().await;
-                        match http3_conn.lock().await.as_mut().unwrap().send_request(
-                            conn_clone.deref_mut(),
-                            &headers,
-                            pkt.finished,
-                        ) {
-                            Ok(stream_id) => {
-                                stream_id_sender.send(stream_id).await.unwrap_or_else(|e| {
-                                    error!("could not send stream_id back to receiver: {}", e)
-                                });
-                                Ok(())
-                            }
-                            Err(e) => {
-                                error!("sending h3 request failed: {}", e);
-                                Err(e)
-                            }
-                        }
-                    }
-                    Content::Data { data } => {
-                        debug!("sending http3 data of {} bytes", data.len());
-                        let mut written = 0;
-                        loop {
-                            if written >= data.len() {
-                                break Ok(());
-                            }
-                            let conn_clone = conn.clone();
-                            let mut conn_clone = conn_clone.lock().await;
-                            match http3_conn.lock().await.as_mut().unwrap().send_body(
-                                conn_clone.deref_mut(),
-                                pkt.stream_id,
-                                &data[written..],
-                                pkt.finished,
-                            ) {
-                                Ok(v) => written += v,
-                                Err(e) => {
-                                    // Failed to send the packet. If adequate, try resending later
-                                    pkt = ToSend {
-                                        stream_id: pkt.stream_id,
-                                        content: Content::Data {
-                                            data: data[written..].to_vec(),
-                                        },
-                                        finished: pkt.finished,
-                                    };
-                                    break Err(e);
-                                }
-                            }
-                            debug!("written http3 data {} of {} bytes", written, data.len());
-                        }
-                    }
-                    Content::Datagram { payload } => {
-                        debug!("Sending HTTP/3 datagram of {} bytes!", payload.len());
-                        let conn_clone = conn.clone();
-                        let mut conn_clone = conn_clone.lock().await;
-                        match send_h3_dgram(conn_clone.deref_mut(), pkt.stream_id, &payload) {
-                            Ok(_) => Ok(()),
-                            Err(e) => Err(e.into()),
-                        }
-                    }
-                    Content::Finished => {
-                        debug!("Shutting down stream!");
-                        match conn.lock().await.stream_shutdown(
-                            pkt.stream_id,
-                            quiche::Shutdown::Read,
-                            0,
-                        ) {
-                            Ok(_) => {}
-                            Err(quiche::Error::Done) => {}
-                            Err(e) => {
-                                error!("could not shutdown stream: {}", e);
-                            }
-                        }
-
-                        match conn.lock().await.stream_shutdown(
-                            pkt.stream_id,
-                            quiche::Shutdown::Write,
-                            0,
-                        ) {
-                            Ok(_) => {}
-                            Err(quiche::Error::Done) => {}
-                            Err(e) => {
-                                error!("could not shutdown stream: {}", e);
-                            }
-                        }
-                        Ok(())
-                    }
-                };
-                match result {
-                    Ok(_) => {}
-                    Err(quiche::h3::Error::StreamBlocked | quiche::h3::Error::Done) => {
-                        debug!(
-                            "Connection {} stream {} stream blocked, retry later",
-                            conn.lock().await.trace_id(),
-                            pkt.stream_id
-                        );
-                        to_send_queue.push_front(pkt);
-                        break;
-                    }
-                    Err(e) => {
-                        error!(
-                            "Connection {} stream {} send failed {:?}",
-                            conn.lock().await.trace_id(),
-                            pkt.stream_id,
-                            e
-                        );
-                        if !conn.lock().await.stream_finished(pkt.stream_id) {
-                            conn.lock()
-                                .await
-                                .stream_shutdown(pkt.stream_id, quiche::Shutdown::Read, 0)
-                                .unwrap_or_else(|e| error!("stream shutdown read failed: {:?}", e));
-                            conn.lock()
-                                .await
-                                .stream_shutdown(pkt.stream_id, quiche::Shutdown::Write, 0)
-                                .unwrap_or_else(|e| {
-                                    error!("stream shutdown write failed: {:?}", e)
-                                });
-                        }
-                    }
-                }
-            }
-        }
     }
 }
 
@@ -946,13 +804,13 @@ impl ConnectIPClient {
 
         // ip_sender for ip_receiver_t, ip_recv for ip_handler_t
         let (ip_sender, ip_recv) = tokio::sync::mpsc::unbounded_channel();
-        let (quic_dispatch, mut quic_dispatch_reader) = tokio::sync::mpsc::unbounded_channel();
+        let (http3_dispatch, mut http3_dispatch_reader) = tokio::sync::mpsc::unbounded_channel();
         let (ip_dispatch, ip_dispatch_reader) = tokio::sync::mpsc::unbounded_channel();
         let (conn_info_sender, conn_info_recv) = tokio::sync::mpsc::unbounded_channel();
 
         // Copies of senders
         let ip_from_quic_sender = ip_sender.clone();
-        let http3_sender = quic_dispatch.clone();
+        let http3_dispatch_clone = http3_dispatch.clone();
 
         debug!("Starting threads!");
 
@@ -961,7 +819,7 @@ impl ConnectIPClient {
         });
 
         let ip_h_t = tokio::spawn(async move {
-            ip_handler_t(ip_recv, conn_info_recv, quic_dispatch, ip_dispatch).await;
+            ip_handler_t(ip_recv, conn_info_recv, http3_dispatch, ip_dispatch).await;
         });
 
         let ip_disp_t = tokio::spawn(async move {
@@ -972,8 +830,8 @@ impl ConnectIPClient {
             quic_conn_handler(
                 ip_from_quic_sender,
                 conn_info_sender,
-                http3_sender,
-                &mut quic_dispatch_reader,
+                http3_dispatch_clone,
+                &mut http3_dispatch_reader,
                 quic_conn,
                 socket,
             )
@@ -1152,12 +1010,12 @@ impl ConnectIPClient {
     /**
      * Creates and binds the UDP socket used for QUIC
      */
-    async fn get_udp(&self, bind_addr: &String) -> Result<UdpSocket, UdpBindError> {
+    async fn get_udp(&self, server_addr: &String) -> Result<UdpSocket, UdpBindError> {
         let mut http_start = "";
-        if !bind_addr.starts_with("https://") {
+        if !server_addr.starts_with("https://") {
             http_start = "https://";
         }
-        let server_name = format!("{}{}", http_start, bind_addr);
+        let server_name = format!("{}{}", http_start, server_addr);
 
         // Resolve server address.
         let url = url::Url::parse(&server_name).unwrap();
@@ -1171,7 +1029,7 @@ impl ConnectIPClient {
             }
         };
 
-        match socket.connect(peer_addr.clone()).await {
+        match socket.connect(peer_addr).await {
             Ok(()) => {}
             Err(e) => {
                 error!(
