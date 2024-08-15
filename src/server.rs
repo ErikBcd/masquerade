@@ -22,9 +22,7 @@ use tokio::time::{self, Duration};
 use ring::rand::*;
 
 use crate::common::*;
-use crate::ip_connect::capsules::{
-    AddressAssign, AssignedAddress, Capsule, CapsuleType, IpLength, ADDRESS_ASSIGN_ID,
-};
+use crate::ip_connect::capsules::*;
 use crate::ip_connect::client::encapsulate_ipv4;
 
 #[derive(Debug)]
@@ -103,7 +101,7 @@ impl Server {
         Ok(())
     }
 
-    pub async fn run(&self) -> Result<(), Box<dyn Error>> {
+    pub async fn run(&self, tun_addr: String, tun_name: String) -> Result<(), Box<dyn Error>> {
         if self.socket.is_none() {
             return Err(Box::new(RunBeforeBindError));
         }
@@ -154,7 +152,7 @@ impl Server {
         // Create TUN handler (creates device automatically)
         let ip_connect_clients_clone = ip_connect_clients.clone();
         let _tun_thread = tokio::spawn(async move {
-            tun_socket_handler(ip_connect_clients_clone, tun_receiver).await;
+            tun_socket_handler(ip_connect_clients_clone, tun_receiver, tun_addr, tun_name).await;
         });
 
         let local_addr = socket.local_addr().unwrap();
@@ -1144,13 +1142,13 @@ async fn tcp_stream_handler(
     };
 }
 
-fn set_ip_settings() -> Result<(), Box<dyn Error>> {
+fn set_ip_settings(tun_addr: &String, tun_name: &String) -> Result<(), Box<dyn Error>> {
     let output = Command::new("sudo")
         .arg("ip")
         .arg("link")
         .arg("set")
         .arg("dev")
-        .arg("tun0")
+        .arg(tun_name)
         .arg("up")
         .output()?;
 
@@ -1162,13 +1160,13 @@ fn set_ip_settings() -> Result<(), Box<dyn Error>> {
         .arg("ip")
         .arg("addr")
         .arg("add")
-        .arg("10.8.0.1/24")
+        .arg(tun_addr)
         .arg("dev")
-        .arg("tun0")
+        .arg(tun_name)
         .output()?;
 
     if !output.status.success() {
-        return Err(format!("Failed to assign IP to tun0: {:?}", output.stderr).into());
+        return Err(format!("Failed to assign IP to tun0: {:?}", String::from_utf8_lossy(&output.stderr)).into());
     }
 
     Ok(())
@@ -1195,6 +1193,7 @@ fn destroy_tun_interface() {
 async fn tun_socket_handler(
     ip_handlers: Arc<Mutex<HashMap<Ipv4Addr, UnboundedSender<Vec<u8>>>>>,
     mut tun_sender: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+    tun_addr: String, tun_name: String
 ) {
     // first create tun socket
     let mut config = tun2::Configuration::default();
@@ -1204,10 +1203,11 @@ async fn tun_socket_handler(
         config.ensure_root_privileges(true);
     });
 
-    config.tun_name("tun0");
+    config.tun_name(&tun_name);
 
     let dev = tun2::create(&config);
-    set_ip_settings().unwrap_or_else(|e| panic!("Error setting up TUN: {e}"));
+    set_ip_settings(&tun_addr, &tun_name)
+        .unwrap_or_else(|e| panic!("Error setting up TUN: {e}"));
     
 
     let (mut reader, mut writer) = dev.unwrap().split();
