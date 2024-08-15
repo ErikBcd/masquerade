@@ -47,9 +47,9 @@ pub struct ConnectIpInfo {
     pub assigned_ip: Ipv4Addr,
 }
 
-pub struct IpMessage {
-    pub message: Vec<u8>,
-    pub dir: Direction,
+struct IpMessage {
+    message: Vec<u8>,
+    dir: Direction,
 }
 
 /// Generate a new pair of Source Connection ID and reset token.
@@ -72,7 +72,7 @@ pub fn generate_cid_and_reset_token<T: SecureRandom>(
  *  - ip_handler: Channel that handles received ip messages
  *  - reader: Receiver for raw ip messages
  */
-pub async fn ip_receiver_t(
+async fn ip_receiver_t(
     ip_handler: UnboundedSender<IpMessage>,
     mut reader: Reader, //
 ) {
@@ -102,7 +102,7 @@ pub async fn ip_receiver_t(
  * Receives IP Packets from rx.
  * Will then handle these packets accordingly and send messages to quic_dispatcher_t
  */
-pub async fn ip_handler_t(
+async fn ip_handler_t(
     mut ip_recv: UnboundedReceiver<IpMessage>, // Other side is ip_receiver_t
     mut conn_info_recv: UnboundedReceiver<ConnectIpInfo>, // Other side is quic_handler_t
     http3_dispatch: UnboundedSender<ToSend>,    // other side is quic_dispatcher_t
@@ -166,7 +166,7 @@ pub fn encapsulate_ipv4(pkt: Vec<u8>, flow_id: &u64) -> ToSend {
 /**
  * Receives ready-to-send ip packets and then sends them.
  */
-pub async fn ip_dispatcher_t(
+async fn ip_dispatcher_t(
     mut ip_dispatch_reader: UnboundedReceiver<Vec<u8>>,
     mut writer: Writer,
 ) {
@@ -187,7 +187,7 @@ pub async fn ip_dispatcher_t(
  * Sends resulting messages to either ip_handler_t or quic_dispatch_t.
  */
 // TODO: Handle incoming capsules, send ip information out once we have it (Address Assign etc)
-pub async fn quic_conn_handler(
+async fn quic_conn_handler(
     ip_handler: UnboundedSender<IpMessage>, // other side is ip_dispatcher_t
     info_sender: UnboundedSender<ConnectIpInfo>, // other side is the ip_handler_t
     http3_sender: UnboundedSender<ToSend>, 
