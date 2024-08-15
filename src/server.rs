@@ -954,6 +954,15 @@ async fn handle_http3_event(
                     );
                 }
             }
+            if connect_ip_clients.lock().await.contains_key(&next_free_ip) {
+                // stop the connect_ip_connection
+                {
+                    let ip_session = connect_ip_session.as_ref().unwrap();
+                    ip_session.handler_thread.as_ref().unwrap().abort();
+                }
+                connect_ip_session.take();
+                connect_ip_clients.lock().await.remove(&next_free_ip);
+            }
             remove_stream(connect_streams, stream_id, &mut client.conn);
         }
 
