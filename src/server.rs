@@ -1242,7 +1242,7 @@ async fn tun_socket_handler(
                     // All is okay, send the packet to the TUN interface
                     // call write as long as needed to send the entire packet
                     let mut pos = 0;
-                    while pos <= pkt.len() {
+                    while pos < pkt.len() {
                         let written = match writer.write(&pkt[pos..]) {
                             Ok(n) => n,
                             Err(e) => {
@@ -1255,6 +1255,7 @@ async fn tun_socket_handler(
                         };
                         pos += written;
                     }
+                    debug!("TUN wrote {pos} bytes to device!");
                 } else if version == 6 {
                     debug!("TUN Writer Received ipv6 packet, ignoring for now...");
                 } else {
@@ -1308,7 +1309,7 @@ async fn connect_ip_handler(
             if let Some(pkt) = tun_receiver.recv().await {
                 debug!("Received TUN message size {}", pkt.len());
                 let to_send = encapsulate_ipv4(pkt, &flow_id, &0);
-
+                debug!("Sending ip message to client");
                 http3_sender_clone_1
                     .send(to_send)
                     .expect("Could not send datagram to http3 sender!");

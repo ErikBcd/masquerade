@@ -14,7 +14,7 @@ use ring::rand::{SecureRandom, SystemRandom};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::sync::Mutex;
-use tokio::time::{self, sleep};
+use tokio::time::{self};
 use tun2::platform::posix::{Reader, Writer};
 use tun2::platform::Device;
 
@@ -43,6 +43,7 @@ pub struct QuicStream {
  * Infos about the CONNECT-IP session
  * Includes converters for local ip's to destination ip's (and the other way around)
  */
+#[derive(Clone, Copy)]
 pub struct ConnectIpInfo {
     pub stream_id: u64,
     pub flow_id: u64,
@@ -78,11 +79,13 @@ async fn ip_receiver_t(
     ip_handler: UnboundedSender<IpMessage>,
     mut reader: Reader, //
 ) {
-    debug!("Started ip_receiver thread!");
+    debug!("[ip_receiver_t] Started ip_receiver thread!");
     let mut buf = [0; 4096];
     loop {
-        let size = reader.read(&mut buf).expect("Could not read from reader");
-        debug!("Read TUN message size {size}");
+        let size = reader
+            .read(&mut buf)
+            .expect("[ip_receiver_t] Could not read from reader");
+        debug!("[ip_receiver_t] Read TUN message size {size}");
         let pkt = &buf[..size];
         use std::io::{Error, ErrorKind::Other};
         match ip_handler
@@ -92,9 +95,11 @@ async fn ip_receiver_t(
             })
             .map_err(|e| Error::new(Other, e))
         {
-            Ok(_) => {}
+            Ok(()) => {
+                debug!("[ip_receiver_t] Sent packet to receiver.")
+            }
             Err(e) => {
-                debug!("tx send error: {}", e);
+                debug!("[ip_receiver_t] tx send error: {}", e);
             }
         }
     }
@@ -107,10 +112,10 @@ async fn ip_receiver_t(
 async fn ip_handler_t(
     mut ip_recv: UnboundedReceiver<IpMessage>, // Other side is ip_receiver_t
     mut conn_info_recv: UnboundedReceiver<ConnectIpInfo>, // Other side is quic_handler_t
-    http3_dispatch: UnboundedSender<ToSend>,    // other side is quic_dispatcher_t
+    http3_dispatch: UnboundedSender<ToSend>,   // other side is quic_dispatcher_t
     ip_dispatch: UnboundedSender<Vec<u8>>,     // other side is ip_dispatcher_t
 ) {
-    debug!("Started ip_handler thread!");
+    debug!("[ip_handler_t] Started ip_handler thread!");
     // Wait till the QUIC server sends us connection information
     let mut conn_info: Option<ConnectIpInfo> = None;
     if let Some(info) = conn_info_recv.recv().await {
@@ -119,45 +124,73 @@ async fn ip_handler_t(
     let conn_info = conn_info.unwrap();
     debug!("[ip_handler_t] Received connection info!");
     loop {
-        if let Some(mut pkt) = ip_recv.recv().await {
-            debug!("[ip_handler_t] Received a packet: {:?} In direction: {:?}", pkt.message, pkt.dir);
+        debug!("[ip_handler_t] Waiting for new packet..");
+        debug!(
+            "[ip_handler_t] Currently {} packets in queue",
+            ip_recv.len()
+        );
+
+        // TODO: I have no clue why I have to do this instead of just letting recv().await do it's thing
+        while ip_recv.is_empty() {
             
-            let version = pkt.message[0] >> 4;
-            debug!("[ip_handler_t] IPv{version}");
-            if version == 4 {
-                match pkt.dir {
-                    Direction::ToServer => {
-                        set_ipv4_pkt_source(&mut pkt.message, &conn_info.assigned_ip);
-                        // Recalculate checksum after ipv4 change
-                        let new_chcksm = checksum(&pkt.message).to_be_bytes();
-                        pkt.message[10] = new_chcksm[0];
-                        pkt.message[11] = new_chcksm[1];
-                        debug!("Sending ipv4 packet to server: {:?}", pkt.message);
-                        match http3_dispatch.send(encapsulate_ipv4(pkt.message, &conn_info.flow_id, &0))
-                        {
-                            Ok(()) => {}
-                            Err(e) => {
-                                error!("Error sending to quic dispatch: {}", e);
-                            }
-                        };
+        }
+
+        if let Some(pkt) = ip_recv.recv().await {
+            debug!(
+                "[ip_handler_t] Received a packet: {:?} In direction: {:?}",
+                pkt.message, pkt.dir
+            );
+            let http3_dispatch_clone = http3_dispatch.clone();
+            let ip_disp_clone = ip_dispatch.clone();
+            let _ = tokio::task::spawn_blocking( move || {
+                ip_message_handler(pkt, http3_dispatch_clone, ip_disp_clone, conn_info)
+                }
+            );
+        }
+        debug!("[ip_handler_t] Handled a packet!");
+    }
+}
+
+fn ip_message_handler(
+    mut pkt: IpMessage,
+    http3_dispatch: UnboundedSender<ToSend>,
+    ip_dispatch: UnboundedSender<Vec<u8>>,
+    conn_info: ConnectIpInfo,
+) {
+    debug!("[ip_message_handler] got message!");
+    let version = pkt.message[0] >> 4;
+    if version == 4 {
+        match pkt.dir {
+            Direction::ToServer => {
+                set_ipv4_pkt_source(&mut pkt.message, &conn_info.assigned_ip);
+                // Recalculate checksum after ipv4 change
+                let new_chcksm = checksum(&pkt.message).to_be_bytes();
+                pkt.message[10] = new_chcksm[0];
+                pkt.message[11] = new_chcksm[1];
+                info!("[ip_handler_t] Sending ipv4 packet to server");
+                match http3_dispatch.send(encapsulate_ipv4(pkt.message, &conn_info.flow_id, &0)) {
+                    Ok(()) => {}
+                    Err(e) => {
+                        error!("[ip_handler_t] Error sending to quic dispatch: {}", e);
                     }
-                    Direction::ToClient => {
-                        // Send this to the ip dispatcher
-                        // TODO: Change destination IP back to local IP
-                        match ip_dispatch.send(pkt.message) {
-                            Ok(()) => {}
-                            Err(e) => {
-                                error!("Error sending to ip dispatch: {}", e);
-                            }
-                        }
+                };
+            }
+            Direction::ToClient => {
+                // Send this to the ip dispatcher
+                // TODO: Change destination IP back to local IP
+                debug!("[ip_handler_t] Sending IPv4 packet towards client (tun)");
+                match ip_dispatch.send(pkt.message) {
+                    Ok(()) => {}
+                    Err(e) => {
+                        error!("[ip_handler_t] Error sending to ip dispatch: {}", e);
                     }
                 }
-            } else if version == 6 {
-                debug!("Received IPv6 messages at ip_handler_t, not supported!");
-            } else {
-                error!("Received message with unknown IP protocol.");
             }
         }
+    } else if version == 6 {
+        debug!("[ip_handler_t] Received IPv6 messages at ip_handler_t, not supported!");
+    } else {
+        error!("[ip_handler_t] Received message with unknown IP protocol.");
     }
 }
 
@@ -177,10 +210,7 @@ pub fn encapsulate_ipv4(pkt: Vec<u8>, flow_id: &u64, context_id: &u64) -> ToSend
 /**
  * Receives ready-to-send ip packets and then sends them.
  */
-async fn ip_dispatcher_t(
-    mut ip_dispatch_reader: UnboundedReceiver<Vec<u8>>,
-    mut writer: Writer,
-) {
+async fn ip_dispatcher_t(mut ip_dispatch_reader: UnboundedReceiver<Vec<u8>>, mut writer: Writer) {
     loop {
         if let Some(pkt) = ip_dispatch_reader.recv().await {
             writer.write(&pkt).expect("Could not write packet to TUN!");
@@ -201,9 +231,9 @@ async fn ip_dispatcher_t(
 async fn quic_conn_handler(
     ip_handler: UnboundedSender<IpMessage>, // other side is ip_dispatcher_t
     info_sender: UnboundedSender<ConnectIpInfo>, // other side is the ip_handler_t
-    http3_sender: UnboundedSender<ToSend>, 
-    http3_receiver: &mut UnboundedReceiver<ToSend>,
-    peer_addr: &String,
+    http3_sender: UnboundedSender<ToSend>,
+    mut http3_receiver: UnboundedReceiver<ToSend>,
+    peer_addr: String,
     mut conn: Connection,
     udp_socket: UdpSocket,
 ) {
@@ -231,7 +261,6 @@ async fn quic_conn_handler(
     interval.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
 
     loop {
-        debug!("Loop start!");
         if conn.is_closed() {
             info!("connection closed, {:?}", conn.stats());
             break;
@@ -250,7 +279,6 @@ async fn quic_conn_handler(
                     }
                 };
                 debug!("Received datagram with context id={context_id}");
-                // TODO: Handle context IDs, for now we only accept 0
                 if context_id != 0 {
                     continue;
                 }
@@ -354,7 +382,7 @@ async fn quic_conn_handler(
                                             break;
                                         }
                                     };
-                                    
+
                                     match parsed.capsule_type {
                                         crate::ip_connect::capsules::CapsuleType::AddressAssign(c) => {
                                             debug!("Received a AddressAssign capsule from the server!");
@@ -463,7 +491,7 @@ async fn quic_conn_handler(
                     let result = match &to_send.content {
                         Content::Headers { .. } => unreachable!(),
                         Content::Request { headers, stream_id_sender } => {
-                            debug!("sending http3 request {:?} to {:?}", hdrs_to_strings(&headers), http3_conn.peer_settings_raw());
+                            info!("sending http3 request {:?} to {:?}", hdrs_to_strings(&headers), http3_conn.peer_settings_raw());
                             match http3_conn.send_request(&mut conn, headers, to_send.finished) {
                                 Ok(stream_id) => {
                                     stream_id_sender.send(stream_id)
@@ -480,7 +508,7 @@ async fn quic_conn_handler(
                             }
                         },
                         Content::Data { data } => {
-                            debug!("sending http3 data of {} bytes", data.len());
+                            info!("sending http3 data of {} bytes", data.len());
                             let mut written = 0;
                             loop {
                                 if written >= data.len() {
@@ -497,7 +525,7 @@ async fn quic_conn_handler(
                             }
                         },
                         Content::Datagram { payload } => {
-                            debug!("sending http3 datagram of {} bytes to flow {}", payload.len(), to_send.stream_id);
+                            info!("sending http3 datagram of {} bytes to flow {}", payload.len(), to_send.stream_id);
                             match send_h3_dgram(&mut conn, to_send.stream_id, &payload) {
                                     Ok(v) => Ok(v),
                                     Err(e) => {
@@ -682,7 +710,7 @@ async fn handle_ip_connect_stream(
         quiche::h3::Header::new(b":method", b"CONNECT"),
         quiche::h3::Header::new(b":protocol", b"connect-ip"),
         quiche::h3::Header::new(b":scheme", b"https"), // TODO: Should always be https?
-        quiche::h3::Header::new(b":authority", peer_addr.as_bytes()),   // TODO
+        quiche::h3::Header::new(b":authority", peer_addr.as_bytes()), // TODO
         quiche::h3::Header::new(b":path", b"/.well-known/masque/ip/*/*/"),
         quiche::h3::Header::new(b"connect-ip-version", b"3"),
     ];
@@ -701,7 +729,7 @@ async fn handle_ip_connect_stream(
         .unwrap_or_else(|e| {
             error!("Could not send http3 request to http3_receiver in QUIC handler: {e}")
         });
-    
+
     debug!("connect-ip builder: Sent connect-ip request");
 
     let stream_id = stream_id_receiver
@@ -831,7 +859,7 @@ impl ConnectIPClient {
 
         // ip_sender for ip_receiver_t, ip_recv for ip_handler_t
         let (ip_sender, ip_recv) = tokio::sync::mpsc::unbounded_channel();
-        let (http3_dispatch, mut http3_dispatch_reader) = tokio::sync::mpsc::unbounded_channel();
+        let (http3_dispatch, http3_dispatch_reader) = tokio::sync::mpsc::unbounded_channel();
         let (ip_dispatch, ip_dispatch_reader) = tokio::sync::mpsc::unbounded_channel();
         let (conn_info_sender, conn_info_recv) = tokio::sync::mpsc::unbounded_channel();
 
@@ -840,57 +868,34 @@ impl ConnectIPClient {
         let http3_dispatch_clone = http3_dispatch.clone();
 
         debug!("Starting threads!");
+        let ip_recv_t = tokio::task::spawn(ip_receiver_t(ip_sender, reader));
 
-        let ip_recv_t = tokio::spawn(async move {
-            ip_receiver_t(ip_sender, reader).await;
-        });
+        let ip_h_t = tokio::task::spawn(ip_handler_t(
+            ip_recv,
+            conn_info_recv,
+            http3_dispatch,
+            ip_dispatch,
+        ));
 
-        let ip_h_t = tokio::spawn(async move {
-            ip_handler_t(ip_recv, conn_info_recv, http3_dispatch, ip_dispatch).await;
-        });
-
-        let ip_disp_t = tokio::spawn(async move {
-            ip_dispatcher_t(ip_dispatch_reader, writer).await;
-        });
+        let ip_disp_t = tokio::task::spawn(ip_dispatcher_t(ip_dispatch_reader, writer));
 
         let peer_addr = server_addr.clone();
-        let quic_h_t = tokio::spawn(async move {
-            quic_conn_handler(
-                ip_from_quic_sender,
-                conn_info_sender,
-                http3_dispatch_clone,
-                &mut http3_dispatch_reader,
-                &peer_addr,
-                quic_conn,
-                socket,
-            )
-            .await;
-        });
+        let quic_h_t = tokio::task::spawn(quic_conn_handler(
+            ip_from_quic_sender,
+            conn_info_sender,
+            http3_dispatch_clone,
+            http3_dispatch_reader,
+            peer_addr,
+            quic_conn,
+            socket,
+        ));
 
-        while !ip_recv_t.is_finished()
-            && !ip_h_t.is_finished()
-            && !ip_disp_t.is_finished()
-            && !quic_h_t.is_finished()
-        //&& !quic_disp_t.is_finished()
-        {
-            sleep(Duration::from_millis(10)).await;
-        }
-        // gracefully exit
-        if !ip_recv_t.is_finished() {
-            ip_recv_t.abort();
-        }
-
-        if !ip_h_t.is_finished() {
-            ip_h_t.abort();
-        }
-
-        if !ip_disp_t.is_finished() {
-            ip_disp_t.abort();
-        }
-
-        if !quic_h_t.is_finished() {
-            quic_h_t.abort();
-        }
+        tokio::select! {
+            _ = ip_recv_t => { error!("ip_recv_t stopped!"); },
+            _ = ip_h_t => { error!("ip_h_t stopped!"); },
+            _ = ip_disp_t => { error!("ip_disp_t stopped!"); },
+            _ = quic_h_t => { error!("quic_h_t stopped!"); },
+        };
         debug!("ConnectIPClient exiting..");
     }
 
@@ -1004,10 +1009,7 @@ impl ConnectIPClient {
             }
         }
 
-        // TODO: Do we do more setup with the connection?
         Ok(connection)
-
-        //todo!();
     }
 
     /**
