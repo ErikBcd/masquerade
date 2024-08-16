@@ -1237,7 +1237,7 @@ async fn tun_socket_handler(
             if let Some(pkt) = tun_sender.recv().await {
                 // TODO: For now we make sure to only send ipv4 packets
                 // Get the version by looking at the first nibble
-                let version = pkt[0].reverse_bits() & 0b00001111;
+                let version = pkt[0] >> 4;
                 if version == 4 {
                     // All is okay, send the packet to the TUN interface
                     // call write as long as needed to send the entire packet
@@ -1381,7 +1381,6 @@ async fn connect_ip_handler(
                         }
                         match ip::Packet::new(ip_payload) {
                             Ok(ip::Packet::V4(v)) => {
-                                debug!("Received IPv4 packet via http3");
                                 if !v.is_valid() {
                                     debug!("Received invalid ipv4 packet, discarding..");
                                     continue;
