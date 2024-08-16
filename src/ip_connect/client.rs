@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, ToSocketAddrs};
 use std::sync::Arc;
@@ -11,7 +12,7 @@ use quiche::h3::NameValue;
 use quiche::Connection;
 use ring::rand::{SecureRandom, SystemRandom};
 use tokio::net::UdpSocket;
-use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::{self, Sender, UnboundedReceiver, UnboundedSender};
 use tokio::sync::Mutex;
 use tokio::time::{self, sleep};
 use tun2::platform::posix::{Reader, Writer};
@@ -192,6 +193,7 @@ async fn quic_conn_handler(
     info_sender: UnboundedSender<ConnectIpInfo>, // other side is the ip_handler_t
     http3_sender: UnboundedSender<ToSend>, 
     http3_receiver: &mut UnboundedReceiver<ToSend>,
+    peer_addr: &String,
     mut conn: Connection,
     udp_socket: UdpSocket,
 ) {
@@ -201,6 +203,8 @@ async fn quic_conn_handler(
 
     let http3_conn_temp: Arc<Mutex<Option<quiche::h3::Connection>>> = Arc::new(Mutex::new(None));
     let mut http3_conn: Option<quiche::h3::Connection> = None;
+
+    let stream_id_receivers: HashMap<u64, Sender<u64>> = HashMap::new();
 
     let stream: Arc<Mutex<QuicStream>> = Arc::new(Mutex::new(QuicStream {
         stream_sender: None,
@@ -300,7 +304,7 @@ async fn quic_conn_handler(
                 debug!("a processed {} bytes", read);
                 if let Some(http3_conn) = &mut http3_conn {
                     loop {
-                        debug!("polling on http3 connection");
+                        debug!("IP connect client polling on http3 connection");
                         match http3_conn.poll(&mut conn) {
                             Ok((stream_id, quiche::h3::Event::Headers { list, .. })) => {
                                 info!(
@@ -308,13 +312,22 @@ async fn quic_conn_handler(
                                     hdrs_to_strings(&list),
                                     stream_id
                                 );
-                                // TODO: Can we just ignore headers that occur now?
+                                if stream.lock().await.stream_id.is_some() {
+                                    // TODO: Send info back to the ip establish thread
+                                    if stream.lock().await.stream_id.unwrap() == stream_id {
+                                        let binding = stream.as_ref().lock().await;
+                                        let sender = binding.stream_sender.as_ref().unwrap();
+                                        sender.send(Content::Headers { headers: list })
+                                            .expect("Couldn't send headers through channel!");
+                                    }
+                                }
                             }
 
                             Ok((stream_id, quiche::h3::Event::Data)) => {
                                 debug!("received stream data");
                                 let mut incoming: Vec<u8> = Vec::new();
                                 let mut pos = 0;
+                                // TODO: Error here, trying to unwrap None
                                 while let Ok(read) = http3_conn_temp
                                     .lock()
                                     .await
@@ -357,6 +370,7 @@ async fn quic_conn_handler(
                                                     info_sender.send(ci)
                                                         .expect("Could not send connect ip info to ip handler.");
                                                     got_ip_addr = true;
+                                                    
                                                 }
                                             } else {
                                                 panic!("Received an ipv6 address even tho we only allow ipv4");
@@ -609,8 +623,9 @@ async fn quic_conn_handler(
             // now we can create the ip connect stream
             let stream_clone = stream.clone();
             let http3_sender_clone = http3_sender.clone();
+            let peer_addr_clone = peer_addr.clone(); //rust is stupid
             let _ip_connect_thread = tokio::spawn(async move {
-                handle_ip_connect_stream(http3_sender_clone, stream_clone).await;
+                handle_ip_connect_stream(http3_sender_clone, stream_clone, peer_addr_clone).await;
             });
         }
 
@@ -651,15 +666,16 @@ async fn quic_conn_handler(
 async fn handle_ip_connect_stream(
     http3_sender: UnboundedSender<ToSend>,
     stream: Arc<Mutex<QuicStream>>,
+    peer_addr: String,
 ) {
     // We only need to establish the connect-ip thing first
-    debug!("Trying to establish connect-ip!");
+    debug!("connect-ip builder: Trying to establish connect-ip!");
     let headers = vec![
         quiche::h3::Header::new(b":method", b"CONNECT"),
         quiche::h3::Header::new(b":protocol", b"connect-ip"),
         quiche::h3::Header::new(b":scheme", b"https"), // TODO: Should always be https?
-        quiche::h3::Header::new(b":authority", b""),   // TODO
-        quiche::h3::Header::new(b"path", b"/.well-known/masque/ip/*/*/"),
+        quiche::h3::Header::new(b":authority", peer_addr.as_bytes()),   // TODO
+        quiche::h3::Header::new(b":path", b"/.well-known/masque/ip/*/*/"),
         quiche::h3::Header::new(b"connect-ip-version", b"3"),
     ];
     let (stream_id_sender, mut stream_id_receiver) = mpsc::channel(1);
@@ -677,6 +693,8 @@ async fn handle_ip_connect_stream(
         .unwrap_or_else(|e| {
             error!("Could not send http3 request to http3_receiver in QUIC handler: {e}")
         });
+    
+    debug!("connect-ip builder: Sent connect-ip request");
 
     let stream_id = stream_id_receiver
         .recv()
@@ -689,13 +707,14 @@ async fn handle_ip_connect_stream(
         stream.stream_sender = Some(response_sender);
     }
 
+    debug!("connect-ip builder: Got a stream_id: {}", stream_id);
     // Now wait for response
 
     let response = response_receiver
         .recv()
         .await
         .expect("http3 response receiver error");
-
+    debug!("connect-ip builder: Got response from server");
     let mut succeeded = false;
     if let Content::Headers { headers } = response {
         info!(
@@ -826,12 +845,14 @@ impl ConnectIPClient {
             ip_dispatcher_t(ip_dispatch_reader, writer).await;
         });
 
+        let peer_addr = server_addr.clone();
         let quic_h_t = tokio::spawn(async move {
             quic_conn_handler(
                 ip_from_quic_sender,
                 conn_info_sender,
                 http3_dispatch_clone,
                 &mut http3_dispatch_reader,
+                &peer_addr,
                 quic_conn,
                 socket,
             )

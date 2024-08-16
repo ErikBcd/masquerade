@@ -9,15 +9,16 @@ pub enum CapsuleParseError {
     Other(String),
 }
 
-pub const ADDRESS_ASSIGN_ID: u64 = 0x01;
-pub const ADDRESS_REQUEST_ID: u64 = 0x02;
-pub const ROUTE_ADVERTISEMENT_ID: u64 = 0x03;
-
 impl std::fmt::Display for CapsuleParseError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "{:?}", self)
     }
 }
+
+pub const ADDRESS_ASSIGN_ID: u64 = 0x01;
+pub const ADDRESS_REQUEST_ID: u64 = 0x02;
+pub const ROUTE_ADVERTISEMENT_ID: u64 = 0x03;
+
 
 impl std::error::Error for CapsuleParseError {}
 
