@@ -201,10 +201,7 @@ async fn quic_conn_handler(
     let mut buf = [0; 65535];
     let mut out = [0; MAX_DATAGRAM_SIZE];
 
-    let http3_conn_temp: Arc<Mutex<Option<quiche::h3::Connection>>> = Arc::new(Mutex::new(None));
     let mut http3_conn: Option<quiche::h3::Connection> = None;
-
-    let stream_id_receivers: HashMap<u64, Sender<u64>> = HashMap::new();
 
     let stream: Arc<Mutex<QuicStream>> = Arc::new(Mutex::new(QuicStream {
         stream_sender: None,
@@ -214,6 +211,9 @@ async fn quic_conn_handler(
 
     let mut assigned_addr: Option<Ipv4Addr> = None;
     let mut got_ip_addr = false;
+
+    let mut main_stream_id: Option<u64> = None;
+    let mut flow_id: Option<u64> = None;
 
     //let (http3_sender, mut http3_receiver) = mpsc::unbounded_channel::<ToSend>();
     let mut http3_retry_send: Option<ToSend> = None;
@@ -240,6 +240,7 @@ async fn quic_conn_handler(
                         continue;
                     }
                 };
+                debug!("Received datagram with context id={context_id}");
                 // TODO: Handle context IDs, for now we only accept 0
                 if context_id != 0 {
                     continue;
@@ -328,11 +329,7 @@ async fn quic_conn_handler(
                                 let mut incoming: Vec<u8> = Vec::new();
                                 let mut pos = 0;
                                 // TODO: Error here, trying to unwrap None
-                                while let Ok(read) = http3_conn_temp
-                                    .lock()
-                                    .await
-                                    .as_mut()
-                                    .unwrap()
+                                while let Ok(read) = http3_conn
                                     .recv_body(&mut conn, stream_id, &mut buf)
                                 {
                                     incoming.extend_from_slice(&buf[0..read]);
