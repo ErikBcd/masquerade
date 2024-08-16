@@ -157,16 +157,17 @@ fn ip_message_handler(
     ip_dispatch: UnboundedSender<Vec<u8>>,
     conn_info: ConnectIpInfo,
 ) {
-    debug!("[ip_message_handler] got message!");
+    
     let version = pkt.message[0] >> 4;
+    // Header length is given in 32bit words. A header value of 0b1111 = 15, 15*32=480bit=60byte
+    let header_length = 4 * (pkt.message[0] & 0b1111);
+    debug!("[ip_message_handler] got message! ip version={version} | header len={header_length}");
     if version == 4 {
         match pkt.dir {
             Direction::ToServer => {
                 set_ipv4_pkt_source(&mut pkt.message, &conn_info.assigned_ip);
                 // Recalculate checksum after ipv4 change
-                let new_chcksm = checksum(&pkt.message).to_be_bytes();
-                pkt.message[10] = new_chcksm[0];
-                pkt.message[11] = new_chcksm[1];
+                update_ipv4_checksum(&mut pkt.message, header_length);
                 info!("[ip_handler_t] Sending ipv4 packet to server");
                 match http3_dispatch.send(encapsulate_ipv4(pkt.message, &conn_info.flow_id, &0)) {
                     Ok(()) => {}

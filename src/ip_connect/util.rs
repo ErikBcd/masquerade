@@ -2,6 +2,8 @@ use std::{
     error::Error, net::Ipv4Addr
 };
 
+use packet::ip::v4::{self};
+
 #[derive(Debug, Clone)]
 pub struct UdpBindError;
 
@@ -63,4 +65,17 @@ pub fn set_ipv4_pkt_source(pkt: &mut Vec<u8>, ip: &Ipv4Addr) {
     pkt[13] = ip.octets()[1];
     pkt[14] = ip.octets()[2];
     pkt[15] = ip.octets()[3];
+}
+
+/// Updates the checksum of a IPv4 header to be correct.
+/// # Examples
+/// ```
+///     set_ipv4_pkt_source(&mut pkt.message, Ipv4Addr::new(192, 168, 0, 255));   
+///     update_ipv4_checksum(&mut pkt.message, 60);
+/// ```
+/// 
+pub fn update_ipv4_checksum(pkt: &mut Vec<u8>, header_length: u8) {
+    let new_chcksm = v4::checksum(&pkt[.. header_length.into()]).to_be_bytes();
+    pkt[10] = new_chcksm[0];
+    pkt[11] = new_chcksm[1];
 }

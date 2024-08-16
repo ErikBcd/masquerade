@@ -1,6 +1,7 @@
 use futures::lock::Mutex;
 use log::*;
 use octets::varint_len;
+use packet::icmp::checksum;
 use packet::ip;
 use packet::ip::v4::Packet;
 use quiche::h3::NameValue;
@@ -1380,10 +1381,16 @@ async fn connect_ip_handler(
                             debug!("Received non-zero context_id (not implemented)!");
                             continue;
                         }
+                        debug!("IP Message from connect-ip client: {:?}", ip_payload);
                         match ip::Packet::new(ip_payload) {
                             Ok(ip::Packet::V4(v)) => {
+                                
                                 if !v.is_valid() {
-                                    debug!("Received invalid ipv4 packet, discarding..");
+                                    debug!(
+                                        "Received invalid ipv4 packet, discarding. chksm hdr: {} | calculated: {}",
+                                        v.checksum(),
+                                        checksum(ip_payload)
+                                    );
                                     continue;
                                 }
                                 tun_sender
