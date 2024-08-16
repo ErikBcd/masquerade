@@ -8,6 +8,7 @@ use std::u64;
 use log::*;
 use octets::varint_len;
 use packet::ip;
+use packet::ip::v4::checksum;
 use quiche::h3::NameValue;
 use quiche::Connection;
 use ring::rand::{SecureRandom, SystemRandom};
@@ -28,6 +29,7 @@ use crate::ip_connect::util::*;
  * Information about packets, wether they are
  * to be sent to the server or to the client.
  */
+#[derive(Debug)]
 pub enum Direction {
     ToServer,
     ToClient,
@@ -81,7 +83,7 @@ async fn ip_receiver_t(
     let mut buf = [0; 4096];
     loop {
         let size = reader.read(&mut buf).expect("Could not read from reader");
-        //debug!("Read TUN message size {size}");
+        debug!("Read TUN message size {size}");
         let pkt = &buf[..size];
         use std::io::{Error, ErrorKind::Other};
         match ip_handler
@@ -112,17 +114,26 @@ async fn ip_handler_t(
     debug!("Started ip_handler thread!");
     // Wait till the QUIC server sends us connection information
     let mut conn_info: Option<ConnectIpInfo> = None;
-    while conn_info.is_none() {
-        conn_info = conn_info_recv.recv().await;
+    if let Some(info) = conn_info_recv.recv().await {
+        conn_info = Some(info);
     }
     let conn_info = conn_info.unwrap();
+    debug!("[ip_handler_t] Received connection info!");
     loop {
         if let Some(mut pkt) = ip_recv.recv().await {
-            let version = (pkt.message[0].reverse_bits()) & 0b00001111;
+            debug!("[ip_handler_t] Received a packet: {:?} In direction: {:?}", pkt.message, pkt.dir);
+            
+            let version = pkt.message[0] >> 4;
+            debug!("[ip_handler_t] IPv{version}");
             if version == 4 {
-                set_ipv4_pkt_source(&mut pkt.message, &conn_info.assigned_ip);
                 match pkt.dir {
                     Direction::ToServer => {
+                        set_ipv4_pkt_source(&mut pkt.message, &conn_info.assigned_ip);
+                        // Recalculate checksum after ipv4 change
+                        let new_chcksm = checksum(&pkt.message).to_be_bytes();
+                        pkt.message[10] = new_chcksm[0];
+                        pkt.message[11] = new_chcksm[1];
+                        debug!("Sending ipv4 packet to server: {:?}", pkt.message);
                         match http3_dispatch.send(encapsulate_ipv4(pkt.message, &conn_info.flow_id, &0))
                         {
                             Ok(()) => {}
