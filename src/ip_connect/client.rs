@@ -362,15 +362,16 @@ async fn quic_conn_handler(
                                                 debug!("Got address: {:?}", assigned_addr);
                                                 if !got_ip_addr {
                                                     // Send assigned ip to ip handler
+                                                    debug!("Sending connection info to ip_handler");
                                                     let ci = ConnectIpInfo {
                                                         assigned_ip: assigned_addr.unwrap(),
-                                                        flow_id: stream.as_ref().lock().await.flow_id.unwrap(),
-                                                        stream_id: stream.as_ref().lock().await.stream_id.unwrap(),
+                                                        flow_id: flow_id.unwrap(),
+                                                        stream_id: main_stream_id.unwrap(),
                                                     };
                                                     info_sender.send(ci)
                                                         .expect("Could not send connect ip info to ip handler.");
                                                     got_ip_addr = true;
-                                                    
+                                                    debug!("Sent info to ip_handler!");
                                                 }
                                             } else {
                                                 panic!("Received an ipv6 address even tho we only allow ipv4");
@@ -462,6 +463,8 @@ async fn quic_conn_handler(
                                     stream_id_sender.send(stream_id)
                                         .await
                                         .unwrap_or_else(|e| error!("http3 request send stream_id failed: {:?}", e));
+                                    main_stream_id = Some(stream_id);
+                                    flow_id = Some(stream_id / 4);
                                     Ok(())
                                 },
                                 Err(e) => {
