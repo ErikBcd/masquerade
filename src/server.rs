@@ -1,5 +1,6 @@
 use futures::lock::Mutex;
 use log::*;
+use octets::varint_len;
 use packet::ip;
 use packet::ip::v4::Packet;
 use quiche::h3::NameValue;
@@ -673,9 +674,8 @@ async fn handle_http3_event(
 
             // TODO: Check if this is actually a good way to check for the
             // length of the flow_id
-            let flow_id_len: usize = (flow_id.checked_ilog10().unwrap_or(0) + 1)
-                .try_into()
-                .unwrap();
+            
+            let flow_id_len = varint_len(flow_id);
             info!("flow_id_len={}", flow_id_len);
             if connect_sockets.contains_key(&flow_id) {
                 let data = &buf[flow_id_len..len];
