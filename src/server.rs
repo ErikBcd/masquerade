@@ -1373,8 +1373,13 @@ async fn connect_ip_handler(
                     }
                     Content::Datagram { payload } => {
                         // just send the datagram
-                        let test_pkt = payload.clone();
-                        match ip::Packet::new(test_pkt) {
+                        debug!("Received a datagram from connect-ip client: {:?}", payload);
+                        let (context_id, ip_payload) = decode_var_int(&payload);
+                        if context_id != 0 {
+                            debug!("Received non-zero context_id (not implemented)!");
+                            continue;
+                        }
+                        match ip::Packet::new(ip_payload) {
                             Ok(ip::Packet::V4(v)) => {
                                 debug!("Received IPv4 packet via http3");
                                 if !v.is_valid() {
@@ -1382,7 +1387,7 @@ async fn connect_ip_handler(
                                     continue;
                                 }
                                 tun_sender
-                                    .send(payload)
+                                    .send(ip_payload.to_vec())
                                     .expect("Wasn't able to send ip packet to tun handler");
                             }
                             Ok(ip::Packet::V6(_)) => {
