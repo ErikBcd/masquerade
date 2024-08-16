@@ -763,76 +763,76 @@ async fn handle_http3_event(
                         } else if protocol == Some(b"connect-ip")
                             && scheme.is_some()
                             && path.is_some()
-                            && !authority.is_empty()
+                           // && !authority.is_empty()
                         {
+                            debug!("Got request for connect-ip!");
                             // Check the path
                             let path = path.unwrap();
-                            // TODO: Do we need to handle the path differently in connect-ip?
-                            if let Some(peer_addr) = path_to_socketaddr(path) {
-                                debug!(
-                                    "connecting ip to {} at {} from authority {}",
-                                    std::str::from_utf8(&path).unwrap(),
-                                    peer_addr,
-                                    authority
-                                );
-                                // acquire http3 and TUN sender clones
+                            
+                            debug!(
+                                "connecting ip to {} from authority {}",
+                                std::str::from_utf8(&path).unwrap(),
+                                //peer_addr,
+                                authority
+                            );
+                            // acquire http3 and TUN sender clones
 
-                                // For sending messages from the ip handler to the http3 sender
-                                let http3_sender_clone = http3_sender.clone();
+                            // For sending messages from the ip handler to the http3 sender
+                            let http3_sender_clone = http3_sender.clone();
 
-                                // These are for receiving messages from the TUN device
-                                let (tun_sender_from, from_tun_receiver) =
-                                    mpsc::unbounded_channel::<Vec<u8>>();
-                                    connect_ip_clients.lock().await.insert(next_free_ip.clone(), tun_sender_from);
+                            // These are for receiving messages from the TUN device
+                            let (tun_sender_from, from_tun_receiver) =
+                                mpsc::unbounded_channel::<Vec<u8>>();
+                                connect_ip_clients.lock().await.insert(next_free_ip.clone(), tun_sender_from);
 
-                                // For sending received http3 messages to the ip connect handler
-                                let (ip_http3_sender, ip_http3_receiver) =
-                                    mpsc::unbounded_channel::<Content>();
-                                let flow_id = stream_id / 4;
+                            // For sending received http3 messages to the ip connect handler
+                            let (ip_http3_sender, ip_http3_receiver) =
+                                mpsc::unbounded_channel::<Content>();
+                            let flow_id = stream_id / 4;
 
-                                if connect_ip_session.is_some() {
-                                    debug!("Replacing old IpConnectSession!");
+                            if connect_ip_session.is_some() {
+                                debug!("Replacing old IpConnectSession!");
+                                {
+                                    let ip_session = connect_ip_session.as_ref().unwrap();
+                                    if !ip_session
+                                        .handler_thread
+                                        .as_ref()
+                                        .unwrap()
+                                        .is_finished()
                                     {
-                                        let ip_session = connect_ip_session.as_ref().unwrap();
-                                        if !ip_session
-                                            .handler_thread
-                                            .as_ref()
-                                            .unwrap()
-                                            .is_finished()
-                                        {
-                                            ip_session.handler_thread.as_ref().unwrap().abort();
-                                        }
+                                        ip_session.handler_thread.as_ref().unwrap().abort();
                                     }
                                 }
-                                let _ = std::mem::replace(
-                                    connect_ip_session,
-                                    Some(IpConnectSession {
-                                        flow_id: flow_id,
-                                        stream_id: stream_id,
-                                        ip_h3_sender: ip_http3_sender,
-                                        handler_thread: None,
-                                    }),
-                                );
-
-                                // spawn handler thread for this one
-                                let assigned_ip = next_free_ip.clone();
-
-                                // For sending messages to the TUN device
-                                let tun_sender_clone = tun_sender.clone();
-                                connect_ip_session.as_mut().unwrap().handler_thread =
-                                    Some(tokio::spawn(async move {
-                                        connect_ip_handler(
-                                            stream_id,
-                                            flow_id,
-                                            http3_sender_clone,
-                                            from_tun_receiver,
-                                            tun_sender_clone,
-                                            ip_http3_receiver,
-                                            assigned_ip,
-                                        )
-                                        .await;
-                                    }));
                             }
+                            let _ = std::mem::replace(
+                                connect_ip_session,
+                                Some(IpConnectSession {
+                                    flow_id: flow_id,
+                                    stream_id: stream_id,
+                                    ip_h3_sender: ip_http3_sender,
+                                    handler_thread: None,
+                                }),
+                            );
+
+                            // spawn handler thread for this one
+                            let assigned_ip = next_free_ip.clone();
+
+                            // For sending messages to the TUN device
+                            let tun_sender_clone = tun_sender.clone();
+                            connect_ip_session.as_mut().unwrap().handler_thread =
+                                Some(tokio::spawn(async move {
+                                    connect_ip_handler(
+                                        stream_id,
+                                        flow_id,
+                                        http3_sender_clone,
+                                        from_tun_receiver,
+                                        tun_sender_clone,
+                                        ip_http3_receiver,
+                                        assigned_ip,
+                                    )
+                                    .await;
+                                }));
+                            
                         } else if let Ok(target_url) = if authority.contains("://") {
                             url::Url::parse(authority)
                         } else {
@@ -1293,6 +1293,7 @@ async fn connect_ip_handler(
     mut http3_receiver: tokio::sync::mpsc::UnboundedReceiver<Content>,
     assigned_ip: Ipv4Addr,
 ) {
+    debug!("Creating new IP connect handler!");
     let http3_sender_clone_1 = http3_sender.clone();
     let http3_sender_clone_2 = http3_sender.clone();
     let http3_sender_clone_3 = http3_sender.clone();
@@ -1398,7 +1399,7 @@ async fn connect_ip_handler(
         }
     });
 
-    // send ok to the client
+    debug!("Sending back ok to the client!");
     let headers = vec![quiche::h3::Header::new(b":status", b"200")];
     http3_sender_clone_3
         .send(ToSend {
