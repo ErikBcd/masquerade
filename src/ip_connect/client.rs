@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, ToSocketAddrs};
 use std::sync::Arc;
@@ -13,7 +12,7 @@ use quiche::h3::NameValue;
 use quiche::Connection;
 use ring::rand::{SecureRandom, SystemRandom};
 use tokio::net::UdpSocket;
-use tokio::sync::mpsc::{self, Sender, UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::sync::Mutex;
 use tokio::time::{self, sleep};
 use tun2::platform::posix::{Reader, Writer};
@@ -220,7 +219,6 @@ async fn quic_conn_handler(
         flow_id: None,
     }));
 
-    let mut assigned_addr: Option<Ipv4Addr> = None;
     let mut got_ip_addr = false;
 
     let mut main_stream_id: Option<u64> = None;
@@ -366,7 +364,7 @@ async fn quic_conn_handler(
                                             //       Also: See if we can use the other values like the prefix
                                             //       This should not be used like this in prod
                                             if let IpLength::V4(ipv4) = c.assigned_address[0].ip_address {
-                                                assigned_addr = Some(Ipv4Addr::from(ipv4));
+                                                let assigned_addr = Some(Ipv4Addr::from(ipv4));
                                                 debug!("Got address: {:?}", assigned_addr);
                                                 if !got_ip_addr {
                                                     // Send assigned ip to ip handler
@@ -614,9 +612,8 @@ async fn quic_conn_handler(
                             .unwrap_or_else(|e| error!("stream shutdown read failed: {:?}", e));
                         conn.stream_shutdown(to_send.stream_id, quiche::Shutdown::Write, 0)
                             .unwrap_or_else(|e| error!("stream shutdown write failed: {:?}", e));
-                        // TODO: Signal that stream is ended
-                        http3_retry_send = None;
-                        todo!()
+                        error!("Connection ended! Stopping quic_conn_handler...");
+                        return;
                     }
                 };
             }
