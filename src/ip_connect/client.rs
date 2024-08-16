@@ -1,5 +1,6 @@
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, ToSocketAddrs};
+use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 use std::u64;
@@ -7,7 +8,6 @@ use std::u64;
 use log::*;
 use octets::varint_len;
 use packet::ip;
-use packet::ip::v4::checksum;
 use quiche::h3::NameValue;
 use quiche::Connection;
 use ring::rand::{SecureRandom, SystemRandom};
@@ -66,6 +66,53 @@ pub fn generate_cid_and_reset_token<T: SecureRandom>(
     rng.fill(&mut reset_token).unwrap();
     let reset_token = u128::from_be_bytes(reset_token);
     (scid, reset_token)
+}
+
+/// Basic commands for setting up the TUN interface
+/// Should in the end take all traffic on the device and tunnel it.
+fn set_client_ip_and_route() {
+    let ip_output = Command::new("ip")
+        .arg("addr")
+        .arg("add")
+        .arg("10.8.0.2/24")
+        .arg("dev")
+        .arg("tun0")
+        .output()
+        .expect("Failed to execute IP command");
+
+    if !ip_output.status.success() {
+        eprintln!("Failed to set IP: {}", String::from_utf8_lossy(&ip_output.stderr));
+        return;
+    }
+
+    let link_output = Command::new("ip")
+        .arg("link")
+        .arg("set")
+        .arg("up")
+        .arg("dev")
+        .arg("tun0")
+        .output()
+        .expect("Failed to execute IP LINK command");
+
+    if !link_output.status.success() {
+        eprintln!("Failed to set link up: {}", String::from_utf8_lossy(&link_output.stderr));
+        return;
+    }
+
+    let route_output = Command::new("ip")
+        .arg("route")
+        .arg("add")
+        .arg("0.0.0.0/0")
+        .arg("via")
+        .arg("10.8.0.1")
+        .arg("dev")
+        .arg("tun0")
+        .output()
+        .expect("Failed to execute IP ROUTE command");
+
+    if !route_output.status.success() {
+        eprintln!("Failed to set route: {}", String::from_utf8_lossy(&route_output.stderr));
+    }
 }
 
 /**
@@ -1025,18 +1072,14 @@ impl ConnectIPClient {
     fn create_tun(&self) -> Result<Device, tun2::Error> {
         let mut config = tun2::Configuration::default();
 
-        config
-            .address((10, 0, 0, 9))
-            .netmask((255, 255, 255, 0))
-            .destination((10, 0, 0, 1))
-            .up();
-
         #[cfg(target_os = "linux")]
         config.platform_config(|config| {
             config.ensure_root_privileges(true);
         });
-
-        tun2::create(&config)
+        config.tun_name("tun0");
+        let dev = tun2::create(&config);
+        set_client_ip_and_route();
+        return dev;
     }
 
     /**
