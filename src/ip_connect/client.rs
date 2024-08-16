@@ -123,7 +123,7 @@ async fn ip_handler_t(
                 set_ipv4_pkt_source(&mut pkt.message, &conn_info.assigned_ip);
                 match pkt.dir {
                     Direction::ToServer => {
-                        match http3_dispatch.send(encapsulate_ipv4(pkt.message, &conn_info.flow_id))
+                        match http3_dispatch.send(encapsulate_ipv4(pkt.message, &conn_info.flow_id, &0))
                         {
                             Ok(()) => {}
                             Err(e) => {
@@ -154,9 +154,9 @@ async fn ip_handler_t(
 /**
  * Creates a ToSend struct for sending IP from a given IP packet and stream_id
  */
-pub fn encapsulate_ipv4(pkt: Vec<u8>, flow_id: &u64) -> ToSend {
-    let context_id = encode_var_int(0);
-    let payload = [&context_id, pkt.as_slice()].concat();
+pub fn encapsulate_ipv4(pkt: Vec<u8>, flow_id: &u64, context_id: &u64) -> ToSend {
+    let context_id_enc = encode_var_int(*context_id);
+    let payload = [&context_id_enc, pkt.as_slice()].concat();
     ToSend {
         stream_id: flow_id.clone(),
         content: Content::Datagram { payload: payload },

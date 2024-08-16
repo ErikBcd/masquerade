@@ -1306,7 +1306,8 @@ async fn connect_ip_handler(
             // The packets are confirmed to be ipv4 packets so we don't need to worry about anything.
             // Just create the http3 datagram and send the packet.
             if let Some(pkt) = tun_receiver.recv().await {
-                let to_send = encapsulate_ipv4(pkt, &flow_id);
+                debug!("Received TUN message size {}", pkt.len());
+                let to_send = encapsulate_ipv4(pkt, &flow_id, &0);
 
                 http3_sender_clone_1
                     .send(to_send)
