@@ -13,7 +13,7 @@ use quiche::h3::NameValue;
 use quiche::Connection;
 use ring::rand::{SecureRandom, SystemRandom};
 use tokio::net::UdpSocket;
-use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::{self, Receiver, Sender, UnboundedReceiver, UnboundedSender};
 use tokio::sync::Mutex;
 use tokio::time::{self};
 use tun2::platform::posix::{Reader, Writer};
@@ -144,7 +144,7 @@ fn set_client_ip_and_route(
  *  - reader: Receiver for raw ip messages
  */
 async fn ip_receiver_t(
-    ip_handler: UnboundedSender<IpMessage>,
+    ip_handler: Sender<IpMessage>,
     mut reader: Reader, //
 ) {
     debug!("[ip_receiver_t] Started ip_receiver thread!");
@@ -160,7 +160,7 @@ async fn ip_receiver_t(
             .send(IpMessage {
                 message: pkt.to_vec(),
                 dir: Direction::ToServer,
-            })
+            }).await    
             .map_err(|e| Error::new(Other, e))
         {
             Ok(()) => {
@@ -178,10 +178,10 @@ async fn ip_receiver_t(
  * Will then handle these packets accordingly and send messages to quic_dispatcher_t
  */
 async fn ip_handler_t(
-    mut ip_recv: UnboundedReceiver<IpMessage>, // Other side is ip_receiver_t
-    mut conn_info_recv: UnboundedReceiver<ConnectIpInfo>, // Other side is quic_handler_t
-    http3_dispatch: UnboundedSender<ToSend>,   // other side is quic_dispatcher_t
-    ip_dispatch: UnboundedSender<Vec<u8>>,     // other side is ip_dispatcher_t
+    mut ip_recv: Receiver<IpMessage>, // Other side is ip_receiver_t
+    mut conn_info_recv: Receiver<ConnectIpInfo>, // Other side is quic_handler_t
+    http3_dispatch: Sender<ToSend>,   // other side is quic_dispatcher_t
+    ip_dispatch: Sender<Vec<u8>>,     // other side is ip_dispatcher_t
     device_addr: Ipv4Addr,
 ) {
     debug!("[ip_handler_t] Started ip_handler thread!");
@@ -212,8 +212,8 @@ async fn ip_handler_t(
             let http3_dispatch_clone = http3_dispatch.clone();
             let ip_disp_clone = ip_dispatch.clone();
             let ip_addr_clone = device_addr.clone();
-            let _ = tokio::task::spawn_blocking( move || {
-                ip_message_handler(pkt, http3_dispatch_clone, ip_disp_clone, conn_info, ip_addr_clone)
+            let _ = tokio::spawn( async move {
+                ip_message_handler(pkt, http3_dispatch_clone, ip_disp_clone, conn_info, ip_addr_clone).await
                 }
             );
         }
@@ -221,10 +221,10 @@ async fn ip_handler_t(
     }
 }
 
-fn ip_message_handler(
+async fn ip_message_handler(
     mut pkt: IpMessage,
-    http3_dispatch: UnboundedSender<ToSend>,
-    ip_dispatch: UnboundedSender<Vec<u8>>,
+    http3_dispatch: Sender<ToSend>,
+    ip_dispatch: Sender<Vec<u8>>,
     conn_info: ConnectIpInfo,
     device_addr: Ipv4Addr,
 ) {
@@ -240,7 +240,7 @@ fn ip_message_handler(
                 // Recalculate checksum after ipv4 change
                 update_ipv4_checksum(&mut pkt.message, header_length);
                 info!("[ip_handler_t] Sending ipv4 packet to server");
-                match http3_dispatch.send(encapsulate_ipv4(pkt.message, &conn_info.flow_id, &0)) {
+                match http3_dispatch.send(encapsulate_ipv4(pkt.message, &conn_info.flow_id, &0)).await {
                     Ok(()) => {}
                     Err(e) => {
                         error!("[ip_handler_t] Error sending to quic dispatch: {}", e);
@@ -253,7 +253,7 @@ fn ip_message_handler(
                 // Recalculate checksum after ipv4 change
                 update_ipv4_checksum(&mut pkt.message, header_length);
                 debug!("[ip_handler_t] Sending IPv4 packet towards client (tun)");
-                match ip_dispatch.send(pkt.message) {
+                match ip_dispatch.send(pkt.message).await {
                     Ok(()) => {}
                     Err(e) => {
                         error!("[ip_handler_t] Error sending to ip dispatch: {}", e);
@@ -284,7 +284,7 @@ pub fn encapsulate_ipv4(pkt: Vec<u8>, flow_id: &u64, context_id: &u64) -> ToSend
 /**
  * Receives ready-to-send ip packets and then sends them.
  */
-async fn ip_dispatcher_t(mut ip_dispatch_reader: UnboundedReceiver<Vec<u8>>, mut writer: Writer) {
+async fn ip_dispatcher_t(mut ip_dispatch_reader: Receiver<Vec<u8>>, mut writer: Writer) {
     loop {
         if let Some(pkt) = ip_dispatch_reader.recv().await {
             writer.write(&pkt).expect("Could not write packet to TUN!");
@@ -303,10 +303,10 @@ async fn ip_dispatcher_t(mut ip_dispatch_reader: UnboundedReceiver<Vec<u8>>, mut
  */
 // TODO: Handle incoming capsules, send ip information out once we have it (Address Assign etc)
 async fn quic_conn_handler(
-    ip_handler: UnboundedSender<IpMessage>, // other side is ip_dispatcher_t
-    info_sender: UnboundedSender<ConnectIpInfo>, // other side is the ip_handler_t
-    http3_sender: UnboundedSender<ToSend>,
-    mut http3_receiver: UnboundedReceiver<ToSend>,
+    ip_handler: Sender<IpMessage>, // other side is ip_dispatcher_t
+    info_sender: Sender<ConnectIpInfo>, // other side is the ip_handler_t
+    http3_sender: Sender<ToSend>,
+    mut http3_receiver: Receiver<ToSend>,
     peer_addr: String,
     mut conn: Connection,
     udp_socket: UdpSocket,
@@ -369,7 +369,7 @@ async fn quic_conn_handler(
                         match ip_handler.send(IpMessage {
                             message: buf[header_len..len].to_vec(),
                             dir: Direction::ToClient,
-                        }) {
+                        }).await {
                             Ok(()) => {}
                             Err(e) => {
                                 debug!("Couldn't send ip packet to ip sender: {}", e);
@@ -476,7 +476,7 @@ async fn quic_conn_handler(
                                                         flow_id: flow_id.unwrap(),
                                                         stream_id: main_stream_id.unwrap(),
                                                     };
-                                                    info_sender.send(ci)
+                                                    info_sender.send(ci).await
                                                         .expect("Could not send connect ip info to ip handler.");
                                                     got_ip_addr = true;
                                                     debug!("Sent info to ip_handler!");
@@ -774,7 +774,7 @@ async fn quic_conn_handler(
  * Initiates the CONNECT-IP request.
  */
 async fn handle_ip_connect_stream(
-    http3_sender: UnboundedSender<ToSend>,
+    http3_sender: Sender<ToSend>,
     stream: Arc<Mutex<QuicStream>>,
     peer_addr: String,
 ) {
@@ -799,7 +799,7 @@ async fn handle_ip_connect_stream(
                 stream_id_sender,
             },
             finished: false,
-        })
+        }).await
         .unwrap_or_else(|e| {
             error!("Could not send http3 request to http3_receiver in QUIC handler: {e}")
         });
@@ -872,7 +872,7 @@ async fn handle_ip_connect_stream(
                                 stream_id: stream.lock().await.stream_id.unwrap(),
                                 content: Content::Data { data: buf.to_vec() },
                                 finished: false,
-                            })
+                            }).await
                             .unwrap_or_else(|e| {
                                 error!("sending http3 data capsule failed: {:?}", e)
                             });
@@ -944,10 +944,10 @@ impl ConnectIPClient {
         // 4) Create receivers/senders
 
         // ip_sender for ip_receiver_t, ip_recv for ip_handler_t
-        let (ip_sender, ip_recv) = tokio::sync::mpsc::unbounded_channel();
-        let (http3_dispatch, http3_dispatch_reader) = tokio::sync::mpsc::unbounded_channel();
-        let (ip_dispatch, ip_dispatch_reader) = tokio::sync::mpsc::unbounded_channel();
-        let (conn_info_sender, conn_info_recv) = tokio::sync::mpsc::unbounded_channel();
+        let (ip_sender, ip_recv) = tokio::sync::mpsc::channel(5); // TODO: Check if 5 is okay
+        let (http3_dispatch, http3_dispatch_reader) = tokio::sync::mpsc::channel(5);
+        let (ip_dispatch, ip_dispatch_reader) = tokio::sync::mpsc::channel(5);
+        let (conn_info_sender, conn_info_recv) = tokio::sync::mpsc::channel(5);
 
         // Copies of senders
         let ip_from_quic_sender = ip_sender.clone();
