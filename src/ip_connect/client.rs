@@ -182,6 +182,7 @@ async fn ip_handler_t(
     mut conn_info_recv: UnboundedReceiver<ConnectIpInfo>, // Other side is quic_handler_t
     http3_dispatch: UnboundedSender<ToSend>,   // other side is quic_dispatcher_t
     ip_dispatch: UnboundedSender<Vec<u8>>,     // other side is ip_dispatcher_t
+    device_addr: Ipv4Addr,
 ) {
     debug!("[ip_handler_t] Started ip_handler thread!");
     // Wait till the QUIC server sends us connection information
@@ -210,8 +211,9 @@ async fn ip_handler_t(
             );
             let http3_dispatch_clone = http3_dispatch.clone();
             let ip_disp_clone = ip_dispatch.clone();
+            let ip_addr_clone = device_addr.clone();
             let _ = tokio::task::spawn_blocking( move || {
-                ip_message_handler(pkt, http3_dispatch_clone, ip_disp_clone, conn_info)
+                ip_message_handler(pkt, http3_dispatch_clone, ip_disp_clone, conn_info, ip_addr_clone)
                 }
             );
         }
@@ -247,7 +249,9 @@ fn ip_message_handler(
             }
             Direction::ToClient => {
                 // Send this to the ip dispatcher
-                // TODO: Change destination IP back to local IP
+                set_ipv4_pkt_source(&mut pkt.message, &device_addr);
+                // Recalculate checksum after ipv4 change
+                update_ipv4_checksum(&mut pkt.message, header_length);
                 debug!("[ip_handler_t] Sending IPv4 packet towards client (tun)");
                 match ip_dispatch.send(pkt.message) {
                     Ok(()) => {}

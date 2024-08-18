@@ -67,6 +67,10 @@ pub fn set_ipv4_pkt_source(pkt: &mut Vec<u8>, ip: &Ipv4Addr) {
     pkt[15] = ip.octets()[3];
 }
 
+pub fn get_ipv4_pkt_source(pkt: &Vec<u8>) -> Ipv4Addr {
+    Ipv4Addr::new(pkt[12], pkt[13], pkt[14], pkt[15])
+}
+
 /// Updates the checksum of a IPv4 header to be correct.
 /// # Examples
 /// ```
