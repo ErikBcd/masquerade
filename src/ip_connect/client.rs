@@ -1,6 +1,7 @@
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, ToSocketAddrs};
 use std::process::Command;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use std::u64;
@@ -70,13 +71,17 @@ pub fn generate_cid_and_reset_token<T: SecureRandom>(
 
 /// Basic commands for setting up the TUN interface
 /// Should in the end take all traffic on the device and tunnel it.
-fn set_client_ip_and_route() {
+fn set_client_ip_and_route(
+    dev_addr: &String, 
+    tun_gateway: String, 
+    tun_name: String
+) {
     let ip_output = Command::new("ip")
         .arg("addr")
         .arg("add")
-        .arg("10.8.0.2/24")
+        .arg(dev_addr)
         .arg("dev")
-        .arg("tun0")
+        .arg(&tun_name)
         .output()
         .expect("Failed to execute IP command");
 
@@ -90,7 +95,7 @@ fn set_client_ip_and_route() {
         .arg("set")
         .arg("up")
         .arg("dev")
-        .arg("tun0")
+        .arg(&tun_name)
         .output()
         .expect("Failed to execute IP LINK command");
 
@@ -105,14 +110,14 @@ fn set_client_ip_and_route() {
         .arg("add")
         .arg("0.0.0.0/0")
         .arg("via")
-        .arg("10.8.0.1")
+        .arg(tun_gateway)
         .arg("dev")
-        .arg("tun0")
+        .arg(&tun_name)
         .output()
         .expect("Failed to execute first IP ROUTE command");
 
     if !route_output.status.success() {
-        eprintln!("Failed to set route 0.0.0.0 to tun0: {}", String::from_utf8_lossy(&route_output.stderr));
+        eprintln!("Failed to set route 0.0.0.0 to tun device: {}", String::from_utf8_lossy(&route_output.stderr));
     }
     /*
     let route_output = Command::new("ip")
@@ -219,6 +224,7 @@ fn ip_message_handler(
     http3_dispatch: UnboundedSender<ToSend>,
     ip_dispatch: UnboundedSender<Vec<u8>>,
     conn_info: ConnectIpInfo,
+    device_addr: Ipv4Addr,
 ) {
     
     let version = pkt.message[0] >> 4;
@@ -885,7 +891,11 @@ async fn handle_ip_connect_stream(
 pub struct ConnectIPClient;
 
 impl ConnectIPClient {
-    pub async fn run(&self, server_addr: &String) {
+    pub async fn run(&self, 
+        server_addr: &String, 
+        dev_addr: String, 
+        tun_gateway: String, 
+        tun_name: String) {
         // 1) Create QUIC connection, connect to server
         let mut socket = match self.get_udp(server_addr).await {
             Ok(v) => v,
@@ -909,13 +919,21 @@ impl ConnectIPClient {
         // 2) Setup Connect IP stream
 
         // 3) Create TUN
-        let dev = match self.create_tun() {
+        let dev = match self.create_tun(&dev_addr, tun_gateway, tun_name) {
             Ok(v) => v,
             Err(e) => {
                 error!("could not create TUN: {}", e);
                 return;
             }
         };
+        let prefix_index = dev_addr.find("/");
+        if prefix_index.is_none() {
+            error!("Malformed IP address!");
+            return;
+        }
+        let addr = String::from_str(&dev_addr[..(prefix_index.unwrap())]).unwrap();
+        let ipaddr = Ipv4Addr::from_str(&addr).unwrap();
+        info!("Local address for packets: {}", ipaddr);
 
         let (reader, writer) = dev.split();
 
@@ -939,6 +957,7 @@ impl ConnectIPClient {
             conn_info_recv,
             http3_dispatch,
             ip_dispatch,
+            ipaddr
         ));
 
         let ip_disp_t = tokio::task::spawn(ip_dispatcher_t(ip_dispatch_reader, writer));
@@ -1085,16 +1104,19 @@ impl ConnectIPClient {
      *
      * Warning: Needs root priviligies on linux!
      */
-    fn create_tun(&self) -> Result<Device, tun2::Error> {
+    fn create_tun(&self, 
+        dev_addr: &String, 
+        tun_gateway: String, 
+        tun_name: String) -> Result<Device, tun2::Error> {
         let mut config = tun2::Configuration::default();
 
         #[cfg(target_os = "linux")]
         config.platform_config(|config| {
             config.ensure_root_privileges(true);
         });
-        config.tun_name("tun0");
+        config.tun_name(&tun_name);
         let dev = tun2::create(&config);
-        set_client_ip_and_route();
+        set_client_ip_and_route(dev_addr, tun_gateway, tun_name);
         return dev;
     }
 
