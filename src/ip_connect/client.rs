@@ -99,6 +99,7 @@ fn set_client_ip_and_route() {
         return;
     }
 
+    
     let route_output = Command::new("ip")
         .arg("route")
         .arg("add")
@@ -108,11 +109,26 @@ fn set_client_ip_and_route() {
         .arg("dev")
         .arg("tun0")
         .output()
-        .expect("Failed to execute IP ROUTE command");
+        .expect("Failed to execute first IP ROUTE command");
+
+    if !route_output.status.success() {
+        eprintln!("Failed to set route 0.0.0.0 to tun0: {}", String::from_utf8_lossy(&route_output.stderr));
+    }
+    /*
+    let route_output = Command::new("ip")
+        .arg("route")
+        .arg("add")
+        .arg("10.8.0.1/24")
+        .arg("via")
+        .arg("192.168.0.71")
+        .arg("dev")
+        .arg("enp39s0")
+        .output()
+        .expect("Failed to execute second IP ROUTE command");
 
     if !route_output.status.success() {
         eprintln!("Failed to set route: {}", String::from_utf8_lossy(&route_output.stderr));
-    }
+    }*/
 }
 
 /**

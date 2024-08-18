@@ -1170,6 +1170,22 @@ fn set_ip_settings(tun_addr: &String, tun_name: &String) -> Result<(), Box<dyn E
         return Err(format!("Failed to assign IP to tun0: {:?}", String::from_utf8_lossy(&output.stderr)).into());
     }
 
+    // TODO: Possibly add route from TUN to actual interface?
+    let route_output = Command::new("ip")
+        .arg("route")
+        .arg("add")
+        .arg("10.8.0.0/32")
+        .arg("via")
+        .arg("192.168.0.71")
+        .arg("dev")
+        .arg("enp39s0")
+        .output()
+        .expect("Failed to execute IP ROUTE command");
+
+    if !route_output.status.success() {
+        eprintln!("Failed to set route: {}", String::from_utf8_lossy(&route_output.stderr));
+    }
+
     Ok(())
 }
 
