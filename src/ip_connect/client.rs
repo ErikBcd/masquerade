@@ -13,7 +13,7 @@ use quiche::h3::NameValue;
 use quiche::Connection;
 use ring::rand::{SecureRandom, SystemRandom};
 use tokio::net::UdpSocket;
-use tokio::sync::mpsc::{self, Receiver, Sender, UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::{self, Receiver, Sender, UnboundedSender};
 use tokio::sync::Mutex;
 use tokio::time::{self};
 use tun2::platform::posix::{Reader, Writer};
@@ -198,11 +198,6 @@ async fn ip_handler_t(
             "[ip_handler_t] Currently {} packets in queue",
             ip_recv.len()
         );
-
-        // TODO: I have no clue why I have to do this instead of just letting recv().await do it's thing
-        while ip_recv.is_empty() {
-            
-        }
 
         if let Some(pkt) = ip_recv.recv().await {
             debug!(
