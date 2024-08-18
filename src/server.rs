@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
-use tokio::sync::mpsc::{self, UnboundedSender};
+use tokio::sync::mpsc::{self, Sender, UnboundedSender};
 use tokio::time::{self, Duration};
 
 use ring::rand::*;
@@ -26,6 +26,8 @@ use ring::rand::*;
 use crate::common::*;
 use crate::ip_connect::capsules::*;
 use crate::ip_connect::client::encapsulate_ipv4;
+
+const MAX_CHANNEL_MESSAGES: usize = 10;
 
 #[derive(Debug)]
 pub enum ClientError {
@@ -42,7 +44,7 @@ struct QuicReceived {
 struct IpConnectSession {
     stream_id: u64,
     flow_id: u64,
-    ip_h3_sender: UnboundedSender<Content>,
+    ip_h3_sender: Sender<Content>,
     handler_thread: Option<JoinHandle<()>>,
 }
 
@@ -148,9 +150,9 @@ impl Server {
         // CONNECT-IP things
         // TODO: Un-hardcode this. Should just be the next free ip for the TUN interface.
         let mut current_ip = Ipv4Addr::new(10, 8, 0, 3);
-        let ip_connect_clients: Arc<Mutex<HashMap<Ipv4Addr, UnboundedSender<Vec<u8>>>>> =
+        let ip_connect_clients: Arc<Mutex<HashMap<Ipv4Addr, Sender<Vec<u8>>>>> =
             Arc::new(Mutex::new(HashMap::new()));
-        let (tun_sender, tun_receiver) = mpsc::unbounded_channel::<Vec<u8>>();
+        let (tun_sender, tun_receiver) = tokio::sync::mpsc::channel::<Vec<u8>>(MAX_CHANNEL_MESSAGES);
         // Create TUN handler (creates device automatically)
         let ip_connect_clients_clone = ip_connect_clients.clone();
         let _tun_thread = tokio::spawn(async move {
@@ -336,8 +338,8 @@ impl Server {
 async fn handle_client(
     mut client: Client,
     client_ip: Ipv4Addr,
-    tun_sender: &tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
-    ip_connect_clients: Arc<Mutex<HashMap<Ipv4Addr, UnboundedSender<Vec<u8>>>>>,
+    tun_sender: &tokio::sync::mpsc::Sender<Vec<u8>>,
+    ip_connect_clients: Arc<Mutex<HashMap<Ipv4Addr, Sender<Vec<u8>>>>>,
 ) {
     let mut http3_conn: Option<quiche::h3::Connection> = None;
     let mut connect_streams: HashMap<u64, UnboundedSender<Vec<u8>>> = HashMap::new(); // for TCP CONNECT
@@ -657,9 +659,9 @@ async fn handle_http3_event(
     connect_sockets: &mut HashMap<u64, UnboundedSender<Vec<u8>>>,
     connect_streams: &mut HashMap<u64, UnboundedSender<Vec<u8>>>,
     connect_ip_session: &mut Option<IpConnectSession>,
-    tun_sender: &tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
+    tun_sender: &tokio::sync::mpsc::Sender<Vec<u8>>,
     next_free_ip: &Ipv4Addr,
-    connect_ip_clients: &Arc<Mutex<HashMap<Ipv4Addr, UnboundedSender<Vec<u8>>>>>,
+    connect_ip_clients: &Arc<Mutex<HashMap<Ipv4Addr, Sender<Vec<u8>>>>>,
 ) -> Result<(), ClientError> {
     let mut buf = [0; 65535];
     // Process datagram-related events.
@@ -695,6 +697,7 @@ async fn handle_http3_event(
                             .send(Content::Datagram {
                                 payload: data.to_vec(),
                             })
+                            .await
                             .expect("Could not send datagram to ip handler.");
                     }
                 }
@@ -783,12 +786,12 @@ async fn handle_http3_event(
 
                             // These are for receiving messages from the TUN device
                             let (tun_sender_from, from_tun_receiver) =
-                                mpsc::unbounded_channel::<Vec<u8>>();
+                                mpsc::channel::<Vec<u8>>(MAX_CHANNEL_MESSAGES);
                                 connect_ip_clients.lock().await.insert(next_free_ip.clone(), tun_sender_from);
 
                             // For sending received http3 messages to the ip connect handler
                             let (ip_http3_sender, ip_http3_receiver) =
-                                mpsc::unbounded_channel::<Content>();
+                                mpsc::channel::<Content>(MAX_CHANNEL_MESSAGES);
                             let flow_id = stream_id / 4;
 
                             if connect_ip_session.is_some() {
@@ -908,6 +911,7 @@ async fn handle_http3_event(
                                 .send(Content::Data {
                                     data: data.to_vec(),
                                 })
+                                .await
                                 .expect("channel send failed");
                         }
                     }
@@ -1171,7 +1175,8 @@ fn set_ip_settings(tun_addr: &String, tun_name: &String) -> Result<(), Box<dyn E
     }
 
     // TODO: Possibly add route from TUN to actual interface?
-    let route_output = Command::new("ip")
+    let route_output = Command::new("sudo")
+        .arg("ip")
         .arg("route")
         .arg("add")
         .arg("10.8.0.0/32")
@@ -1208,8 +1213,8 @@ fn destroy_tun_interface() {
  * Will then create a writer and a reader thread which are connected to channels.
  */
 async fn tun_socket_handler(
-    ip_handlers: Arc<Mutex<HashMap<Ipv4Addr, UnboundedSender<Vec<u8>>>>>,
-    mut tun_sender: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+    ip_handlers: Arc<Mutex<HashMap<Ipv4Addr, Sender<Vec<u8>>>>>,
+    mut tun_sender: tokio::sync::mpsc::Receiver<Vec<u8>>,
     tun_addr: String, tun_name: String
 ) {
     // first create tun socket
@@ -1220,6 +1225,7 @@ async fn tun_socket_handler(
         config.ensure_root_privileges(true);
     });
 
+    //config.destination("192.168.0.71");
     config.tun_name(&tun_name);
 
     let dev = tun2::create(&config);
@@ -1238,10 +1244,14 @@ async fn tun_socket_handler(
             // parse packet to get destination ip
             // then send it to handler for dest ip
             if let Ok(ip_pkt) = Packet::new(&pkt[..size]) {
+                info!("Tun Handler received packet for: {}", &ip_pkt.destination());
                 if let Some(ip_handler_) = ip_handlers.lock().await.get(&ip_pkt.destination()) {
                     ip_handler_
                         .send(pkt.to_vec())
+                        .await
                         .expect("Could not send a message to ip handler channel!");
+                } else {
+                    error!("Got packet for unknown client");
                 }
             }
         }
@@ -1306,9 +1316,9 @@ async fn connect_ip_handler(
     stream_id: u64,
     flow_id: u64,
     http3_sender: UnboundedSender<ToSend>,
-    mut tun_receiver: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
-    tun_sender: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
-    mut http3_receiver: tokio::sync::mpsc::UnboundedReceiver<Content>,
+    mut tun_receiver: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    tun_sender: tokio::sync::mpsc::Sender<Vec<u8>>,
+    mut http3_receiver: tokio::sync::mpsc::Receiver<Content>,
     assigned_ip: Ipv4Addr,
 ) {
     debug!("Creating new IP connect handler!");
@@ -1391,13 +1401,12 @@ async fn connect_ip_handler(
                     }
                     Content::Datagram { payload } => {
                         // just send the datagram
-                        debug!("Received a datagram from connect-ip client: {:?}", payload);
+                        debug!("Received a datagram from connect-ip client");
                         let (context_id, ip_payload) = decode_var_int(&payload);
                         if context_id != 0 {
                             debug!("Received non-zero context_id (not implemented)!");
                             continue;
                         }
-                        debug!("IP Message from connect-ip client: {:?}", ip_payload);
                         match ip::Packet::new(ip_payload) {
                             Ok(ip::Packet::V4(v)) => {
                                 
@@ -1411,6 +1420,7 @@ async fn connect_ip_handler(
                                 }
                                 tun_sender
                                     .send(ip_payload.to_vec())
+                                    .await
                                     .expect("Wasn't able to send ip packet to tun handler");
                             }
                             Ok(ip::Packet::V6(_)) => {
