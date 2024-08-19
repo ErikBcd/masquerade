@@ -25,6 +25,8 @@ use crate::ip_connect::capsules::{
 };
 use crate::ip_connect::util::*;
 
+const MAX_CHANNEL_MSG: usize = 10;
+
 /**
  * Information about packets, wether they are
  * to be sent to the server or to the client.
@@ -71,11 +73,7 @@ pub fn generate_cid_and_reset_token<T: SecureRandom>(
 
 /// Basic commands for setting up the TUN interface
 /// Should in the end take all traffic on the device and tunnel it.
-fn set_client_ip_and_route(
-    dev_addr: &String, 
-    tun_gateway: String, 
-    tun_name: String
-) {
+fn set_client_ip_and_route(dev_addr: &String, tun_gateway: String, tun_name: String) {
     let ip_output = Command::new("ip")
         .arg("addr")
         .arg("add")
@@ -86,7 +84,10 @@ fn set_client_ip_and_route(
         .expect("Failed to execute IP command");
 
     if !ip_output.status.success() {
-        eprintln!("Failed to set IP: {}", String::from_utf8_lossy(&ip_output.stderr));
+        eprintln!(
+            "Failed to set IP: {}",
+            String::from_utf8_lossy(&ip_output.stderr)
+        );
         return;
     }
 
@@ -100,11 +101,13 @@ fn set_client_ip_and_route(
         .expect("Failed to execute IP LINK command");
 
     if !link_output.status.success() {
-        eprintln!("Failed to set link up: {}", String::from_utf8_lossy(&link_output.stderr));
+        eprintln!(
+            "Failed to set link up: {}",
+            String::from_utf8_lossy(&link_output.stderr)
+        );
         return;
     }
 
-    
     let route_output = Command::new("ip")
         .arg("route")
         .arg("add")
@@ -117,17 +120,21 @@ fn set_client_ip_and_route(
         .expect("Failed to execute first IP ROUTE command");
 
     if !route_output.status.success() {
-        eprintln!("Failed to set route 0.0.0.0 to tun device: {}", String::from_utf8_lossy(&route_output.stderr));
+        eprintln!(
+            "Failed to set route 0.0.0.0 to tun device: {}",
+            String::from_utf8_lossy(&route_output.stderr)
+        );
     }
+
     /*
     let route_output = Command::new("ip")
         .arg("route")
         .arg("add")
-        .arg("10.8.0.1/24")
+        .arg(dev_addr)
         .arg("via")
-        .arg("192.168.0.71")
+        .arg("192.168.0.158")
         .arg("dev")
-        .arg("enp39s0")
+        .arg("wlan0")
         .output()
         .expect("Failed to execute second IP ROUTE command");
 
@@ -160,7 +167,8 @@ async fn ip_receiver_t(
             .send(IpMessage {
                 message: pkt.to_vec(),
                 dir: Direction::ToServer,
-            }).await    
+            })
+            .await
             .map_err(|e| Error::new(Other, e))
         {
             Ok(()) => {
@@ -201,16 +209,22 @@ async fn ip_handler_t(
 
         if let Some(pkt) = ip_recv.recv().await {
             debug!(
-                "[ip_handler_t] Received a packet: {:?} In direction: {:?}",
-                pkt.message, pkt.dir
+                "[ip_handler_t] Received a packet in direction: {:?}",
+                pkt.dir
             );
             let http3_dispatch_clone = http3_dispatch.clone();
             let ip_disp_clone = ip_dispatch.clone();
             let ip_addr_clone = device_addr.clone();
-            let _ = tokio::spawn( async move {
-                ip_message_handler(pkt, http3_dispatch_clone, ip_disp_clone, conn_info, ip_addr_clone).await
-                }
-            );
+            let _ = tokio::spawn(async move {
+                ip_message_handler(
+                    pkt,
+                    http3_dispatch_clone,
+                    ip_disp_clone,
+                    conn_info,
+                    ip_addr_clone,
+                )
+                .await
+            });
         }
         debug!("[ip_handler_t] Handled a packet!");
     }
@@ -223,7 +237,6 @@ async fn ip_message_handler(
     conn_info: ConnectIpInfo,
     device_addr: Ipv4Addr,
 ) {
-    
     let version = pkt.message[0] >> 4;
     // Header length is given in 32bit words. A header value of 0b1111 = 15, 15*32=480bit=60byte
     let header_length = 4 * (pkt.message[0] & 0b1111);
@@ -235,7 +248,10 @@ async fn ip_message_handler(
                 // Recalculate checksum after ipv4 change
                 update_ipv4_checksum(&mut pkt.message, header_length);
                 info!("[ip_handler_t] Sending ipv4 packet to server");
-                match http3_dispatch.send(encapsulate_ipv4(pkt.message, &conn_info.flow_id, &0)).await {
+                match http3_dispatch
+                    .send(encapsulate_ipv4(pkt.message, &conn_info.flow_id, &0))
+                    .await
+                {
                     Ok(()) => {}
                     Err(e) => {
                         error!("[ip_handler_t] Error sending to quic dispatch: {}", e);
@@ -247,7 +263,10 @@ async fn ip_message_handler(
                 set_ipv4_pkt_source(&mut pkt.message, &device_addr);
                 // Recalculate checksum after ipv4 change
                 update_ipv4_checksum(&mut pkt.message, header_length);
-                debug!("[ip_handler_t] Sending IPv4 packet towards client (tun)");
+                debug!(
+                    "[ip_handler_t] Sending IPv4 packet towards client (tun): {:?}",
+                    pkt.message
+                );
                 match ip_dispatch.send(pkt.message).await {
                     Ok(()) => {}
                     Err(e) => {
@@ -298,7 +317,7 @@ async fn ip_dispatcher_t(mut ip_dispatch_reader: Receiver<Vec<u8>>, mut writer: 
  */
 // TODO: Handle incoming capsules, send ip information out once we have it (Address Assign etc)
 async fn quic_conn_handler(
-    ip_handler: Sender<IpMessage>, // other side is ip_dispatcher_t
+    ip_handler: Sender<IpMessage>,      // other side is ip_dispatcher_t
     info_sender: Sender<ConnectIpInfo>, // other side is the ip_handler_t
     http3_sender: Sender<ToSend>,
     mut http3_receiver: Receiver<ToSend>,
@@ -347,7 +366,7 @@ async fn quic_conn_handler(
                         continue;
                     }
                 };
-                debug!("Received datagram with context id={context_id}");
+                info!("Received datagram with context id={context_id}");
                 if context_id != 0 {
                     continue;
                 }
@@ -361,10 +380,13 @@ async fn quic_conn_handler(
                             debug!("Received invalid ipv4 packet, discarding..");
                             continue;
                         }
-                        match ip_handler.send(IpMessage {
-                            message: buf[header_len..len].to_vec(),
-                            dir: Direction::ToClient,
-                        }).await {
+                        match ip_handler
+                            .send(IpMessage {
+                                message: buf[header_len..len].to_vec(),
+                                dir: Direction::ToClient,
+                            })
+                            .await
+                        {
                             Ok(()) => {}
                             Err(e) => {
                                 debug!("Couldn't send ip packet to ip sender: {}", e);
@@ -784,6 +806,7 @@ async fn handle_ip_connect_stream(
         quiche::h3::Header::new(b"connect-ip-version", b"3"),
     ];
     let (stream_id_sender, mut stream_id_receiver) = mpsc::channel(1);
+    // TODO: give this channel a maximum
     let (response_sender, mut response_receiver) = mpsc::unbounded_channel::<Content>();
 
     http3_sender
@@ -794,7 +817,8 @@ async fn handle_ip_connect_stream(
                 stream_id_sender,
             },
             finished: false,
-        }).await
+        })
+        .await
         .unwrap_or_else(|e| {
             error!("Could not send http3 request to http3_receiver in QUIC handler: {e}")
         });
@@ -867,7 +891,8 @@ async fn handle_ip_connect_stream(
                                 stream_id: stream.lock().await.stream_id.unwrap(),
                                 content: Content::Data { data: buf.to_vec() },
                                 finished: false,
-                            }).await
+                            })
+                            .await
                             .unwrap_or_else(|e| {
                                 error!("sending http3 data capsule failed: {:?}", e)
                             });
@@ -885,16 +910,19 @@ async fn handle_ip_connect_stream(
         // TODO: We should inform the quic thread about this
         todo!()
     }
+    info!("connect-ip established!")
 }
 
 pub struct ConnectIPClient;
 
 impl ConnectIPClient {
-    pub async fn run(&self, 
-        server_addr: &String, 
-        dev_addr: String, 
-        tun_gateway: String, 
-        tun_name: String) {
+    pub async fn run(
+        &self,
+        server_addr: &String,
+        dev_addr: String,
+        tun_gateway: String,
+        tun_name: String,
+    ) {
         // 1) Create QUIC connection, connect to server
         let mut socket = match self.get_udp(server_addr).await {
             Ok(v) => v,
@@ -939,10 +967,10 @@ impl ConnectIPClient {
         // 4) Create receivers/senders
 
         // ip_sender for ip_receiver_t, ip_recv for ip_handler_t
-        let (ip_sender, ip_recv) = tokio::sync::mpsc::channel(5); // TODO: Check if 5 is okay
-        let (http3_dispatch, http3_dispatch_reader) = tokio::sync::mpsc::channel(5);
-        let (ip_dispatch, ip_dispatch_reader) = tokio::sync::mpsc::channel(5);
-        let (conn_info_sender, conn_info_recv) = tokio::sync::mpsc::channel(5);
+        let (ip_sender, ip_recv) = tokio::sync::mpsc::channel(MAX_CHANNEL_MSG); // TODO: Check if 5 is okay
+        let (http3_dispatch, http3_dispatch_reader) = tokio::sync::mpsc::channel(MAX_CHANNEL_MSG);
+        let (ip_dispatch, ip_dispatch_reader) = tokio::sync::mpsc::channel(MAX_CHANNEL_MSG);
+        let (conn_info_sender, conn_info_recv) = tokio::sync::mpsc::channel(MAX_CHANNEL_MSG);
 
         // Copies of senders
         let ip_from_quic_sender = ip_sender.clone();
@@ -956,7 +984,7 @@ impl ConnectIPClient {
             conn_info_recv,
             http3_dispatch,
             ip_dispatch,
-            ipaddr
+            ipaddr,
         ));
 
         let ip_disp_t = tokio::task::spawn(ip_dispatcher_t(ip_dispatch_reader, writer));
@@ -1103,10 +1131,12 @@ impl ConnectIPClient {
      *
      * Warning: Needs root priviligies on linux!
      */
-    fn create_tun(&self, 
-        dev_addr: &String, 
-        tun_gateway: String, 
-        tun_name: String) -> Result<Device, tun2::Error> {
+    fn create_tun(
+        &self,
+        dev_addr: &String,
+        tun_gateway: String,
+        tun_name: String,
+    ) -> Result<Device, tun2::Error> {
         let mut config = tun2::Configuration::default();
 
         #[cfg(target_os = "linux")]
