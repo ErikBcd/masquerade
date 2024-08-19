@@ -968,10 +968,10 @@ impl ConnectIPClient {
         // 4) Create receivers/senders
 
         // ip_sender for ip_receiver_t, ip_recv for ip_handler_t
-        let (ip_sender, ip_recv) = tokio::sync::mpsc::channel(1); // TODO: Check if 5 is okay
-        let (http3_dispatch, http3_dispatch_reader) = tokio::sync::mpsc::channel(1);
-        let (ip_dispatch, ip_dispatch_reader) = tokio::sync::mpsc::channel(1);
-        let (conn_info_sender, conn_info_recv) = tokio::sync::mpsc::channel(1);
+        let (ip_sender, ip_recv) = tokio::sync::mpsc::channel(MAX_CHANNEL_MSG); // TODO: Check if 5 is okay
+        let (http3_dispatch, http3_dispatch_reader) = tokio::sync::mpsc::channel(MAX_CHANNEL_MSG);
+        let (ip_dispatch, ip_dispatch_reader) = tokio::sync::mpsc::channel(MAX_CHANNEL_MSG);
+        let (conn_info_sender, conn_info_recv) = tokio::sync::mpsc::channel(MAX_CHANNEL_MSG);
 
         // Copies of senders
         let ip_from_quic_sender = ip_sender.clone();
