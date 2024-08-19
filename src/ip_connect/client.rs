@@ -1,4 +1,3 @@
-use std::io::{Read, Write};
 use std::net::{Ipv4Addr, ToSocketAddrs};
 use std::process::Command;
 use std::str::FromStr;
@@ -13,11 +12,14 @@ use quiche::h3::NameValue;
 use quiche::Connection;
 use ring::rand::{SecureRandom, SystemRandom};
 use tokio::net::UdpSocket;
+use tokio::io::{self, AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
+use tokio::select;
 use tokio::sync::mpsc::{self, Receiver, Sender, UnboundedSender};
 use tokio::sync::Mutex;
 use tokio::time::{self};
 use tun2::platform::posix::{Reader, Writer};
 use tun2::platform::Device;
+use tun2::AsyncDevice;
 
 use crate::common::*;
 use crate::ip_connect::capsules::{
@@ -152,13 +154,13 @@ fn set_client_ip_and_route(dev_addr: &String, tun_gateway: String, tun_name: Str
  */
 async fn ip_receiver_t(
     ip_handler: Sender<IpMessage>,
-    mut reader: Reader, //
+    mut reader: ReadHalf<AsyncDevice>, //
 ) {
     debug!("[ip_receiver_t] Started ip_receiver thread!");
     let mut buf = [0; 4096];
     loop {
         let size = reader
-            .read(&mut buf)
+            .read(&mut buf).await
             .expect("[ip_receiver_t] Could not read from reader");
         debug!("[ip_receiver_t] Read TUN message size {size}");
         let pkt = &buf[..size];
@@ -298,10 +300,10 @@ pub fn encapsulate_ipv4(pkt: Vec<u8>, flow_id: &u64, context_id: &u64) -> ToSend
 /**
  * Receives ready-to-send ip packets and then sends them.
  */
-async fn ip_dispatcher_t(mut ip_dispatch_reader: Receiver<Vec<u8>>, mut writer: Writer) {
+async fn ip_dispatcher_t(mut ip_dispatch_reader: Receiver<Vec<u8>>, mut writer: WriteHalf<AsyncDevice>) {
     loop {
         if let Some(pkt) = ip_dispatch_reader.recv().await {
-            writer.write(&pkt).expect("Could not write packet to TUN!");
+            writer.write(&pkt).await.expect("Could not write packet to TUN!");
         }
     }
 }
@@ -961,8 +963,7 @@ impl ConnectIPClient {
         let addr = String::from_str(&dev_addr[..(prefix_index.unwrap())]).unwrap();
         let ipaddr = Ipv4Addr::from_str(&addr).unwrap();
         info!("Local address for packets: {}", ipaddr);
-
-        let (reader, writer) = dev.split();
+        let (reader, writer) = tokio::io::split(dev);
 
         // 4) Create receivers/senders
 
@@ -1136,7 +1137,7 @@ impl ConnectIPClient {
         dev_addr: &String,
         tun_gateway: String,
         tun_name: String,
-    ) -> Result<Device, tun2::Error> {
+    ) -> Result<AsyncDevice, tun2::Error> {
         let mut config = tun2::Configuration::default();
 
         #[cfg(target_os = "linux")]
@@ -1144,7 +1145,7 @@ impl ConnectIPClient {
             config.ensure_root_privileges(true);
         });
         config.tun_name(&tun_name);
-        let dev = tun2::create(&config);
+        let dev = tun2::create_as_async(&config);
         set_client_ip_and_route(dev_addr, tun_gateway, tun_name);
         return dev;
     }
