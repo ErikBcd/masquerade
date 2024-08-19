@@ -11,14 +11,11 @@ use packet::ip;
 use quiche::h3::NameValue;
 use quiche::Connection;
 use ring::rand::{SecureRandom, SystemRandom};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::net::UdpSocket;
-use tokio::io::{self, AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
-use tokio::select;
 use tokio::sync::mpsc::{self, Receiver, Sender, UnboundedSender};
 use tokio::sync::Mutex;
 use tokio::time::{self};
-use tun2::platform::posix::{Reader, Writer};
-use tun2::platform::Device;
 use tun2::AsyncDevice;
 
 use crate::common::*;
@@ -160,7 +157,8 @@ async fn ip_receiver_t(
     let mut buf = [0; 4096];
     loop {
         let size = reader
-            .read(&mut buf).await
+            .read(&mut buf)
+            .await
             .expect("[ip_receiver_t] Could not read from reader");
         debug!("[ip_receiver_t] Read TUN message size {size}");
         let pkt = &buf[..size];
@@ -300,10 +298,16 @@ pub fn encapsulate_ipv4(pkt: Vec<u8>, flow_id: &u64, context_id: &u64) -> ToSend
 /**
  * Receives ready-to-send ip packets and then sends them.
  */
-async fn ip_dispatcher_t(mut ip_dispatch_reader: Receiver<Vec<u8>>, mut writer: WriteHalf<AsyncDevice>) {
+async fn ip_dispatcher_t(
+    mut ip_dispatch_reader: Receiver<Vec<u8>>,
+    mut writer: WriteHalf<AsyncDevice>,
+) {
     loop {
         if let Some(pkt) = ip_dispatch_reader.recv().await {
-            writer.write(&pkt).await.expect("Could not write packet to TUN!");
+            writer
+                .write(&pkt)
+                .await
+                .expect("Could not write packet to TUN!");
         }
     }
 }
