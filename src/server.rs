@@ -10,7 +10,7 @@ use url::Url;
 
 use std::collections::HashMap;
 use std::error::Error;
-use std::io::{ErrorKind, Read, Write};
+use std::io::ErrorKind;
 use std::net::{self, SocketAddr};
 use std::net::{Ipv4Addr, ToSocketAddrs};
 use std::process::Command;

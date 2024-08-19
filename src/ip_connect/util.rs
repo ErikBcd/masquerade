@@ -56,10 +56,12 @@ impl std::fmt::Display for QUICStreamError {
     }
 }
 
-/**
- * Sets the source ip address of a given IPv4 buffer to 
- * the given adress.
- */
+/// 
+/// Sets the source ip address of a given IPv4 buffer to 
+/// the given adress.
+/// Warning: This does NOT check if this is a valid IP packet, or even if the pkt
+/// is long enough.
+/// 
 pub fn set_ipv4_pkt_source(pkt: &mut Vec<u8>, ip: &Ipv4Addr) {
     pkt[12] = ip.octets()[0];
     pkt[13] = ip.octets()[1];
@@ -67,10 +69,12 @@ pub fn set_ipv4_pkt_source(pkt: &mut Vec<u8>, ip: &Ipv4Addr) {
     pkt[15] = ip.octets()[3];
 }
 
-/**
- * Sets the source ip address of a given IPv4 buffer to 
- * the given adress.
- */
+/// 
+/// Sets the destination ip address of a given IPv4 buffer to 
+/// the given adress.
+/// Warning: This does NOT check if this is a valid IP packet, or even if the pkt
+/// is long enough.
+/// 
 pub fn set_ipv4_pkt_destination(pkt: &mut Vec<u8>, ip: &Ipv4Addr) {
     pkt[16] = ip.octets()[0];
     pkt[17] = ip.octets()[1];
@@ -78,6 +82,11 @@ pub fn set_ipv4_pkt_destination(pkt: &mut Vec<u8>, ip: &Ipv4Addr) {
     pkt[19] = ip.octets()[3];
 }
 
+///
+/// Reads the source addr of a given IPv4 packet.
+/// Warning: This does NOT check if this is a valid IP packet, or even if the pkt
+/// is long enough.
+/// 
 pub fn get_ipv4_pkt_source(pkt: &Vec<u8>) -> Ipv4Addr {
     Ipv4Addr::new(pkt[12], pkt[13], pkt[14], pkt[15])
 }
