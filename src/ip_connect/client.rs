@@ -260,7 +260,7 @@ async fn ip_message_handler(
             }
             Direction::ToClient => {
                 // Send this to the ip dispatcher
-                set_ipv4_pkt_source(&mut pkt.message, &device_addr);
+                set_ipv4_pkt_destination(&mut pkt.message, &device_addr);
                 // Recalculate checksum after ipv4 change
                 update_ipv4_checksum(&mut pkt.message, header_length);
                 debug!(
@@ -967,10 +967,10 @@ impl ConnectIPClient {
         // 4) Create receivers/senders
 
         // ip_sender for ip_receiver_t, ip_recv for ip_handler_t
-        let (ip_sender, ip_recv) = tokio::sync::mpsc::channel(MAX_CHANNEL_MSG); // TODO: Check if 5 is okay
-        let (http3_dispatch, http3_dispatch_reader) = tokio::sync::mpsc::channel(MAX_CHANNEL_MSG);
-        let (ip_dispatch, ip_dispatch_reader) = tokio::sync::mpsc::channel(MAX_CHANNEL_MSG);
-        let (conn_info_sender, conn_info_recv) = tokio::sync::mpsc::channel(MAX_CHANNEL_MSG);
+        let (ip_sender, ip_recv) = tokio::sync::mpsc::channel(1); // TODO: Check if 5 is okay
+        let (http3_dispatch, http3_dispatch_reader) = tokio::sync::mpsc::channel(1);
+        let (ip_dispatch, ip_dispatch_reader) = tokio::sync::mpsc::channel(1);
+        let (conn_info_sender, conn_info_recv) = tokio::sync::mpsc::channel(1);
 
         // Copies of senders
         let ip_from_quic_sender = ip_sender.clone();

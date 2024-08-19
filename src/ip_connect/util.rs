@@ -67,6 +67,17 @@ pub fn set_ipv4_pkt_source(pkt: &mut Vec<u8>, ip: &Ipv4Addr) {
     pkt[15] = ip.octets()[3];
 }
 
+/**
+ * Sets the source ip address of a given IPv4 buffer to 
+ * the given adress.
+ */
+pub fn set_ipv4_pkt_destination(pkt: &mut Vec<u8>, ip: &Ipv4Addr) {
+    pkt[16] = ip.octets()[0];
+    pkt[17] = ip.octets()[1];
+    pkt[18] = ip.octets()[2];
+    pkt[19] = ip.octets()[3];
+}
+
 pub fn get_ipv4_pkt_source(pkt: &Vec<u8>) -> Ipv4Addr {
     Ipv4Addr::new(pkt[12], pkt[13], pkt[14], pkt[15])
 }
