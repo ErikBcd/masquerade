@@ -4,7 +4,7 @@ use tokio::sync::mpsc;
 
 use std::net::{self, Ipv4Addr};
 use crate::ip_connect::util::*;
-pub const MAX_DATAGRAM_SIZE: usize = 1350;
+pub const MAX_DATAGRAM_SIZE: usize = 4000;
 
 #[derive(Debug)]
 pub enum Content {
