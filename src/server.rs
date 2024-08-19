@@ -14,6 +14,7 @@ use std::io::ErrorKind;
 use std::net::{self, SocketAddr};
 use std::net::{Ipv4Addr, ToSocketAddrs};
 use std::process::Command;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -57,6 +58,16 @@ impl std::fmt::Display for RunBeforeBindError {
     }
 }
 impl Error for RunBeforeBindError {}
+
+#[derive(Debug, Clone)]
+struct InvalidArgumentError;
+
+impl std::fmt::Display for InvalidArgumentError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "The provided argument was not correct")
+    }
+}
+impl Error for InvalidArgumentError {}
 
 /**
  * Client for each QUIC connection
@@ -149,7 +160,21 @@ impl Server {
 
         // CONNECT-IP things
         // TODO: Un-hardcode this. Should just be the next free ip for the TUN interface.
-        let mut current_ip = Ipv4Addr::new(10, 8, 0, 3);
+        let prefix_index = tun_addr.find("/");
+        if prefix_index.is_none() {
+            error!("Malformed IP address!");
+            return Err(Box::new(InvalidArgumentError));
+        }
+        let addr = String::from_str(&tun_addr[..(prefix_index.unwrap())]).unwrap();
+        let ipaddr = Ipv4Addr::from_str(&addr).unwrap();
+
+        let mut current_ip = match get_next_ipv4(ipaddr, 0xFFFF0000) {
+            Ok(v) => v,
+            Err(e) => {
+                panic!("Could not get a new IP: {e}");
+            }
+        };
+        
         let ip_connect_clients: Arc<Mutex<HashMap<Ipv4Addr, Sender<Vec<u8>>>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let (tun_sender, tun_receiver) = tokio::sync::mpsc::channel::<Vec<u8>>(MAX_CHANNEL_MESSAGES);
