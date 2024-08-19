@@ -452,7 +452,6 @@ async fn quic_conn_handler(
                                     stream_id
                                 );
                                 if stream.lock().await.stream_id.is_some() {
-                                    // TODO: Send info back to the ip establish thread
                                     if stream.lock().await.stream_id.unwrap() == stream_id {
                                         let binding = stream.as_ref().lock().await;
                                         let sender = binding.stream_sender.as_ref().unwrap();
@@ -466,7 +465,6 @@ async fn quic_conn_handler(
                                 debug!("received stream data");
                                 let mut incoming: Vec<u8> = Vec::new();
                                 let mut pos = 0;
-                                // TODO: Error here, trying to unwrap None
                                 while let Ok(read) = http3_conn
                                     .recv_body(&mut conn, stream_id, &mut buf)
                                 {
@@ -526,8 +524,6 @@ async fn quic_conn_handler(
                             Ok((stream_id, quiche::h3::Event::Finished)) => {
                                 info!("finished received, stream id: {} closing", stream_id);
                                 // Shut down the stream
-                                // TODO: If this stream is the main connect-ip stream, we have to exit or
-                                //       create a new one
                                 if conn.stream_finished(stream_id) {
                                     debug!("stream {} finished", stream_id);
                                 } else {
@@ -548,8 +544,6 @@ async fn quic_conn_handler(
                                     e, stream_id
                                 );
                                 // Shut down the stream
-                                // TODO: If this stream is the main connect-ip stream, we have to exit or
-                                //       create a new one
                                 if conn.stream_finished(stream_id) {
                                     debug!("stream {} finished", stream_id);
                                 } else {
@@ -561,6 +555,7 @@ async fn quic_conn_handler(
                                         });
                                 }
                                 debug!("Connection with server ended, finishing up!");
+                                return;
                             }
                             Ok((_, quiche::h3::Event::PriorityUpdate)) => unreachable!(),
 
@@ -668,8 +663,7 @@ async fn quic_conn_handler(
                                 conn.stream_shutdown(to_send.stream_id, quiche::Shutdown::Write, 0)
                                     .unwrap_or_else(|e| error!("stream shutdown write failed: {:?}", e));
                             }
-                            // TODO: Signal that stream is lost
-                            todo!();
+                            return;
                         }
                     };
                     to_send = match http3_receiver.try_recv() {
@@ -806,17 +800,18 @@ async fn handle_ip_connect_stream(
     peer_addr: String,
 ) {
     // We only need to establish the connect-ip thing first
+    // TODO: Check if this packet structure is correct.
+    //       For now it's fine
     debug!("connect-ip builder: Trying to establish connect-ip!");
     let headers = vec![
         quiche::h3::Header::new(b":method", b"CONNECT"),
         quiche::h3::Header::new(b":protocol", b"connect-ip"),
-        quiche::h3::Header::new(b":scheme", b"https"), // TODO: Should always be https?
-        quiche::h3::Header::new(b":authority", peer_addr.as_bytes()), // TODO
+        quiche::h3::Header::new(b":scheme", b"https"), 
+        quiche::h3::Header::new(b":authority", peer_addr.as_bytes()), 
         quiche::h3::Header::new(b":path", b"/.well-known/masque/ip/*/*/"),
         quiche::h3::Header::new(b"connect-ip-version", b"3"),
     ];
     let (stream_id_sender, mut stream_id_receiver) = mpsc::channel(1);
-    // TODO: give this channel a maximum
     let (response_sender, mut response_receiver) = mpsc::unbounded_channel::<Content>();
 
     http3_sender
@@ -976,7 +971,7 @@ impl ConnectIPClient {
         // 4) Create receivers/senders
 
         // ip_sender for ip_receiver_t, ip_recv for ip_handler_t
-        let (ip_sender, ip_recv) = tokio::sync::mpsc::channel(MAX_CHANNEL_MSG); // TODO: Check if 5 is okay
+        let (ip_sender, ip_recv) = tokio::sync::mpsc::channel(MAX_CHANNEL_MSG); 
         let (http3_dispatch, http3_dispatch_reader) = tokio::sync::mpsc::channel(MAX_CHANNEL_MSG);
         let (ip_dispatch, ip_dispatch_reader) = tokio::sync::mpsc::channel(MAX_CHANNEL_MSG);
         let (conn_info_sender, conn_info_recv) = tokio::sync::mpsc::channel(MAX_CHANNEL_MSG);
