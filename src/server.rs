@@ -1228,18 +1228,18 @@ async fn tun_socket_handler(
     //config.destination("192.168.0.71");
     config.tun_name(&tun_name);
 
-    let dev = tun2::create(&config);
+    let dev = tun2::create_as_async(&config).unwrap();
     set_ip_settings(&tun_addr, &tun_name)
         .unwrap_or_else(|e| panic!("Error setting up TUN: {e}"));
     
 
-    let (mut reader, mut writer) = dev.unwrap().split();
+    let (mut reader, mut writer) = tokio::io::split(dev);
     // create reader thread
     // Reads from the TUN device and sends messages to connect_ip handler(s)
     let read_t = tokio::spawn(async move {
         let mut buf = [0; 4096];
         loop {
-            let size = reader.read(&mut buf).expect("Could not read from reader");
+            let size = reader.read(&mut buf).await.expect("Could not read from reader");
             let pkt = &buf[..size];
             // parse packet to get destination ip
             // then send it to handler for dest ip
@@ -1270,7 +1270,7 @@ async fn tun_socket_handler(
                     // call write as long as needed to send the entire packet
                     let mut pos = 0;
                     while pos < pkt.len() {
-                        let written = match writer.write(&pkt[pos..]) {
+                        let written = match writer.write(&pkt[pos..]).await {
                             Ok(n) => n,
                             Err(e) => {
                                 if e.kind() == ErrorKind::Interrupted {
