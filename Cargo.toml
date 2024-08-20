@@ -1,13 +1,13 @@
 [package]
 name = "masquerade-proxy"
 edition = "2021"
-version = "0.1.0"
+version = "0.2.0"
 license = "MIT"
 keywords = ["masque", "proxy"]
 categories = ["network-programming"]
-description = "A implementation of MASQUE based on RFC 9114, 9227, and 9228"
-homepage = "https://github.com/jromwu/masquerade"
-repository = "https://github.com/jromwu/masquerade"
+description = "A implementation of MASQUE based on RFC 9114, 9227, 9228 and 9484"
+homepage = "https://github.com/ErikBcd/masquerade"
+repository = "https://github.com/ErikBcd/masquerade"
 
 
 [lib]
@@ -15,22 +15,22 @@ crate-type = ["lib"]
 doctest = false
 
 [dependencies]
-log = { version = "0.4", features = ["std"] }
-env_logger = "0.10"
+log = { version = "0.4.22", features = ["std"] }
+env_logger = "0.11.5"
 url = "1"
 
 quiche = "0.22.0"
 tokio = { version = "1", features = ["full"] }
 ring = "0.17.8"
 
-httparse = "1.8"
+httparse = "1.9.4"
 socks5-proto = "0.3"
 
 octets = "0.3"
 
-mio = { version = "1.0.1", features = ["net", "os-poll"] }
+mio = { version = "1", features = ["net", "os-poll"] }
 
-tun2 = { version = "2", features = ["async"] }
+tun2 = { version = "2.0.6", features = ["async"] }
 packet = "0.1"
 
 futures = "0.3.30"
