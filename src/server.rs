@@ -116,7 +116,11 @@ impl Server {
         Ok(())
     }
 
-    pub async fn run(&self, tun_addr: String, tun_name: String) -> Result<(), Box<dyn Error>> {
+    pub async fn run(&self, 
+        tun_addr: String, 
+        tun_name: String,
+        local_ip: String,
+        link_dev: String) -> Result<(), Box<dyn Error>> {
         if self.socket.is_none() {
             return Err(Box::new(RunBeforeBindError));
         }
@@ -159,7 +163,6 @@ impl Server {
         let mut clients = ClientMap::new();
 
         // CONNECT-IP things
-        // TODO: Un-hardcode this. Should just be the next free ip for the TUN interface.
         let prefix_index = tun_addr.find("/");
         if prefix_index.is_none() {
             error!("Malformed IP address!");
@@ -174,14 +177,21 @@ impl Server {
                 panic!("Could not get a new IP: {e}");
             }
         };
-        
+
         let ip_connect_clients: Arc<Mutex<HashMap<Ipv4Addr, Sender<Vec<u8>>>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let (tun_sender, tun_receiver) = tokio::sync::mpsc::channel::<Vec<u8>>(MAX_CHANNEL_MESSAGES);
         // Create TUN handler (creates device automatically)
         let ip_connect_clients_clone = ip_connect_clients.clone();
         let _tun_thread = tokio::spawn(async move {
-            tun_socket_handler(ip_connect_clients_clone, tun_receiver, tun_addr, tun_name).await;
+            tun_socket_handler(
+                ip_connect_clients_clone, 
+                tun_receiver, 
+                tun_addr, 
+                tun_name,
+                local_ip,
+                link_dev
+            ).await;
         });
 
         let local_addr = socket.local_addr().unwrap();
@@ -1172,7 +1182,11 @@ async fn tcp_stream_handler(
     };
 }
 
-fn set_ip_settings(tun_addr: &String, tun_name: &String) -> Result<(), Box<dyn Error>> {
+fn set_ip_settings(
+    tun_addr: &String, 
+    tun_name: &String,
+    local_ip: &String,
+    link_dev: &String) -> Result<(), Box<dyn Error>> {
     let output = Command::new("sudo")
         .arg("ip")
         .arg("link")
@@ -1199,16 +1213,26 @@ fn set_ip_settings(tun_addr: &String, tun_name: &String) -> Result<(), Box<dyn E
         return Err(format!("Failed to assign IP to tun0: {:?}", String::from_utf8_lossy(&output.stderr)).into());
     }
 
-    // TODO: Possibly add route from TUN to actual interface?
+    // decode device address to get range
+    let prefix_index = tun_addr.find("/");
+    if prefix_index.is_none() {
+        panic!("Malformed device address: {}", tun_addr);
+    }
+    let addr = String::from_str(&tun_addr[..(prefix_index.unwrap())]).unwrap();
+    let ipaddr = Ipv4Addr::from_str(&addr).unwrap();
+    ipaddr.octets()[3] = 0;
+    let mut ip_range = ipaddr.to_string();
+    ip_range.push_str("/32");
+
     let route_output = Command::new("sudo")
         .arg("ip")
         .arg("route")
         .arg("add")
-        .arg("10.8.0.0/32")
+        .arg(ip_range)
         .arg("via")
-        .arg("192.168.0.71")
+        .arg(local_ip)
         .arg("dev")
-        .arg("enp39s0")
+        .arg(link_dev)
         .output()
         .expect("Failed to execute IP ROUTE command");
 
@@ -1240,7 +1264,10 @@ fn destroy_tun_interface() {
 async fn tun_socket_handler(
     ip_handlers: Arc<Mutex<HashMap<Ipv4Addr, Sender<Vec<u8>>>>>,
     mut tun_sender: tokio::sync::mpsc::Receiver<Vec<u8>>,
-    tun_addr: String, tun_name: String
+    tun_addr: String, 
+    tun_name: String,
+    local_ip: String,
+    link_dev: String
 ) {
     // first create tun socket
     let mut config = tun2::Configuration::default();
@@ -1254,7 +1281,7 @@ async fn tun_socket_handler(
     config.tun_name(&tun_name);
 
     let dev = tun2::create_as_async(&config).unwrap();
-    set_ip_settings(&tun_addr, &tun_name)
+    set_ip_settings(&tun_addr, &tun_name, &local_ip, &link_dev)
         .unwrap_or_else(|e| panic!("Error setting up TUN: {e}"));
     
 

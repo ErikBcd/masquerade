@@ -25,7 +25,10 @@ pub async fn setup_http1_client() -> Result<(TcpStream, TcpStream), Box<dyn Erro
     let listen_addr = client.listen_addr().unwrap();
 
     tokio::spawn(async move {
-        server.run("10.8.0.1/24".to_string(), "tun0".to_string()).await.unwrap_or_else(|e| 
+        server.run("10.8.0.1/24".to_string(), 
+            "tun0".to_string(), 
+            "127.0.0.1".to_string(), 
+            "lo".to_string()).await.unwrap_or_else(|e| 
             println!("http1 test: failed tp run server: {:?}", e));
     });
     tokio::spawn(async move {
@@ -102,7 +105,11 @@ pub async fn setup_socks5_tcp_client() -> Result<(TcpStream, TcpStream), Box<dyn
     let listen_addr = client.listen_addr().unwrap();
 
     tokio::spawn(async move {
-        server.run("10.8.0.1/24".to_string(), "tun0".to_string()).await.unwrap_or_else(|e| 
+        server.run(
+            "10.8.0.1/24".to_string(), 
+            "tun0".to_string(), 
+            "127.0.0.1".to_string(), 
+            "lo".to_string()).await.unwrap_or_else(|e| 
             println!("socks5 udp test: failed tp run server: {:?}", e));
     });
     tokio::spawn(async move {
@@ -162,7 +169,10 @@ pub async fn setup_socks5_udp_client() -> Result<(UdpSocket, TcpStream), Box<dyn
     let listen_addr = client.listen_addr().unwrap();
 
     tokio::spawn(async move {
-        server.run("10.8.0.1/24".to_string(), "tun0".to_string()).await.unwrap_or_else(|e| 
+        server.run("10.8.0.1/24".to_string(), 
+            "tun0".to_string(), 
+            "127.0.0.1".to_string(), 
+            "lo".to_string()).await.unwrap_or_else(|e| 
             println!("socks5 udp test: failed tp run server: {:?}", e));
     });
     tokio::spawn(async move {
