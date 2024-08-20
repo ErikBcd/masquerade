@@ -26,15 +26,34 @@ Also this is still in early development. Right now it's just loose code samples 
  * Right now there can only be one user per client (this should be easy to change in the future)
  * The way packets are sent is very basic, no special congestion options or anything
 
-## Examples
+## Running
 
-Server:
+You might need to add rules in the ip table first to get the CONNECT-IP method to work.
+In the server you have to allow forwarding on your outgoing interface, for example eth0:
 ```
-# host server on interface with IP 192.168.1.2 port 4433
-$ cargo run --bin server -- 192.168.1.2:4433
+$ sudo iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
 ```
 
-Client: 
+And for the client you have to do that for the client TUN interface, for example tunMasqClient:
+```
+$ sudo iptables -t nat -A POSTROUTING -o tunMasqClient -j MASQUERADE
+```
+
+### Server
+```
+# Start the server on host IP 0.0.0.0, port 4433
+# The TUN will be called tunMasqServer with the ip/range 10.8.0.1
+# local_ip and link_dev are the interface via which the traffic from the TUN will be routed.
+$ cargo build --release && sudo ./target/release/server --bind_addr 0.0.0.0:4433 --tun_addr 10.8.0.1/24 --tun_name tunMasqServer --local_ip 192.168.0.71 --link_dev eth0
+```
+### CONNECT-IP Client
+```
+# Start the client and connect it to the masquerade server located at 192.168.0.71:4433
+# TUN device will be called tunMasqClient at 10.9.0.1, address range 10.9.0.2/24 
+$ cargo build --release && sudo ./target/release/ip-connect-client --server_name 192.168.0.71:4433 --tun_addr 10.9.0.2/24 --tun_gateway 10.9.0.1 --tun_name tunMasqClient
+```
+
+### TCP/UDP Client: 
 ```
 # connect to server at 192.168.1.2:4433 and host HTTP/1.1 server on localhost port 8989
 $ cargo run --bin client -- 192.168.1.2:4433 127.0.0.1:8989 http
