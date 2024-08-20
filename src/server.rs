@@ -178,6 +178,13 @@ impl Server {
             }
         };
 
+        current_ip = match get_next_ipv4(current_ip, 0xFFFF0000) {
+            Ok(v) => v,
+            Err(e) => {
+                panic!("Could not get a new IP: {e}");
+            }
+        };
+
         let ip_connect_clients: Arc<Mutex<HashMap<Ipv4Addr, Sender<Vec<u8>>>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let (tun_sender, tun_receiver) = tokio::sync::mpsc::channel::<Vec<u8>>(MAX_CHANNEL_MESSAGES);
