@@ -1195,12 +1195,7 @@ fn set_ip_settings(
     local_ip: &String,
     link_dev: &String) -> Result<(), Box<dyn Error>> {
     let output = Command::new("sudo")
-        .arg("ip")
-        .arg("link")
-        .arg("set")
-        .arg("dev")
-        .arg(tun_name)
-        .arg("up")
+        .args(["ip", "link", "set", "dev", tun_name, "up"])
         .output()?;
 
     if !output.status.success() {
@@ -1208,12 +1203,7 @@ fn set_ip_settings(
     }
 
     let output = Command::new("sudo")
-        .arg("ip")
-        .arg("addr")
-        .arg("add")
-        .arg(tun_addr)
-        .arg("dev")
-        .arg(tun_name)
+        .args(["ip", "addr", "add", tun_addr, "dev", tun_name])
         .output()?;
 
     if !output.status.success() {
@@ -1232,19 +1222,30 @@ fn set_ip_settings(
     ip_range.push_str("/32");
 
     let route_output = Command::new("sudo")
-        .arg("ip")
-        .arg("route")
-        .arg("add")
-        .arg(ip_range)
-        .arg("via")
-        .arg(local_ip)
-        .arg("dev")
-        .arg(link_dev)
+        .args(["ip", "route", "add", &ip_range, "via", local_ip, "dev", link_dev])
         .output()
         .expect("Failed to execute IP ROUTE command");
 
     if !route_output.status.success() {
         eprintln!("Failed to set route: {}", String::from_utf8_lossy(&route_output.stderr));
+    }
+    // sudo iptables -t nat -A POSTROUTING -o enp39s0 -j MASQUERADE
+    let iptables = Command::new("sudo")
+        .args(["iptables", "-t", "nat", "-A", "POSTROUTING", "-o", link_dev, "-j", "MASQUERADE"])
+        .output()
+        .expect("Failed to execute ip tables cmd");
+    if !iptables.status.success() {
+        error!("Failed to set up iptables: {}", String::from_utf8_lossy(&iptables.stderr));
+    }
+
+    // Allow ipv4 proxying
+    // sudo sysctl -w net.ipv4.conf.all.forwarding=1
+    let sysctl_cmd = Command::new("sudo")
+        .args(["sysctl", "-w", "net.ipv4.conf.all.forwarding=1"])
+        .output()
+        .expect("Failed to execute sysctl command!");
+    if !sysctl_cmd.status.success() {
+        error!("Failed to allow ipv4 forwarding: {}", String::from_utf8_lossy(&sysctl_cmd.stderr));
     }
 
     Ok(())
@@ -1508,7 +1509,7 @@ async fn connect_ip_handler(
         .expect("channel send failed");
 
     println!("Registered a new client with IP: {}", assigned_ip);
-    
+
     match tokio::join!(read_task, write_task) {
         (Err(e), Err(e2)) => {
             debug!(
