@@ -193,6 +193,7 @@ async fn ip_handler_t(
     }
     let conn_info = conn_info.unwrap();
     debug!("[ip_handler_t] Received connection info!");
+    println!("Connected to server! Assigned IP: {}", conn_info.assigned_ip);
     loop {
         debug!("[ip_handler_t] Waiting for new packet..");
         debug!(

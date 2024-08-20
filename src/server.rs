@@ -1506,6 +1506,9 @@ async fn connect_ip_handler(
             finished: false,
         })
         .expect("channel send failed");
+
+    println!("Registered a new client with IP: {}", assigned_ip);
+    
     match tokio::join!(read_task, write_task) {
         (Err(e), Err(e2)) => {
             debug!(
