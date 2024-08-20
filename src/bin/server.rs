@@ -14,7 +14,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .arg(arg!(-b --bind_addr <VALUE>).default_value("0.0.0.0:4433").required(false))
         .arg(arg!(-a --tun_addr <VALUE>).default_value("10.8.0.1/24").required(false))
         .arg(arg!(-n --tun_name <VALUE>).default_value("tunMS").required(false))
-        .arg(arg!(-l --local_ip <VALUE>).required(true))
+        .arg(arg!(-l --local_ip <VALUE>).default_value("0.0.0.0").required(false))
         .arg(arg!(-d --link_dev <VALUE>).required(true))
         .get_matches();
 
