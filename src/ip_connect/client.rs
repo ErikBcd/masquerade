@@ -82,8 +82,8 @@ pub fn generate_cid_and_reset_token<T: SecureRandom>(
 /// Basic commands for setting up the TUN interface
 /// Should in the end take all traffic on the device and tunnel it.
 fn set_client_ip_and_route(dev_addr: &String, tun_gateway: String, tun_name: String) {
-    let ip_output = Command::new("sudo")
-        .args(["ip", "addr", "add", dev_addr, "dev", &tun_name])
+    let ip_output = Command::new("ip")
+        .args(["addr", "add", dev_addr, "dev", &tun_name])
         .output()
         .expect("Failed to execute IP command");
 
@@ -95,8 +95,8 @@ fn set_client_ip_and_route(dev_addr: &String, tun_gateway: String, tun_name: Str
         return;
     }
 
-    let link_output = Command::new("sudo")
-        .args(["ip", "link", "set", "up", "dev", &tun_name])
+    let link_output = Command::new("ip")
+        .args(["link", "set", "up", "dev", &tun_name])
         .output()
         .expect("Failed to execute IP LINK command");
 
@@ -108,8 +108,8 @@ fn set_client_ip_and_route(dev_addr: &String, tun_gateway: String, tun_name: Str
         return;
     }
 
-    let route_output = Command::new("sudo")
-        .args(["ip", "route", "add", "0.0.0.0/0", "via", &tun_gateway, "dev", &tun_name])
+    let route_output = Command::new("ip")
+        .args(["route", "add", "0.0.0.0/0", "via", &tun_gateway, "dev", &tun_name])
         .output()
         .expect("Failed to execute first IP ROUTE command");
 
@@ -121,8 +121,8 @@ fn set_client_ip_and_route(dev_addr: &String, tun_gateway: String, tun_name: Str
     }
 
     // sudo iptables -t nat -A POSTROUTING -o tunMC -j MASQUERADE
-    let iptables = Command::new("sudo")
-        .args(["iptables", "-t", "nat", "-A", "POSTROUTING", "-o", &tun_name, "-j", "MASQUERADE"])
+    let iptables = Command::new("iptables")
+        .args(["-t", "nat", "-A", "POSTROUTING", "-o", &tun_name, "-j", "MASQUERADE"])
         .output()
         .expect("Failed to execute ip tables cmd");
     if !iptables.status.success() {
@@ -131,8 +131,8 @@ fn set_client_ip_and_route(dev_addr: &String, tun_gateway: String, tun_name: Str
 
     // Allow ipv4 proxying
     // sudo sysctl -w net.ipv4.conf.all.forwarding=1
-    let sysctl_cmd = Command::new("sudo")
-        .args(["sysctl", "-w", "net.ipv4.conf.all.forwarding=1"])
+    let sysctl_cmd = Command::new("sysctl")
+        .args(["-w", "net.ipv4.conf.all.forwarding=1"])
         .output()
         .expect("Failed to execute sysctl command!");
     if !sysctl_cmd.status.success() {

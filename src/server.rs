@@ -1194,16 +1194,16 @@ fn set_ip_settings(
     tun_name: &String,
     local_ip: &String,
     link_dev: &String) -> Result<(), Box<dyn Error>> {
-    let output = Command::new("sudo")
-        .args(["ip", "link", "set", "dev", tun_name, "up"])
+    let output = Command::new("ip")
+        .args(["link", "set", "dev", tun_name, "up"])
         .output()?;
 
     if !output.status.success() {
         return Err(format!("Failed to bring up tun0: {:?}", String::from_utf8(output.stderr)).into());
     }
 
-    let output = Command::new("sudo")
-        .args(["ip", "addr", "add", tun_addr, "dev", tun_name])
+    let output = Command::new("ip")
+        .args(["addr", "add", tun_addr, "dev", tun_name])
         .output()?;
 
     if !output.status.success() {
@@ -1221,8 +1221,8 @@ fn set_ip_settings(
     let mut ip_range = ipaddr.to_string();
     ip_range.push_str("/32");
 
-    let route_output = Command::new("sudo")
-        .args(["ip", "route", "add", &ip_range, "via", local_ip, "dev", link_dev])
+    let route_output = Command::new("ip")
+        .args(["route", "add", &ip_range, "via", local_ip, "dev", link_dev])
         .output()
         .expect("Failed to execute IP ROUTE command");
 
@@ -1230,8 +1230,8 @@ fn set_ip_settings(
         eprintln!("Failed to set route: {}", String::from_utf8_lossy(&route_output.stderr));
     }
     // sudo iptables -t nat -A POSTROUTING -o enp39s0 -j MASQUERADE
-    let iptables = Command::new("sudo")
-        .args(["iptables", "-t", "nat", "-A", "POSTROUTING", "-o", link_dev, "-j", "MASQUERADE"])
+    let iptables = Command::new("iptables")
+        .args(["-t", "nat", "-A", "POSTROUTING", "-o", link_dev, "-j", "MASQUERADE"])
         .output()
         .expect("Failed to execute ip tables cmd");
     if !iptables.status.success() {
@@ -1240,8 +1240,8 @@ fn set_ip_settings(
 
     // Allow ipv4 proxying
     // sudo sysctl -w net.ipv4.conf.all.forwarding=1
-    let sysctl_cmd = Command::new("sudo")
-        .args(["sysctl", "-w", "net.ipv4.conf.all.forwarding=1"])
+    let sysctl_cmd = Command::new("sysctl")
+        .args(["-w", "net.ipv4.conf.all.forwarding=1"])
         .output()
         .expect("Failed to execute sysctl command!");
     if !sysctl_cmd.status.success() {
@@ -1252,8 +1252,7 @@ fn set_ip_settings(
 }
 
 fn destroy_tun_interface() {
-    let output = Command::new("sudo")
-        .arg("ip")
+    let output = Command::new("ip")
         .arg("link")
         .arg("delete")
         .arg("tun0")
