@@ -865,6 +865,9 @@ async fn handle_http3_event(
 
                             // For sending messages to the TUN device
                             let tun_sender_clone = tun_sender.clone();
+
+                            // For looking up other clients
+                            let connect_ip_clients_clone = connect_ip_clients.clone();
                             connect_ip_session.as_mut().unwrap().handler_thread =
                                 Some(tokio::spawn(async move {
                                     connect_ip_handler(
@@ -875,6 +878,7 @@ async fn handle_http3_event(
                                         tun_sender_clone,
                                         ip_http3_receiver,
                                         assigned_ip,
+                                        connect_ip_clients_clone
                                     )
                                     .await;
                                 }));
@@ -1379,6 +1383,7 @@ async fn connect_ip_handler(
     tun_sender: tokio::sync::mpsc::Sender<Vec<u8>>,
     mut http3_receiver: tokio::sync::mpsc::Receiver<Content>,
     assigned_ip: Ipv4Addr,
+    clients: Arc<Mutex<HashMap<Ipv4Addr, Sender<Vec<u8>>>>>,
 ) {
     debug!("Creating new IP connect handler!");
     let http3_sender_clone_1 = http3_sender.clone();
@@ -1477,10 +1482,18 @@ async fn connect_ip_handler(
                                     );
                                     continue;
                                 }
-                                tun_sender
-                                    .send(ip_payload.to_vec())
-                                    .await
-                                    .expect("Wasn't able to send ip packet to tun handler");
+                                // TODO: Check if we maybe know the destination address of the packet
+                                // In that case we can send the packet straight to that client
+                                if let Some(ip_client) = clients.lock().await.get(&v.destination()) {
+                                    ip_client.send(ip_payload.to_vec())
+                                        .await
+                                        .expect("IP Channel sender error!")
+                                } else {
+                                    tun_sender
+                                        .send(ip_payload.to_vec())
+                                        .await
+                                        .expect("Wasn't able to send ip packet to tun handler");
+                                }
                             }
                             Ok(ip::Packet::V6(_)) => {
                                 debug!("Received IPv6 packet via http3 (not implemented yet)");
