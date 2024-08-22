@@ -27,6 +27,7 @@ use ring::rand::*;
 use crate::common::*;
 use crate::ip_connect::capsules::*;
 use crate::ip_connect::client::encapsulate_ipv4;
+use crate::ip_connect::util::update_ipv4_checksum;
 
 const MAX_CHANNEL_MESSAGES: usize = 10;
 
@@ -711,17 +712,15 @@ async fn handle_http3_event(
         let mut b = octets::Octets::with_slice(&buf);
         if let Ok(flow_id) = b.get_varint() {
             info!(
-                "Received DATAGRAM flow_id={} len={} buf={:02x?}",
+                "Received DATAGRAM flow_id={} len={}",
                 flow_id,
                 len,
-                buf[0..len].to_vec()
             );
 
             // TODO: Check if this is actually a good way to check for the
             // length of the flow_id
             
             let flow_id_len = varint_len(flow_id);
-            info!("flow_id_len={}", flow_id_len);
             if connect_sockets.contains_key(&flow_id) {
                 let data = &buf[flow_id_len..len];
                 connect_sockets
@@ -1307,14 +1306,14 @@ async fn tun_socket_handler(
             // parse packet to get destination ip
             // then send it to handler for dest ip
             if let Ok(ip_pkt) = Packet::new(&pkt[..size]) {
-                info!("Tun Handler received packet for: {}", &ip_pkt.destination());
                 if let Some(ip_handler_) = ip_handlers.lock().await.get(&ip_pkt.destination()) {
+                    info!("Tun Handler received packet | Src: {} To: {}", &ip_pkt.source(), &ip_pkt.destination());
                     ip_handler_
                         .send(pkt.to_vec())
                         .await
                         .expect("Could not send a message to ip handler channel!");
                 } else {
-                    error!("Got packet for unknown client");
+                    debug!("Got packet for unknown client | Src: {} To: {}", &ip_pkt.source(), &ip_pkt.destination());
                 }
             }
         }
@@ -1397,10 +1396,15 @@ async fn connect_ip_handler(
             // to the proxy client.
             // The packets are confirmed to be ipv4 packets so we don't need to worry about anything.
             // Just create the http3 datagram and send the packet.
-            if let Some(pkt) = tun_receiver.recv().await {
-                debug!("Received TUN message size {}", pkt.len());
+            if let Some(mut pkt) = tun_receiver.recv().await {
+                // debug!("Received TUN message size {}", pkt.len());
+                // Decrease ttl
+                pkt[8] = pkt[8] -1;
+                let header_length = 4 * (pkt[0] & 0b1111);
+                update_ipv4_checksum(&mut pkt, header_length);
+
                 let to_send = encapsulate_ipv4(pkt, &flow_id, &0);
-                debug!("Sending ip message to client");
+                debug!("Sending ip message to client: {}", assigned_ip);
                 http3_sender_clone_1
                     .send(to_send)
                     .expect("Could not send datagram to http3 sender!");
@@ -1466,37 +1470,49 @@ async fn connect_ip_handler(
                     Content::Datagram { payload } => {
                         // just send the datagram
                         debug!("Received a datagram from connect-ip client");
-                        let (context_id, ip_payload) = decode_var_int(&payload);
+                        let (context_id, length) = decode_var_int_get_length(&payload);
                         if context_id != 0 {
                             debug!("Received non-zero context_id (not implemented)!");
                             continue;
                         }
-                        match ip::Packet::new(ip_payload) {
+                        let mut ip_packet = payload[length..].to_vec();
+                        match ip::Packet::new(&payload[length..]) {
                             Ok(ip::Packet::V4(v)) => {
                                 
                                 if !v.is_valid() {
                                     debug!(
                                         "Received invalid ipv4 packet, discarding. chksm hdr: {} | calculated: {}",
                                         v.checksum(),
-                                        checksum(ip_payload)
+                                        checksum(&ip_packet)
                                     );
                                     continue;
                                 }
-                                // TODO: Check if we maybe know the destination address of the packet
+
+                                // Decrease TTL of packet
+                                let ttl = v.ttl();
+                                if ttl == 0 {
+                                    continue;
+                                }
+                                ip_packet[8] = ttl - 1;
+                                let header_length = 4 * (ip_packet[0] & 0b1111);
+                                update_ipv4_checksum(&mut ip_packet, header_length);
+                                
+                                // Check if we maybe know the destination address of the packet
                                 // In that case we can send the packet straight to that client
                                 if let Some(ip_client) = clients.lock().await.get(&v.destination()) {
-                                    ip_client.send(ip_payload.to_vec())
+                                    info!("Client {} directly sending message to {}", v.source(), v.destination());
+                                    ip_client.send(ip_packet)
                                         .await
                                         .expect("IP Channel sender error!")
                                 } else {
                                     tun_sender
-                                        .send(ip_payload.to_vec())
+                                        .send(ip_packet)
                                         .await
                                         .expect("Wasn't able to send ip packet to tun handler");
                                 }
                             }
                             Ok(ip::Packet::V6(_)) => {
-                                debug!("Received IPv6 packet via http3 (not implemented yet)");
+                                //debug!("Received IPv6 packet via http3 (not implemented yet)");
                                 continue;
                             }
                             Err(err) => {

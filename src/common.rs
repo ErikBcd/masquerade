@@ -131,6 +131,30 @@ pub fn decode_var_int(data: &[u8]) -> (u64, &[u8]) {
     (v, &data[length..])
 }
 
+/*
+ * Decode variable-length integer in QUIC and related protocols
+ * 
+ * ref: https://www.rfc-editor.org/rfc/rfc9000#sample-varint
+ * 
+ * Returns the length of the decoded integer and it's value
+ */
+pub fn decode_var_int_get_length(data: &[u8]) -> (u64, usize) {
+    // The length of variable-length integers is encoded in the
+    // first two bits of the first byte.
+    let mut v: u64 = data[0].into();
+    let prefix = v >> 6;
+    let length = 1 << prefix;
+
+    // Once the length is known, remove these bits and read any
+    // remaining bytes.
+    v = v & 0x3f;
+    for i in 1..length-1 {
+        v = (v << 8) + Into::<u64>::into(data[i]);
+    }
+
+    (v, length)
+}
+
 pub const MAX_VAR_INT: u64 = u64::pow(2, 62) - 1;
 const MAX_INT_LEN_4: u64 = u64::pow(2, 30) - 1;
 const MAX_INT_LEN_2: u64 = u64::pow(2, 14) - 1;
