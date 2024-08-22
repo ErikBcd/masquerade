@@ -27,7 +27,7 @@ use ring::rand::*;
 use crate::common::*;
 use crate::ip_connect::capsules::*;
 use crate::ip_connect::client::encapsulate_ipv4;
-use crate::ip_connect::util::update_ipv4_checksum;
+use crate::ip_connect::util::recalculate_checksum;
 
 const MAX_CHANNEL_MESSAGES: usize = 10;
 
@@ -270,7 +270,6 @@ impl Server {
                 // Do stateless retry if the client didn't send a token.
                 if token.is_empty() {
                     warn!("Doing stateless retry");
-
                     let new_token = mint_token(&hdr, &from);
 
                     let len = quiche::retry(
@@ -1400,8 +1399,7 @@ async fn connect_ip_handler(
                 // debug!("Received TUN message size {}", pkt.len());
                 // Decrease ttl
                 pkt[8] = pkt[8] -1;
-                let header_length = 4 * (pkt[0] & 0b1111);
-                update_ipv4_checksum(&mut pkt, header_length);
+                recalculate_checksum(&mut pkt);
 
                 let to_send = encapsulate_ipv4(pkt, &flow_id, &0);
                 debug!("Sending ip message to client: {}", assigned_ip);
@@ -1487,15 +1485,13 @@ async fn connect_ip_handler(
                                     );
                                     continue;
                                 }
-
                                 // Decrease TTL of packet
                                 let ttl = v.ttl();
                                 if ttl == 0 {
                                     continue;
                                 }
                                 ip_packet[8] = ttl - 1;
-                                let header_length = 4 * (ip_packet[0] & 0b1111);
-                                update_ipv4_checksum(&mut ip_packet, header_length);
+                                recalculate_checksum(&mut ip_packet);
                                 
                                 // Check if we maybe know the destination address of the packet
                                 // In that case we can send the packet straight to that client

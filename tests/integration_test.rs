@@ -1,5 +1,5 @@
 use log::error;
-use masquerade_proxy::ip_connect::{capsules::*, util::IPError};
+use masquerade_proxy::ip_connect::{capsules::*, util::{recalculate_checksum, IPError}};
 use octets::OctetsMut;
 use tokio::time::timeout;
 use std::{net::Ipv4Addr, time::Duration};
@@ -318,4 +318,79 @@ async fn next_ip_test() {
     assert_eq!(
         get_next_ipv4(Ipv4Addr::new(192, 168, 0, 255), 0xFFFFFF00), 
         Err(IPError { message: "Next address out of range!".to_owned()}));
+}
+
+#[test_log::test(tokio::test)]
+async fn recalculate_checksum_test() {
+    let udp_payload = [
+        0x45, // ip ver 4, header length 20bytes (5*4)
+        0x00, 
+        0x00, 0x1e, // total length (30)
+        0x93, 0x1d, // Identification
+        0x40, 0x00, // flags
+        0x3f,       // TTL (63)
+        0x11,       // Protocol UDP (17)
+        0x94, 0x9e, // Header checksum (correct)
+        0x0a, 0x08, 0x00, 0x03, // Source address 10.8.0.3
+        0x0a, 0x08, 0x00, 0x01, // Dest address 10.8.0.1 | End of IP header
+        0xb3, 0x3e,             // UDP source port 45886
+        0x04, 0xd2,             // UDP dest port 1234
+        0x00, 0x0a,             // Length (10)
+        0xd2, 0xab,             // Checksum (correct)
+        0x61, 0x0a];            // Data
+
+    let mut udp_payload_wrong = vec![
+        0x45, // ip ver 4, header length 20bytes (5*4)
+        0x00, 
+        0x00, 0x1e, // total length (30)
+        0x93, 0x1d, // Identification
+        0x40, 0x00, // flags
+        0x3f,       // TTL (63)
+        0x11,       // Protocol UDP (17)
+        0x94, 0x9d, // Header checksum (wrong)
+        0x0a, 0x08, 0x00, 0x03, // Source address 10.8.0.3
+        0x0a, 0x08, 0x00, 0x01, // Dest address 10.8.0.1 | End of IP header
+        0xb3, 0x3e,             // UDP source port 45886
+        0x04, 0xd2,             // UDP dest port 1234
+        0x00, 0x0a,             // Length (10)
+        0xd2, 0xaa,             // Checksum (wrong)
+        0x61, 0x0a];            // Data
+
+    // Recalculate checksum of wrong packet
+    recalculate_checksum(&mut udp_payload_wrong);
+    println!("UDP | Correct packet: {:?}", udp_payload);
+    println!("UDP | Recalc  packet: {:?}", udp_payload_wrong);
+    assert_eq!(udp_payload_wrong.as_slice(), udp_payload);
+
+    // TCP test
+    let mut tcp_payload = vec![
+        0x45, 0x00, 0x00, 0x3c, 0x31, 0x22, 0x40, 0x00, 0x3f, 0x06, 
+        0xdd, 0x31, // ip checksum (correct)
+        0x0a, 0x08, 0x00, 0x03,
+        0x5f, 0xd8, 0xc3, 0x85, // end IP header
+        0xd0, 0xd8, 0x00, 0x50, 0x34, 0x7c, 0xe1, 0xc3, 0x00, 0x00, 0x00, 0x00,
+        0xa0, 0x02, 0xfa, 0xf0, 
+        0x87, 0x1f, // TCP checksum (correct)
+        0x00, 0x00, 0x02, 0x04, 0x05, 0xb4, 0x04, 0x02, 0x08, 0x0a,
+        0x5b, 0x78, 0x55, 0xa6, 0x00, 0x00, 0x00, 0x00, 0x01, 0x03, 0x03, 0x07,
+    ];
+
+    let mut tcp_payload_wrong = vec![
+        0x45, 0x00, 0x00, 0x3c, 0x31, 0x22, 0x40, 0x00, 0x3f, 0x06, 
+        0xdd, 0x3e, // ip checksum (correct)
+        0x0a, 0x08, 0x00, 0x03,
+        0x5f, 0xd8, 0xc3, 0x85, // end IP header
+        0xd0, 0xd8, 0x00, 0x50, 0x34, 0x7c, 0xe1, 0xc3, 0x00, 0x00, 0x00, 0x00,
+        0xa0, 0x02, 0xfa, 0xf0, 
+        0x87, 0x1e, // TCP checksum (correct)
+        0x00, 0x00, 0x02, 0x04, 0x05, 0xb4, 0x04, 0x02, 0x08, 0x0a,
+        0x5b, 0x78, 0x55, 0xa6, 0x00, 0x00, 0x00, 0x00, 0x01, 0x03, 0x03, 0x07,
+    ];
+
+    // Recalculate checksum of wrong packet
+    recalculate_checksum(&mut tcp_payload_wrong);
+    println!("TCP | Correct packet: {:?}", tcp_payload);
+    println!("TCP | Recalc  packet: {:?}", tcp_payload_wrong);
+    assert_eq!(tcp_payload_wrong.as_slice(), tcp_payload);
+
 }

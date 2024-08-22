@@ -256,7 +256,7 @@ async fn ip_message_handler(
             Direction::ToServer => {
                 set_ipv4_pkt_source(&mut pkt.message, &conn_info.assigned_ip);
                 // Recalculate checksum after ipv4 change
-                update_ipv4_checksum(&mut pkt.message, header_length);
+                recalculate_checksum(&mut pkt.message);
                 info!("[ip_handler_t] Sending ipv4 packet to server");
                 match http3_dispatch
                     .send(encapsulate_ipv4(pkt.message, &conn_info.flow_id, &0))
@@ -272,7 +272,8 @@ async fn ip_message_handler(
                 // Send this to the ip dispatcher
                 set_ipv4_pkt_destination(&mut pkt.message, &device_addr);
                 // Recalculate checksum after ipv4 change
-                update_ipv4_checksum(&mut pkt.message, header_length);
+                recalculate_checksum(&mut pkt.message);
+
                 debug!(
                     "[ip_handler_t] Sending IPv4 packet towards client (tun): {:?}",
                     pkt.message
@@ -393,7 +394,7 @@ async fn quic_conn_handler(
                         debug!("Received IPv4 packet via http3");
                         // Check if the ip packet was valid first, if not we discard of it
                         if !v.is_valid() {
-                            debug!("Received invalid ipv4 packet, discarding..");
+                            info!("Received invalid ipv4 packet, discarding..");
                             continue;
                         }
                         match ip_handler
@@ -414,7 +415,7 @@ async fn quic_conn_handler(
                         continue;
                     }
                     Err(err) => {
-                        debug!("Received an invalid packet: {:?}", err)
+                        error!("Received an invalid packet: {:?}", err)
                     }
                 }
             }
