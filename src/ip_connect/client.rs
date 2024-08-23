@@ -894,9 +894,9 @@ async fn handle_ip_connect_stream(
         );
         let mut status = None;
         for hdr in headers {
-            match hdr.name() {
-                b":status" => status = Some(hdr.value().to_owned()),
-                _ => (),
+            if hdr.name() == b":status" {
+                status = Some(hdr.value().to_owned());
+                break;
             }
         }
         if let Some(status) = status {

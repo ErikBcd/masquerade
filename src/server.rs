@@ -790,153 +790,148 @@ async fn handle_http3_event(
                     _ => (),
                 }
             }
-
-            match method {
-                Some(b"CONNECT") => {
-                    if let Some(authority) = authority {
-                        if protocol == Some(b"connect-udp") && scheme.is_some() && path.is_some() {
-                            let path = path.unwrap();
-                            if let Some(peer_addr) = path_to_socketaddr(path) {
-                                debug!(
-                                    "connecting udp to {} at {} from authority {}",
-                                    std::str::from_utf8(&path).unwrap(),
-                                    peer_addr,
-                                    authority
-                                );
-                                let http3_sender_clone_1 = http3_sender.clone();
-                                let http3_sender_clone_2 = http3_sender.clone();
-                                let (udp_sender, udp_receiver) =
-                                    mpsc::unbounded_channel::<Vec<u8>>();
-                                let flow_id = stream_id / 4;
-                                connect_sockets.insert(flow_id, udp_sender);
-
-                                tokio::spawn(async move {
-                                    udp_connect_handler(
-                                        peer_addr,
-                                        stream_id,
-                                        flow_id,
-                                        http3_sender_clone_1,
-                                        http3_sender_clone_2,
-                                        udp_receiver,
-                                    )
-                                    .await;
-                                });
-                            }
-                        } else if protocol == Some(b"connect-ip")
-                            && scheme.is_some()
-                            && path.is_some()
-                        // && !authority.is_empty()
-                        {
-                            debug!("Got request for connect-ip!");
-                            // Check the path
-                            let path = path.unwrap();
-
+            if method == Some(b"CONNECT") {
+                if let Some(authority) = authority {
+                    if protocol == Some(b"connect-udp") && scheme.is_some() && path.is_some() {
+                        let path = path.unwrap();
+                        if let Some(peer_addr) = path_to_socketaddr(path) {
                             debug!(
-                                "connecting ip to {} from authority {}",
-                                std::str::from_utf8(&path).unwrap(),
-                                //peer_addr,
+                                "connecting udp to {} at {} from authority {}",
+                                std::str::from_utf8(path).unwrap(),
+                                peer_addr,
                                 authority
                             );
-                            // acquire http3 and TUN sender clones
-
-                            // For sending messages from the ip handler to the http3 sender
-                            let http3_sender_clone = http3_sender.clone();
-
-                            // These are for receiving messages from the TUN device
-                            let (tun_sender_from, from_tun_receiver) =
-                                mpsc::channel::<Vec<u8>>(MAX_CHANNEL_MESSAGES);
-                            connect_ip_clients
-                                .lock()
-                                .await
-                                .insert(next_free_ip.clone(), tun_sender_from);
-
-                            // For sending received http3 messages to the ip connect handler
-                            let (ip_http3_sender, ip_http3_receiver) =
-                                mpsc::channel::<Content>(MAX_CHANNEL_MESSAGES);
+                            let http3_sender_clone_1 = http3_sender.clone();
+                            let http3_sender_clone_2 = http3_sender.clone();
+                            let (udp_sender, udp_receiver) =
+                                mpsc::unbounded_channel::<Vec<u8>>();
                             let flow_id = stream_id / 4;
+                            connect_sockets.insert(flow_id, udp_sender);
 
-                            if connect_ip_session.is_some() {
-                                debug!("Replacing old IpConnectSession!");
-                                {
-                                    let ip_session = connect_ip_session.as_ref().unwrap();
-                                    if !ip_session.handler_thread.as_ref().unwrap().is_finished() {
-                                        ip_session.handler_thread.as_ref().unwrap().abort();
-                                    }
+                            tokio::spawn(async move {
+                                udp_connect_handler(
+                                    peer_addr,
+                                    stream_id,
+                                    flow_id,
+                                    http3_sender_clone_1,
+                                    http3_sender_clone_2,
+                                    udp_receiver,
+                                )
+                                .await;
+                            });
+                        }
+                    } else if protocol == Some(b"connect-ip")
+                        && scheme.is_some()
+                        && path.is_some()
+                    // && !authority.is_empty()
+                    {
+                        debug!("Got request for connect-ip!");
+                        // Check the path
+                        let path = path.unwrap();
+
+                        debug!(
+                            "connecting ip to {} from authority {}",
+                            std::str::from_utf8(path).unwrap(),
+                            //peer_addr,
+                            authority
+                        );
+                        // acquire http3 and TUN sender clones
+
+                        // For sending messages from the ip handler to the http3 sender
+                        let http3_sender_clone = http3_sender.clone();
+
+                        // These are for receiving messages from the TUN device
+                        let (tun_sender_from, from_tun_receiver) =
+                            mpsc::channel::<Vec<u8>>(MAX_CHANNEL_MESSAGES);
+                        connect_ip_clients
+                            .lock()
+                            .await
+                            .insert(*next_free_ip, tun_sender_from);
+
+                        // For sending received http3 messages to the ip connect handler
+                        let (ip_http3_sender, ip_http3_receiver) =
+                            mpsc::channel::<Content>(MAX_CHANNEL_MESSAGES);
+                        let flow_id = stream_id / 4;
+
+                        if connect_ip_session.is_some() {
+                            debug!("Replacing old IpConnectSession!");
+                            {
+                                let ip_session = connect_ip_session.as_ref().unwrap();
+                                if !ip_session.handler_thread.as_ref().unwrap().is_finished() {
+                                    ip_session.handler_thread.as_ref().unwrap().abort();
                                 }
                             }
-                            let _ = std::mem::replace(
-                                connect_ip_session,
-                                Some(IpConnectSession {
-                                    flow_id: flow_id,
-                                    stream_id: stream_id,
-                                    ip_h3_sender: ip_http3_sender,
-                                    handler_thread: None,
-                                }),
-                            );
+                        }
+                        let _ = std::mem::replace(
+                            connect_ip_session,
+                            Some(IpConnectSession {
+                                flow_id,
+                                stream_id,
+                                ip_h3_sender: ip_http3_sender,
+                                handler_thread: None,
+                            }),
+                        );
 
-                            // spawn handler thread for this one
-                            let assigned_ip = next_free_ip.clone();
+                        // spawn handler thread for this one
+                        let assigned_ip = *next_free_ip;
 
-                            // For sending messages to the TUN device
-                            let tun_sender_clone = tun_sender.clone();
+                        // For sending messages to the TUN device
+                        let tun_sender_clone = tun_sender.clone();
 
-                            // For looking up other clients
-                            let connect_ip_clients_clone = connect_ip_clients.clone();
-                            connect_ip_session.as_mut().unwrap().handler_thread =
-                                Some(tokio::spawn(async move {
-                                    connect_ip_handler(
-                                        stream_id,
-                                        flow_id,
-                                        http3_sender_clone,
-                                        from_tun_receiver,
-                                        tun_sender_clone,
-                                        ip_http3_receiver,
-                                        assigned_ip,
-                                        connect_ip_clients_clone,
-                                    )
-                                    .await;
-                                }));
-                        } else if let Ok(target_url) = if authority.contains("://") {
-                            url::Url::parse(authority)
-                        } else {
-                            url::Url::parse(format!("scheme://{}", authority).as_str())
-                        } {
-                            debug!(
-                                "connecting to url {} from authority {}",
-                                target_url, authority
-                            );
-                            if let Ok(mut socket_addrs) = target_url.to_socket_addrs() {
-                                let peer_addr = socket_addrs.next().unwrap();
-                                let http3_sender_clone_1 = http3_sender.clone();
-                                let http3_sender_clone_2 = http3_sender.clone();
-                                let (tcp_sender, tcp_receiver) =
-                                    mpsc::unbounded_channel::<Vec<u8>>();
-                                connect_streams.insert(stream_id, tcp_sender);
+                        // For looking up other clients
+                        let connect_ip_clients_clone = connect_ip_clients.clone();
+                        connect_ip_session.as_mut().unwrap().handler_thread =
+                            Some(tokio::spawn(async move {
+                                connect_ip_handler(
+                                    stream_id,
+                                    flow_id,
+                                    http3_sender_clone,
+                                    from_tun_receiver,
+                                    tun_sender_clone,
+                                    ip_http3_receiver,
+                                    assigned_ip,
+                                    connect_ip_clients_clone,
+                                )
+                                .await;
+                            }));
+                    } else if let Ok(target_url) = if authority.contains("://") {
+                        url::Url::parse(authority)
+                    } else {
+                        url::Url::parse(format!("scheme://{}", authority).as_str())
+                    } {
+                        debug!(
+                            "connecting to url {} from authority {}",
+                            target_url, authority
+                        );
+                        if let Ok(mut socket_addrs) = target_url.to_socket_addrs() {
+                            let peer_addr = socket_addrs.next().unwrap();
+                            let http3_sender_clone_1 = http3_sender.clone();
+                            let http3_sender_clone_2 = http3_sender.clone();
+                            let (tcp_sender, tcp_receiver) =
+                                mpsc::unbounded_channel::<Vec<u8>>();
+                            connect_streams.insert(stream_id, tcp_sender);
 
-                                tokio::spawn(async move {
-                                    tcp_stream_handler(
-                                        peer_addr,
-                                        target_url,
-                                        stream_id,
-                                        http3_sender_clone_1,
-                                        http3_sender_clone_2,
-                                        tcp_receiver,
-                                    )
-                                    .await;
-                                });
-                            } else {
-                                // TODO: send error
-                            }
+                            tokio::spawn(async move {
+                                tcp_stream_handler(
+                                    peer_addr,
+                                    target_url,
+                                    stream_id,
+                                    http3_sender_clone_1,
+                                    http3_sender_clone_2,
+                                    tcp_receiver,
+                                )
+                                .await;
+                            });
                         } else {
                             // TODO: send error
                         }
                     } else {
                         // TODO: send error
                     }
+                } else {
+                    // TODO: send error
                 }
-
-                _ => {}
-            };
+            }
         }
 
         Ok((stream_id, quiche::h3::Event::Data)) => {
