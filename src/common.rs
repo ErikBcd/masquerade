@@ -7,6 +7,26 @@ use crate::ip_connect::util::*;
 pub const MAX_DATAGRAM_SIZE: usize = 4000;
 
 #[derive(Debug)]
+pub enum ConfigError {
+    MissingArgument(String),
+    ConfigFileError((String, String))
+}
+
+impl std::fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            ConfigError::MissingArgument(s) => {
+                write!(f, "Argument required but not given: {s}")
+            },
+            ConfigError::ConfigFileError(s) => {
+                write!(f, "Error when reading file \"{}\": {}", s.1, s.0)
+            },
+        }
+        
+    }
+}
+
+#[derive(Debug)]
 pub enum Content {
     Request {
         headers: Vec<quiche::h3::Header>,

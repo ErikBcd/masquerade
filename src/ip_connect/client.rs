@@ -10,6 +10,7 @@ use octets::varint_len;
 use quiche::h3::NameValue;
 use quiche::Connection;
 use ring::rand::{SecureRandom, SystemRandom};
+use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc::{self, Receiver, Sender, UnboundedSender};
@@ -24,6 +25,28 @@ use crate::ip_connect::capsules::{
 use crate::ip_connect::util::*;
 
 const MAX_CHANNEL_MSG: usize = 50;
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct ClientConfig {
+    pub server_name: Option<String>,
+    pub tun_addr: Option<String>,
+    pub tun_name: Option<String>,
+    pub tun_gateway: Option<String>,
+}
+
+impl std::fmt::Display for ClientConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(
+            f,
+            "server_name  = {:?}\n
+            tun_addr     = {:?}\n
+            tun_name     = {:?}\n
+            tun_gateway  = {:?}\n
+            ",
+            self.server_name, self.tun_addr, self.tun_name, self.tun_gateway
+        )
+    }
+}
 
 /// 
 /// Information about packets, wether they are
@@ -80,7 +103,7 @@ pub fn generate_cid_and_reset_token<T: SecureRandom>(
 
 /// Basic commands for setting up the TUN interface
 /// Should in the end take all traffic on the device and tunnel it.
-fn set_client_ip_and_route(dev_addr: &String, tun_gateway: String, tun_name: String) {
+fn set_client_ip_and_route(dev_addr: &String, tun_gateway: &String, tun_name: &String) {
     let ip_output = Command::new("ip")
         .args(["addr", "add", dev_addr, "dev", &tun_name])
         .output()
@@ -940,13 +963,10 @@ pub struct ConnectIPClient;
 impl ConnectIPClient {
     pub async fn run(
         &self,
-        server_addr: &String,
-        dev_addr: String,
-        tun_gateway: String,
-        tun_name: String,
+        config: ClientConfig,
     ) {
         // 1) Create QUIC connection, connect to server
-        let mut socket = match self.get_udp(server_addr).await {
+        let mut socket = match self.get_udp(config.server_name.as_ref().unwrap()).await {
             Ok(v) => v,
             Err(e) => {
                 error!("could not create udp socket: {}", e);
@@ -954,7 +974,8 @@ impl ConnectIPClient {
             }
         };
         debug!("Created UDP socket");
-        let quic_conn = match self.create_quic_conn(&mut socket, server_addr).await {
+        let quic_conn = match self.create_quic_conn(&mut socket, 
+                config.server_name.as_ref().unwrap()).await {
             Ok(v) => v,
             Err(e) => {
                 error!("could not create quic connection: {}", e);
@@ -968,19 +989,24 @@ impl ConnectIPClient {
         // 2) Setup Connect IP stream
 
         // 3) Create TUN
-        let dev = match self.create_tun(&dev_addr, tun_gateway, tun_name) {
+        let dev = match self.create_tun(
+            &config.tun_addr.as_ref().unwrap(), 
+            config.tun_gateway.as_ref().unwrap(), 
+            config.tun_name.as_ref().unwrap()) {
             Ok(v) => v,
             Err(e) => {
                 error!("could not create TUN: {}", e);
                 return;
             }
         };
-        let prefix_index = dev_addr.find("/");
+        let prefix_index = config.tun_addr.as_ref().unwrap().find("/");
         if prefix_index.is_none() {
             error!("Malformed IP address!");
             return;
         }
-        let addr = String::from_str(&dev_addr[..(prefix_index.unwrap())]).unwrap();
+        let addr = String::from_str(
+            &config.tun_addr.as_ref().unwrap()[..(prefix_index.unwrap())])
+            .unwrap();
         let ipaddr = Ipv4Addr::from_str(&addr).unwrap();
         info!("Local address for packets: {}", ipaddr);
         let (reader, writer) = tokio::io::split(dev);
@@ -1010,7 +1036,7 @@ impl ConnectIPClient {
 
         let ip_disp_t = tokio::task::spawn(ip_dispatcher_t(ip_dispatch_reader, writer));
 
-        let peer_addr = server_addr.clone();
+        let peer_addr = config.server_name.unwrap().clone();
         let quic_h_t = tokio::task::spawn(quic_conn_handler(
             ip_from_quic_sender,
             conn_info_sender,
@@ -1154,8 +1180,8 @@ impl ConnectIPClient {
     fn create_tun(
         &self,
         dev_addr: &String,
-        tun_gateway: String,
-        tun_name: String,
+        tun_gateway: &String,
+        tun_name: &String,
     ) -> Result<AsyncDevice, tun2::Error> {
         let mut config = tun2::Configuration::default();
 

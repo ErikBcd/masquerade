@@ -1,31 +1,13 @@
 use clap::{arg, command};
-use log::{error, info};
+use log::info;
 use masquerade_proxy::server::{Server, ServerConfig};
+use masquerade_proxy::common::ConfigError;
 
 use std::env;
 use std::error::Error;
 use std::fs::File;
 use std::io::Read;
 
-#[derive(Debug)]
-enum ConfigError {
-    MissingArgument(String),
-    ConfigFileError((String, String))
-}
-
-impl std::fmt::Display for ConfigError {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match self {
-            ConfigError::MissingArgument(s) => {
-                write!(f, "Argument required but not given: {s}")
-            },
-            ConfigError::ConfigFileError(s) => {
-                write!(f, "Error when reading file \"{}\": {}", s.1, s.0)
-            },
-        }
-        
-    }
-}
 
 fn read_config() -> Result<ServerConfig, ConfigError> {
     // Command line arguments take precedence over config file arguments
@@ -105,30 +87,6 @@ fn read_config() -> Result<ServerConfig, ConfigError> {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     env_logger::builder().format_timestamp_millis().init();
-
-    /* 
-    let matches = command!()
-        .about("The Masquerade server")
-        .arg(arg!(-b --bind_addr <VALUE>).default_value("0.0.0.0:4433").required(false))
-        .arg(arg!(-a --tun_addr <VALUE>).default_value("10.8.0.1/24").required(false))
-        .arg(arg!(-n --tun_name <VALUE>).default_value("tunMS").required(false))
-        .arg(arg!(-l --local_ip <VALUE>).default_value("0.0.0.0").required(false))
-        .arg(arg!(-d --link_dev <VALUE>).required(true))
-        .get_matches();
-
-    let bind_addr = matches.get_one::<String>("bind_addr").expect("Bind address not here?");
-    let tun_addr = matches.get_one::<String>("tun_addr").expect("Bind address not here?");
-    let tun_name = matches.get_one::<String>("tun_name").expect("Bind address not here?");
-    let local_ip = matches.get_one::<String>("local_ip").expect("Bind address not here?");
-    let link_dev = matches.get_one::<String>("link_dev").expect("Bind address not here?");
-
-    let config: ServerConfig = toml::from_str(r#"
-        bind_addr = '0.0.0.0:4433'
-        tun_addr = '10.8.0.1/24',
-        tun_name = 'tunMS',
-        local_ip = '0.0.0.0',
-        link_dev = 'todo',
-    "#).unwrap();*/
 
     let conf = match read_config() {
         Ok(v) => v,
