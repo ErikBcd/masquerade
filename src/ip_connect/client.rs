@@ -3,7 +3,6 @@ use std::process::Command;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use std::u64;
 
 use log::*;
 use octets::varint_len;
@@ -105,7 +104,7 @@ pub fn generate_cid_and_reset_token<T: SecureRandom>(
 /// Should in the end take all traffic on the device and tunnel it.
 fn set_client_ip_and_route(dev_addr: &String, tun_gateway: &String, tun_name: &String) {
     let ip_output = Command::new("ip")
-        .args(["addr", "add", dev_addr, "dev", &tun_name])
+        .args(["addr", "add", dev_addr, "dev", tun_name])
         .output()
         .expect("Failed to execute IP command");
 
@@ -118,7 +117,7 @@ fn set_client_ip_and_route(dev_addr: &String, tun_gateway: &String, tun_name: &S
     }
 
     let link_output = Command::new("ip")
-        .args(["link", "set", "up", "dev", &tun_name])
+        .args(["link", "set", "up", "dev", tun_name])
         .output()
         .expect("Failed to execute IP LINK command");
 
@@ -131,7 +130,7 @@ fn set_client_ip_and_route(dev_addr: &String, tun_gateway: &String, tun_name: &S
     }
 
     let route_output = Command::new("ip")
-        .args(["route", "add", "0.0.0.0/0", "via", &tun_gateway, "dev", &tun_name])
+        .args(["route", "add", "0.0.0.0/0", "via", tun_gateway, "dev", tun_name])
         .output()
         .expect("Failed to execute first IP ROUTE command");
 
@@ -144,7 +143,7 @@ fn set_client_ip_and_route(dev_addr: &String, tun_gateway: &String, tun_name: &S
 
     // sudo iptables -t nat -A POSTROUTING -o tunMC -j MASQUERADE
     let iptables = Command::new("iptables")
-        .args(["-t", "nat", "-A", "POSTROUTING", "-o", &tun_name, "-j", "MASQUERADE"])
+        .args(["-t", "nat", "-A", "POSTROUTING", "-o", tun_name, "-j", "MASQUERADE"])
         .output()
         .expect("Failed to execute ip tables cmd");
     if !iptables.status.success() {
@@ -325,8 +324,8 @@ pub fn encapsulate_ipv4(pkt: Vec<u8>, flow_id: &u64, context_id: &u64) -> ToSend
     let context_id_enc = encode_var_int(*context_id);
     let payload = [&context_id_enc, pkt.as_slice()].concat();
     ToSend {
-        stream_id: flow_id.clone(),
-        content: Content::Datagram { payload: payload },
+        stream_id: *flow_id,
+        content: Content::Datagram { payload },
         finished: false,
     }
 }
@@ -342,7 +341,7 @@ async fn ip_dispatcher_t(
     loop {
         if let Some(pkt) = ip_dispatch_reader.recv().await {
             writer
-                .write(&pkt)
+                .write_all(&pkt)
                 .await
                 .expect("Could not write packet to TUN!");
         }
@@ -399,7 +398,7 @@ async fn quic_conn_handler(
         // Process datagram related events
         // We only expect datagrams that contain ip payloads
         while let Ok(len) = conn.dgram_recv(&mut buf) {
-            let mut b = octets::Octets::with_slice(&mut buf);
+            let mut b = octets::Octets::with_slice(&buf);
             if let Ok(flow_id) = b.get_varint() {
                 let context_id = match b.get_varint() {
                     Ok(v) => v,
@@ -531,13 +530,13 @@ async fn quic_conn_handler(
                                             //       Also: See if we can use the other values like the prefix
                                             //       This should not be used like this in prod
                                             if let IpLength::V4(ipv4) = c.assigned_address[0].ip_address {
-                                                let assigned_addr = Some(Ipv4Addr::from(ipv4));
+                                                let assigned_addr = Ipv4Addr::from(ipv4);
                                                 debug!("Got address: {:?}", assigned_addr);
                                                 if !got_ip_addr {
                                                     // Send assigned ip to ip handler
                                                     debug!("Sending connection info to ip_handler");
                                                     let ci = ConnectIpInfo {
-                                                        assigned_ip: assigned_addr.unwrap(),
+                                                        assigned_ip: assigned_addr,
                                                         flow_id: flow_id.unwrap(),
                                                         stream_id: main_stream_id.unwrap(),
                                                     };
@@ -627,7 +626,7 @@ async fn quic_conn_handler(
                     let result = match &to_send.content {
                         Content::Headers { .. } => unreachable!(),
                         Content::Request { headers, stream_id_sender } => {
-                            info!("sending http3 request {:?} to {:?}", hdrs_to_strings(&headers), http3_conn.peer_settings_raw());
+                            info!("sending http3 request {:?} to {:?}", hdrs_to_strings(headers), http3_conn.peer_settings_raw());
                             match http3_conn.send_request(&mut conn, headers, to_send.finished) {
                                 Ok(stream_id) => {
                                     stream_id_sender.send(stream_id)
@@ -662,7 +661,7 @@ async fn quic_conn_handler(
                         },
                         Content::Datagram { payload } => {
                             info!("sending http3 datagram of {} bytes to flow {}", payload.len(), to_send.stream_id);
-                            match send_h3_dgram(&mut conn, to_send.stream_id, &payload) {
+                            match send_h3_dgram(&mut conn, to_send.stream_id, payload) {
                                     Ok(v) => Ok(v),
                                     Err(e) => {
                                         error!("sending http3 datagram failed: {:?}", e);
@@ -719,7 +718,7 @@ async fn quic_conn_handler(
                 let result = match &to_send.content {
                     Content::Headers { .. } => unreachable!(),
                     Content::Request { headers, stream_id_sender } => {
-                        debug!("retry sending http3 request {:?}", hdrs_to_strings(&headers));
+                        debug!("retry sending http3 request {:?}", hdrs_to_strings(headers));
                         match http3_conn.send_request(&mut conn, headers, to_send.finished) {
                             Ok(stream_id) => {
                                 stream_id_sender.send(stream_id).await
@@ -751,7 +750,7 @@ async fn quic_conn_handler(
                     },
                     Content::Datagram { payload } => {
                         debug!("retry sending http3 datagram of {} bytes", payload.len());
-                        match send_h3_dgram(&mut conn, to_send.stream_id, &payload) {
+                        match send_h3_dgram(&mut conn, to_send.stream_id, payload) {
                                     Ok(v) => Ok(v),
                                     Err(e) => {
                                         error!("sending http3 datagram failed: {:?}", e);
@@ -858,7 +857,7 @@ async fn handle_ip_connect_stream(
         .send(ToSend {
             stream_id: u64::MAX,
             content: Content::Request {
-                headers: headers,
+                headers,
                 stream_id_sender,
             },
             finished: false,
@@ -905,7 +904,7 @@ async fn handle_ip_connect_stream(
         if let Some(status) = status {
             if let Ok(status_str) = std::str::from_utf8(&status) {
                 if let Ok(status_code) = status_str.parse::<i32>() {
-                    if status_code >= 200 && status_code < 300 {
+                    if (200..300).contains(&status_code) {
                         info!("connect-ip established, sending ip request!");
 
                         // Now we ask for an address
@@ -990,7 +989,7 @@ impl ConnectIPClient {
 
         // 3) Create TUN
         let dev = match self.create_tun(
-            &config.tun_addr.as_ref().unwrap(), 
+            config.tun_addr.as_ref().unwrap(), 
             config.tun_gateway.as_ref().unwrap(), 
             config.tun_name.as_ref().unwrap()) {
             Ok(v) => v,
@@ -1189,10 +1188,10 @@ impl ConnectIPClient {
         config.platform_config(|config| {
             config.ensure_root_privileges(true);
         });
-        config.tun_name(&tun_name);
+        config.tun_name(tun_name);
         let dev = tun2::create_as_async(&config);
         set_client_ip_and_route(dev_addr, tun_gateway, tun_name);
-        return dev;
+        dev
     }
 
     /// 
