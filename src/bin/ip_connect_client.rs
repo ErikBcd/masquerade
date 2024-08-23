@@ -78,7 +78,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let newclient = ConnectIPClient;
     let conf = match read_config() {
         Ok(v) => v,
-        Err(_) => todo!(),
+        Err(e) => {
+            panic!("Error when reading config: {e}");
+        },
     };
 
     println!("Starting connect-ip client with config: {}", conf);
