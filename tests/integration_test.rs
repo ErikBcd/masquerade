@@ -1,5 +1,5 @@
 use log::error;
-use masquerade_proxy::ip_connect::{capsules::*, util::{recalculate_checksum, IPError}};
+use masquerade_proxy::ip_connect::{capsules::*, util::{check_ipv4_packet, recalculate_checksum, IPError}};
 use octets::OctetsMut;
 use tokio::time::timeout;
 use std::{net::Ipv4Addr, time::Duration};
@@ -356,14 +356,20 @@ async fn recalculate_checksum_test() {
         0xd2, 0xaa,             // Checksum (wrong)
         0x61, 0x0a];            // Data
 
+    // Assert that packet is wrong
+    assert_eq!(check_ipv4_packet(udp_payload_wrong.as_slice(), 30), Err(masquerade_proxy::ip_connect::util::Ipv4CheckError::WrongChecksumError));
+
     // Recalculate checksum of wrong packet
     recalculate_checksum(&mut udp_payload_wrong);
-    println!("UDP | Correct packet: {:?}", udp_payload);
-    println!("UDP | Recalc  packet: {:?}", udp_payload_wrong);
+    println!("UDP | Correct packet: {:02x?}", udp_payload);
+    println!("UDP | Recalc  packet: {:02x?}", udp_payload_wrong);
     assert_eq!(udp_payload_wrong.as_slice(), udp_payload);
 
+    // Check the check_ipv4_packet function
+    assert_eq!(check_ipv4_packet(udp_payload.as_slice(), 30), Ok(()));
+
     // TCP test
-    let mut tcp_payload = vec![
+    let tcp_payload = vec![
         0x45, 0x00, 0x00, 0x3c, 0x31, 0x22, 0x40, 0x00, 0x3f, 0x06, 
         0xdd, 0x31, // ip checksum (correct)
         0x0a, 0x08, 0x00, 0x03,
@@ -392,5 +398,7 @@ async fn recalculate_checksum_test() {
     println!("TCP | Correct packet: {:?}", tcp_payload);
     println!("TCP | Recalc  packet: {:?}", tcp_payload_wrong);
     assert_eq!(tcp_payload_wrong.as_slice(), tcp_payload);
+
+    
 
 }

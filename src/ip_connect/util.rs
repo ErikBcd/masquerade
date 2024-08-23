@@ -145,7 +145,7 @@ pub fn get_ipv4_hdr_checksum_from_slice(pkt: &[u8]) -> u16 {
     u16::from_be_bytes([pkt[10], pkt[11]])
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum Ipv4CheckError {
     WrongChecksumError,
     WrongSizeError,
@@ -156,8 +156,10 @@ pub fn check_ipv4_packet(pkt: &[u8], len: u16) -> Result<(), Ipv4CheckError> {
         >= len {
         return Err(Ipv4CheckError::WrongSizeError)
     }
+    let hdr_len = usize::from(get_ip_header_length_from_slice(pkt));
     if get_ipv4_hdr_checksum_from_slice(&pkt) 
-        != v4::checksum(&pkt) {
+        != v4::checksum(&pkt[..hdr_len]) {
+        
         return Err(Ipv4CheckError::WrongChecksumError)
     }
     Ok(())
