@@ -30,11 +30,13 @@ octets = "0.3"
 
 mio = { version = "1", features = ["net", "os-poll"] }
 
-tun2 = { version = "2.0.6", features = ["async"] }
+tun2 = { version = "2", features = ["async"] }
 packet = "0.1"
 
 futures = "0.3.30"
 clap = {version = "4.5.16", features = ["cargo"] }
+toml = "0.8.19"
+serde = {version = "1.0.208", features = ["derive"]}
 
 [dev-dependencies]
 rand = "0.8"

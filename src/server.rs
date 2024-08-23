@@ -3,6 +3,7 @@ use log::*;
 use octets::varint_len;
 use packet::ip::v4::Packet;
 use quiche::h3::NameValue;
+use serde::{Deserialize, Serialize};
 use tokio::task::JoinHandle;
 use url::Url;
 
@@ -28,6 +29,30 @@ use crate::ip_connect::client::encapsulate_ipv4;
 use crate::ip_connect::util::*;
 
 const MAX_CHANNEL_MESSAGES: usize = 50;
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct ServerConfig {
+    pub bind_addr: Option<String>,
+    pub tun_addr: Option<String>,
+    pub tun_name: Option<String>,
+    pub local_ip: Option<String>,
+    pub link_dev: Option<String>,
+}
+
+impl std::fmt::Display for ServerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(
+            f,
+            "bind_addr = {:?}\n
+                   tun_addr  = {:?}\n
+                   tun_name  = {:?}\n
+                   local_ip  = {:?}\n
+                   link_dev  = {:?}\n
+                    ",
+            self.bind_addr, self.tun_addr, self.tun_name, self.local_ip, self.link_dev
+        )
+    }
+}
 
 #[derive(Debug)]
 pub enum ClientError {
@@ -115,11 +140,14 @@ impl Server {
         Ok(())
     }
 
-    pub async fn run(&self, 
-        tun_addr: String, 
-        tun_name: String,
-        local_ip: String,
-        link_dev: String) -> Result<(), Box<dyn Error>> {
+    pub async fn run(
+        &self,
+        server_config: ServerConfig,
+        // tun_addr: String,
+        // tun_name: String,
+        // local_ip: String,
+        // link_dev: String
+    ) -> Result<(), Box<dyn Error>> {
         if self.socket.is_none() {
             return Err(Box::new(RunBeforeBindError));
         }
@@ -162,12 +190,13 @@ impl Server {
         let mut clients = ClientMap::new();
 
         // CONNECT-IP things
-        let prefix_index = tun_addr.find("/");
+        let prefix_index = server_config.tun_addr.as_ref().unwrap().find("/");
         if prefix_index.is_none() {
             error!("Malformed IP address!");
             return Err(Box::new(InvalidArgumentError));
         }
-        let addr = String::from_str(&tun_addr[..(prefix_index.unwrap())]).unwrap();
+        let addr =
+            String::from_str(&server_config.tun_addr.as_ref().unwrap()[..(prefix_index.unwrap())]).unwrap();
         let ipaddr = Ipv4Addr::from_str(&addr).unwrap();
 
         let mut current_ip = match get_next_ipv4(ipaddr, 0xFFFF0000) {
@@ -186,18 +215,12 @@ impl Server {
 
         let ip_connect_clients: Arc<Mutex<HashMap<Ipv4Addr, Sender<Vec<u8>>>>> =
             Arc::new(Mutex::new(HashMap::new()));
-        let (tun_sender, tun_receiver) = tokio::sync::mpsc::channel::<Vec<u8>>(MAX_CHANNEL_MESSAGES);
+        let (tun_sender, tun_receiver) =
+            tokio::sync::mpsc::channel::<Vec<u8>>(MAX_CHANNEL_MESSAGES);
         // Create TUN handler (creates device automatically)
         let ip_connect_clients_clone = ip_connect_clients.clone();
         let _tun_thread = tokio::spawn(async move {
-            tun_socket_handler(
-                ip_connect_clients_clone, 
-                tun_receiver, 
-                tun_addr, 
-                tun_name,
-                local_ip,
-                link_dev
-            ).await;
+            tun_socket_handler(ip_connect_clients_clone, tun_receiver, server_config).await;
         });
 
         let local_addr = socket.local_addr().unwrap();
@@ -329,11 +352,12 @@ impl Server {
                 let ip_connect_clients_clone = ip_connect_clients.clone();
                 tokio::spawn(async move {
                     handle_client(
-                        client, 
-                        current_ip.clone(), 
+                        client,
+                        current_ip.clone(),
                         &tun_sender_clone,
-                        ip_connect_clients_clone
-                    ).await
+                        ip_connect_clients_clone,
+                    )
+                    .await
                 });
                 current_ip = match get_next_ipv4(current_ip, 0xFFFF0000) {
                     Ok(v) => v,
@@ -708,15 +732,11 @@ async fn handle_http3_event(
     while let Ok(len) = client.conn.dgram_recv(&mut buf) {
         let mut b = octets::Octets::with_slice(&buf);
         if let Ok(flow_id) = b.get_varint() {
-            info!(
-                "Received DATAGRAM flow_id={} len={}",
-                flow_id,
-                len,
-            );
+            info!("Received DATAGRAM flow_id={} len={}", flow_id, len,);
 
             // TODO: Check if this is actually a good way to check for the
             // length of the flow_id
-            
+
             let flow_id_len = varint_len(flow_id);
             if connect_sockets.contains_key(&flow_id) {
                 let data = &buf[flow_id_len..len];
@@ -805,12 +825,12 @@ async fn handle_http3_event(
                         } else if protocol == Some(b"connect-ip")
                             && scheme.is_some()
                             && path.is_some()
-                           // && !authority.is_empty()
+                        // && !authority.is_empty()
                         {
                             debug!("Got request for connect-ip!");
                             // Check the path
                             let path = path.unwrap();
-                            
+
                             debug!(
                                 "connecting ip to {} from authority {}",
                                 std::str::from_utf8(&path).unwrap(),
@@ -825,7 +845,10 @@ async fn handle_http3_event(
                             // These are for receiving messages from the TUN device
                             let (tun_sender_from, from_tun_receiver) =
                                 mpsc::channel::<Vec<u8>>(MAX_CHANNEL_MESSAGES);
-                                connect_ip_clients.lock().await.insert(next_free_ip.clone(), tun_sender_from);
+                            connect_ip_clients
+                                .lock()
+                                .await
+                                .insert(next_free_ip.clone(), tun_sender_from);
 
                             // For sending received http3 messages to the ip connect handler
                             let (ip_http3_sender, ip_http3_receiver) =
@@ -836,12 +859,7 @@ async fn handle_http3_event(
                                 debug!("Replacing old IpConnectSession!");
                                 {
                                     let ip_session = connect_ip_session.as_ref().unwrap();
-                                    if !ip_session
-                                        .handler_thread
-                                        .as_ref()
-                                        .unwrap()
-                                        .is_finished()
-                                    {
+                                    if !ip_session.handler_thread.as_ref().unwrap().is_finished() {
                                         ip_session.handler_thread.as_ref().unwrap().abort();
                                     }
                                 }
@@ -874,11 +892,10 @@ async fn handle_http3_event(
                                         tun_sender_clone,
                                         ip_http3_receiver,
                                         assigned_ip,
-                                        connect_ip_clients_clone
+                                        connect_ip_clients_clone,
                                     )
                                     .await;
                                 }));
-                            
                         } else if let Ok(target_url) = if authority.contains("://") {
                             url::Url::parse(authority)
                         } else {
@@ -1189,53 +1206,97 @@ async fn tcp_stream_handler(
     };
 }
 
-fn set_ip_settings(
-    tun_addr: &String, 
-    tun_name: &String,
-    local_ip: &String,
-    link_dev: &String) -> Result<(), Box<dyn Error>> {
+fn set_ip_settings(server_config: ServerConfig) -> Result<(), Box<dyn Error>> {
     let output = Command::new("ip")
-        .args(["link", "set", "dev", tun_name, "up"])
+        .args([
+            "link",
+            "set",
+            "dev",
+            &server_config.tun_name.as_ref().unwrap(),
+            "up",
+        ])
         .output()?;
 
     if !output.status.success() {
-        return Err(format!("Failed to bring up tun0: {:?}", String::from_utf8(output.stderr)).into());
+        return Err(format!(
+            "Failed to bring up tun0: {:?}",
+            String::from_utf8(output.stderr)
+        )
+        .into());
     }
 
     let output = Command::new("ip")
-        .args(["addr", "add", tun_addr, "dev", tun_name])
+        .args([
+            "addr",
+            "add",
+            &server_config.tun_addr.as_ref().unwrap(),
+            "dev",
+            &server_config.tun_name.as_ref().unwrap(),
+        ])
         .output()?;
 
     if !output.status.success() {
-        return Err(format!("Failed to assign IP to tun0: {:?}", String::from_utf8_lossy(&output.stderr)).into());
+        return Err(format!(
+            "Failed to assign IP to tun0: {:?}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .into());
     }
 
     // decode device address to get range
-    let prefix_index = tun_addr.find("/");
+    let prefix_index = &server_config.tun_addr.as_ref().unwrap().find("/");
     if prefix_index.is_none() {
-        panic!("Malformed device address: {}", tun_addr);
+        panic!(
+            "Malformed device address: {}",
+            &server_config.tun_addr.as_ref().unwrap()
+        );
     }
-    let addr = String::from_str(&tun_addr[..(prefix_index.unwrap())]).unwrap();
+    let addr =
+        String::from_str(&server_config.tun_addr.as_ref().unwrap()[..(prefix_index.unwrap())])
+            .unwrap();
     let ipaddr = Ipv4Addr::from_str(&addr).unwrap();
     ipaddr.octets()[3] = 0;
     let mut ip_range = ipaddr.to_string();
     ip_range.push_str("/32");
 
     let route_output = Command::new("ip")
-        .args(["route", "add", &ip_range, "via", local_ip, "dev", link_dev])
+        .args([
+            "route",
+            "add",
+            &ip_range,
+            "via",
+            &server_config.local_ip.as_ref().unwrap(),
+            "dev",
+            &server_config.link_dev.as_ref().unwrap(),
+        ])
         .output()
         .expect("Failed to execute IP ROUTE command");
 
     if !route_output.status.success() {
-        eprintln!("Failed to set route: {}", String::from_utf8_lossy(&route_output.stderr));
+        eprintln!(
+            "Failed to set route: {}",
+            String::from_utf8_lossy(&route_output.stderr)
+        );
     }
     // sudo iptables -t nat -A POSTROUTING -o enp39s0 -j MASQUERADE
     let iptables = Command::new("iptables")
-        .args(["-t", "nat", "-A", "POSTROUTING", "-o", link_dev, "-j", "MASQUERADE"])
+        .args([
+            "-t",
+            "nat",
+            "-A",
+            "POSTROUTING",
+            "-o",
+            &server_config.link_dev.as_ref().unwrap(),
+            "-j",
+            "MASQUERADE",
+        ])
         .output()
         .expect("Failed to execute ip tables cmd");
     if !iptables.status.success() {
-        error!("Failed to set up iptables: {}", String::from_utf8_lossy(&iptables.stderr));
+        error!(
+            "Failed to set up iptables: {}",
+            String::from_utf8_lossy(&iptables.stderr)
+        );
     }
 
     // Allow ipv4 proxying
@@ -1245,7 +1306,10 @@ fn set_ip_settings(
         .output()
         .expect("Failed to execute sysctl command!");
     if !sysctl_cmd.status.success() {
-        error!("Failed to allow ipv4 forwarding: {}", String::from_utf8_lossy(&sysctl_cmd.stderr));
+        error!(
+            "Failed to allow ipv4 forwarding: {}",
+            String::from_utf8_lossy(&sysctl_cmd.stderr)
+        );
     }
 
     Ok(())
@@ -1260,7 +1324,10 @@ fn destroy_tun_interface() {
         .expect("Failed to execute command to delete TUN interface");
 
     if !output.status.success() {
-        eprintln!("Failed to delete TUN interface: {}", String::from_utf8_lossy(&output.stderr));
+        eprintln!(
+            "Failed to delete TUN interface: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }
 
@@ -1271,10 +1338,7 @@ fn destroy_tun_interface() {
 async fn tun_socket_handler(
     ip_handlers: Arc<Mutex<HashMap<Ipv4Addr, Sender<Vec<u8>>>>>,
     mut tun_sender: tokio::sync::mpsc::Receiver<Vec<u8>>,
-    tun_addr: String, 
-    tun_name: String,
-    local_ip: String,
-    link_dev: String
+    server_config: ServerConfig,
 ) {
     // first create tun socket
     let mut config = tun2::Configuration::default();
@@ -1285,12 +1349,10 @@ async fn tun_socket_handler(
     });
 
     //config.destination("192.168.0.71");
-    config.tun_name(&tun_name);
+    config.tun_name(&server_config.tun_name.as_ref().unwrap());
 
     let dev = tun2::create_as_async(&config).unwrap();
-    set_ip_settings(&tun_addr, &tun_name, &local_ip, &link_dev)
-        .unwrap_or_else(|e| panic!("Error setting up TUN: {e}"));
-    
+    set_ip_settings(server_config).unwrap_or_else(|e| panic!("Error setting up TUN: {e}"));
 
     let (mut reader, mut writer) = tokio::io::split(dev);
     // create reader thread
@@ -1298,19 +1360,30 @@ async fn tun_socket_handler(
     let read_t = tokio::spawn(async move {
         let mut buf = [0; 4096];
         loop {
-            let size = reader.read(&mut buf).await.expect("Could not read from reader");
+            let size = reader
+                .read(&mut buf)
+                .await
+                .expect("Could not read from reader");
             let pkt = &buf[..size];
             // parse packet to get destination ip
             // then send it to handler for dest ip
             if let Ok(ip_pkt) = Packet::new(&pkt[..size]) {
                 if let Some(ip_handler_) = ip_handlers.lock().await.get(&ip_pkt.destination()) {
-                    info!("Tun Handler received packet | Src: {} To: {}", &ip_pkt.source(), &ip_pkt.destination());
+                    info!(
+                        "Tun Handler received packet | Src: {} To: {}",
+                        &ip_pkt.source(),
+                        &ip_pkt.destination()
+                    );
                     ip_handler_
                         .send(pkt.to_vec())
                         .await
                         .expect("Could not send a message to ip handler channel!");
                 } else {
-                    debug!("Got packet for unknown client | Src: {} To: {}", &ip_pkt.source(), &ip_pkt.destination());
+                    debug!(
+                        "Got packet for unknown client | Src: {} To: {}",
+                        &ip_pkt.source(),
+                        &ip_pkt.destination()
+                    );
                 }
             }
         }
@@ -1396,7 +1469,7 @@ async fn connect_ip_handler(
             if let Some(mut pkt) = tun_receiver.recv().await {
                 // debug!("Received TUN message size {}", pkt.len());
                 // Decrease ttl
-                pkt[8] = pkt[8] -1;
+                pkt[8] = pkt[8] - 1;
                 recalculate_checksum(&mut pkt);
 
                 let to_send = encapsulate_ipv4(pkt, &flow_id, &0);
@@ -1415,7 +1488,10 @@ async fn connect_ip_handler(
             // and handles them (sends them to the TUN interface)
             if let Some(pkt) = http3_receiver.recv().await {
                 match pkt {
-                    Content::Request { headers: _, stream_id_sender: _ } => unreachable!(),
+                    Content::Request {
+                        headers: _,
+                        stream_id_sender: _,
+                    } => unreachable!(),
                     Content::Headers { headers: _ } => unreachable!(),
                     Content::Data { data } => {
                         // Parse and handle received capsule
@@ -1471,21 +1547,22 @@ async fn connect_ip_handler(
                             debug!("Received non-zero context_id (not implemented)!");
                             continue;
                         }
-                        
+
                         let pkt = &payload[length..];
                         match get_ip_version(&pkt) {
                             4 => {
-                                match check_ipv4_packet(&pkt, 
-                                    (payload.len() - length) as u16) {
-                                    Ok(_) => {},
+                                match check_ipv4_packet(&pkt, (payload.len() - length) as u16) {
+                                    Ok(_) => {}
                                     Err(Ipv4CheckError::WrongChecksumError) => {
                                         error!("Received IPv4 packet with invalid checksum, discarding..");
                                         continue;
-                                    },
+                                    }
                                     Err(Ipv4CheckError::WrongSizeError) => {
-                                        error!("Received IPv4 packet with invalid size, discarding...");
+                                        error!(
+                                            "Received IPv4 packet with invalid size, discarding..."
+                                        );
                                         continue;
-                                    },
+                                    }
                                 }
                                 // If packet TTL is 0 or will be 0 after decreasing, discard
                                 if get_ipv4_ttl(&pkt) <= 1 {
@@ -1497,11 +1574,12 @@ async fn connect_ip_handler(
 
                                 // Check if we maybe know the destination address of the packet
                                 // In that case we can send the packet straight to that client
-                                // TODO: This might be slow if the writer thread is blocking this 
+                                // TODO: This might be slow if the writer thread is blocking this
                                 //       too much, test this more in depth!
                                 let dest = get_ipv4_pkt_dest(&payload[length..]);
                                 if let Some(ip_client) = clients.lock().await.get(&dest) {
-                                    ip_client.send(payload[length..].to_vec())
+                                    ip_client
+                                        .send(payload[length..].to_vec())
                                         .await
                                         .expect("IP Channel sender error!")
                                 } else {
@@ -1510,16 +1588,20 @@ async fn connect_ip_handler(
                                         .await
                                         .expect("Wasn't able to send ip packet to tun handler");
                                 }
-                            },
-                            6 => { continue; },
-                            n => { debug!("Received an invalid packet version: {n}"); }
+                            }
+                            6 => {
+                                continue;
+                            }
+                            n => {
+                                debug!("Received an invalid packet version: {n}");
+                            }
                         }
 
                         /*
                         let mut ip_packet = payload[length..].to_vec();
                         match ip::Packet::new(&payload[length..]) {
                             Ok(ip::Packet::V4(v)) => {
-                                
+
                                 if !v.is_valid() {
                                     debug!(
                                         "Received invalid ipv4 packet, discarding. chksm hdr: {} | calculated: {}",
@@ -1535,7 +1617,7 @@ async fn connect_ip_handler(
                                 }
                                 ip_packet[8] = ttl - 1;
                                 recalculate_checksum(&mut ip_packet);
-                                
+
                                 // Check if we maybe know the destination address of the packet
                                 // In that case we can send the packet straight to that client
                                 if let Some(ip_client) = clients.lock().await.get(&v.destination()) {

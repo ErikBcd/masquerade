@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use masquerade_proxy::http::Http1Client;
 use masquerade_proxy::socks::Socks5Client;
-use masquerade_proxy::server::Server;
+use masquerade_proxy::server::{Server, ServerConfig};
 
 use tokio::net::{TcpStream, TcpSocket, TcpListener, UdpSocket};
 use tokio::io::{AsyncWriteExt, AsyncReadExt};
@@ -15,7 +15,6 @@ pub const TIMEOUT_DURATION: Duration = Duration::from_secs(5);
 
 pub async fn setup_http1_client() -> Result<(TcpStream, TcpStream), Box<dyn Error>> {
     // set up a tunnel: first TCP socket <-> listen_addr <--masquerade--> server_addr <-> second TCP socket
-
     let mut server = Server::new();
     server.bind("127.0.0.1:0").await?;
     let server_addr = server.listen_addr().unwrap();
@@ -25,10 +24,14 @@ pub async fn setup_http1_client() -> Result<(TcpStream, TcpStream), Box<dyn Erro
     let listen_addr = client.listen_addr().unwrap();
 
     tokio::spawn(async move {
-        server.run("10.8.0.1/24".to_string(), 
-            "tun0".to_string(), 
-            "127.0.0.1".to_string(), 
-            "lo".to_string()).await.unwrap_or_else(|e| 
+        server.run(
+            ServerConfig {
+                bind_addr: Some("0.0.0.0:4433".to_owned()),
+                tun_addr: Some("10.8.0.1/24".to_owned()),
+                tun_name: Some("tunMS".to_owned()),
+                local_ip: Some("0.0.0.0".to_owned()),
+                link_dev: Some("lo".to_owned()),
+        }).await.unwrap_or_else(|e| 
             println!("http1 test: failed tp run server: {:?}", e));
     });
     tokio::spawn(async move {
@@ -106,10 +109,13 @@ pub async fn setup_socks5_tcp_client() -> Result<(TcpStream, TcpStream), Box<dyn
 
     tokio::spawn(async move {
         server.run(
-            "10.8.0.1/24".to_string(), 
-            "tun0".to_string(), 
-            "127.0.0.1".to_string(), 
-            "lo".to_string()).await.unwrap_or_else(|e| 
+            ServerConfig {
+                bind_addr: Some("0.0.0.0:4433".to_owned()),
+                tun_addr: Some("10.8.0.1/24".to_owned()),
+                tun_name: Some("tunMS".to_owned()),
+                local_ip: Some("0.0.0.0".to_owned()),
+                link_dev: Some("lo".to_owned()),
+        }).await.unwrap_or_else(|e| 
             println!("socks5 udp test: failed tp run server: {:?}", e));
     });
     tokio::spawn(async move {
@@ -169,10 +175,15 @@ pub async fn setup_socks5_udp_client() -> Result<(UdpSocket, TcpStream), Box<dyn
     let listen_addr = client.listen_addr().unwrap();
 
     tokio::spawn(async move {
-        server.run("10.8.0.1/24".to_string(), 
-            "tun0".to_string(), 
-            "127.0.0.1".to_string(), 
-            "lo".to_string()).await.unwrap_or_else(|e| 
+        server.run(
+            ServerConfig {
+                bind_addr: Some("0.0.0.0:4433".to_owned()),
+                tun_addr: Some("10.8.0.1/24".to_owned()),
+                tun_name: Some("tunMS".to_owned()),
+                local_ip: Some("0.0.0.0".to_owned()),
+                link_dev: Some("lo".to_owned()),
+            }
+        ).await.unwrap_or_else(|e| 
             println!("socks5 udp test: failed tp run server: {:?}", e));
     });
     tokio::spawn(async move {
