@@ -7,7 +7,6 @@ use std::u64;
 
 use log::*;
 use octets::varint_len;
-use packet::ip;
 use quiche::h3::NameValue;
 use quiche::Connection;
 use ring::rand::{SecureRandom, SystemRandom};
@@ -247,50 +246,53 @@ async fn ip_message_handler(
     conn_info: ConnectIpInfo,
     device_addr: Ipv4Addr,
 ) {
-    let version = pkt.message[0] >> 4;
-    // Header length is given in 32bit words. A header value of 0b1111 = 15, 15*32=480bit=60byte
-    let header_length = 4 * (pkt.message[0] & 0b1111);
-    debug!("[ip_message_handler] got message! ip version={version} | header len={header_length}");
-    if version == 4 {
-        match pkt.dir {
-            Direction::ToServer => {
-                set_ipv4_pkt_source(&mut pkt.message, &conn_info.assigned_ip);
-                // Recalculate checksum after ipv4 change
-                recalculate_checksum(&mut pkt.message);
-                info!("[ip_handler_t] Sending ipv4 packet to server");
-                match http3_dispatch
-                    .send(encapsulate_ipv4(pkt.message, &conn_info.flow_id, &0))
-                    .await
-                {
-                    Ok(()) => {}
-                    Err(e) => {
-                        error!("[ip_handler_t] Error sending to quic dispatch: {}", e);
-                    }
-                };
-            }
-            Direction::ToClient => {
-                // Send this to the ip dispatcher
-                set_ipv4_pkt_destination(&mut pkt.message, &device_addr);
-                // Recalculate checksum after ipv4 change
-                recalculate_checksum(&mut pkt.message);
-
-                debug!(
-                    "[ip_handler_t] Sending IPv4 packet towards client (tun): {:?}",
-                    pkt.message
-                );
-                match ip_dispatch.send(pkt.message).await {
-                    Ok(()) => {}
-                    Err(e) => {
-                        error!("[ip_handler_t] Error sending to ip dispatch: {}", e);
+    debug!("[ip_message_handler] got message! ip version={} | header len={}", 
+        get_ip_version(&pkt.message),
+        get_ip_header_length(&pkt.message));
+    match get_ip_version(&pkt.message) {
+        4 => {
+            match pkt.dir {
+                Direction::ToServer => {
+                    set_ipv4_pkt_source(&mut pkt.message, &conn_info.assigned_ip);
+                    // Recalculate checksum after ipv4 change
+                    recalculate_checksum(&mut pkt.message);
+                    info!("[ip_handler_t] Sending ipv4 packet to server");
+                    match http3_dispatch
+                        .send(encapsulate_ipv4(pkt.message, &conn_info.flow_id, &0))
+                        .await
+                    {
+                        Ok(()) => {}
+                        Err(e) => {
+                            error!("[ip_handler_t] Error sending to quic dispatch: {}", e);
+                        }
+                    };
+                }
+                Direction::ToClient => {
+                    // Send this to the ip dispatcher
+                    set_ipv4_pkt_destination(&mut pkt.message, &device_addr);
+                    // Recalculate checksum after ipv4 change
+                    recalculate_checksum(&mut pkt.message);
+    
+                    debug!(
+                        "[ip_handler_t] Sending IPv4 packet towards client (tun): {:?}",
+                        pkt.message
+                    );
+                    match ip_dispatch.send(pkt.message).await {
+                        Ok(()) => {}
+                        Err(e) => {
+                            error!("[ip_handler_t] Error sending to ip dispatch: {}", e);
+                        }
                     }
                 }
             }
+        },
+        6 => {
+            debug!("[ip_handler_t] Received IPv6 messages at ip_handler_t, not supported!");
+        },
+        _ => {
+            error!("[ip_handler_t] Received message with unknown IP protocol.");
         }
-    } else if version == 6 {
-        debug!("[ip_handler_t] Received IPv6 messages at ip_handler_t, not supported!");
-    } else {
-        error!("[ip_handler_t] Received message with unknown IP protocol.");
-    }
+    };
 }
 
 /// 
@@ -387,15 +389,22 @@ async fn quic_conn_handler(
                 if context_id != 0 {
                     continue;
                 }
-                // If this is a valid ipv4 packet
+                
                 let header_len = varint_len(flow_id) + varint_len(context_id);
-                match ip::Packet::new(buf[header_len..len].to_vec().as_slice()) {
-                    Ok(ip::Packet::V4(v)) => {
-                        debug!("Received IPv4 packet via http3");
-                        // Check if the ip packet was valid first, if not we discard of it
-                        if !v.is_valid() {
-                            info!("Received invalid ipv4 packet, discarding..");
-                            continue;
+                match get_ip_version_from_slice(&buf[header_len..len]) {
+                    4 => {
+                        // Check if packet is valid (checksum check)
+                        match check_ipv4_packet(&buf[header_len..len], 
+                                (len - header_len) as u16) {
+                            Ok(_) => {},
+                            Err(Ipv4CheckError::WrongChecksumError) => {
+                                debug!("Received IPv4 packet with invalid checksum, discarding..");
+                                continue;
+                            },
+                            Err(Ipv4CheckError::WrongSizeError) => {
+                                debug!("Received IPv4 packet with invalid size, discarding...");
+                                continue;
+                            },
                         }
                         match ip_handler
                             .send(IpMessage {
@@ -409,15 +418,16 @@ async fn quic_conn_handler(
                                 debug!("Couldn't send ip packet to ip sender: {}", e);
                             }
                         }
-                    }
-                    Ok(ip::Packet::V6(_)) => {
+
+                    },
+                    6 => {
                         debug!("Received IPv6 packet via http3 (not implemented yet)");
                         continue;
+                    },
+                    v => {
+                        error!("Received packet with invalid version: {v}");
                     }
-                    Err(err) => {
-                        error!("Received an invalid packet: {:?}", err)
-                    }
-                }
+                };
             }
         }
 

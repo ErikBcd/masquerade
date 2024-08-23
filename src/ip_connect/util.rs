@@ -59,6 +59,39 @@ impl std::fmt::Display for QUICStreamError {
     }
 }
 
+#[inline]
+///
+/// Returns the version of the ip packet, given in the first nibble
+pub fn get_ip_version(pkt: &Vec<u8>) -> u8 {
+    pkt[0] >> 4
+}
+
+#[inline]
+///
+/// Returns the version of the ip packet slice, given in the first nibble
+pub fn get_ip_version_from_slice(pkt: &[u8]) -> u8 {
+    pkt[0] >> 4
+}
+
+#[inline]
+///
+/// Return the header length of a given packet
+/// The header len is at the second nibble of a ipv4 packet
+/// Header length is given in 32bit words. A header value of 0b1111 = 15, 15*32=480bit=60byte
+pub fn get_ip_header_length(pkt: &Vec<u8>) -> u8 {
+    4 * (pkt[0] & 0b1111)
+}
+
+#[inline]
+///
+/// Return the header length of a given packet slice
+/// The header len is at the second nibble of a ipv4 packet
+/// Header length is given in 32bit words. A header value of 0b1111 = 15, 15*32=480bit=60byte
+pub fn get_ip_header_length_from_slice(pkt: &[u8]) -> u8 {
+    4 * (pkt[0] & 0b1111)
+}
+
+#[inline]
 ///
 /// Sets the source ip address of a given IPv4 buffer to
 /// the given adress.
@@ -72,6 +105,7 @@ pub fn set_ipv4_pkt_source(pkt: &mut Vec<u8>, ip: &Ipv4Addr) {
     pkt[15] = ip.octets()[3];
 }
 
+#[inline]
 ///
 /// Sets the destination ip address of a given IPv4 buffer to
 /// the given adress.
@@ -85,6 +119,7 @@ pub fn set_ipv4_pkt_destination(pkt: &mut Vec<u8>, ip: &Ipv4Addr) {
     pkt[19] = ip.octets()[3];
 }
 
+#[inline]
 ///
 /// Reads the source addr of a given IPv4 packet.
 /// Warning: This does NOT check if this is a valid IP packet, or even if the pkt
@@ -92,6 +127,40 @@ pub fn set_ipv4_pkt_destination(pkt: &mut Vec<u8>, ip: &Ipv4Addr) {
 ///
 pub fn get_ipv4_pkt_source(pkt: &Vec<u8>) -> Ipv4Addr {
     Ipv4Addr::new(pkt[12], pkt[13], pkt[14], pkt[15])
+}
+
+#[inline]
+///
+/// Read the checksum of a ipv4 packet
+/// Does not *calculate* the checksum, only reads it from the header!
+pub fn get_ipv4_hdr_checksum(pkt: &Vec<u8>) -> u16 {
+    u16::from_be_bytes([pkt[10], pkt[11]])
+}
+
+#[inline]
+///
+/// Read the checksum of a ipv4 packet
+/// Does not *calculate* the checksum, only reads it from the header!
+pub fn get_ipv4_hdr_checksum_from_slice(pkt: &[u8]) -> u16 {
+    u16::from_be_bytes([pkt[10], pkt[11]])
+}
+
+#[derive(Debug)]
+pub enum Ipv4CheckError {
+    WrongChecksumError,
+    WrongSizeError,
+}
+
+pub fn check_ipv4_packet(pkt: &[u8], len: u16) -> Result<(), Ipv4CheckError> {
+    if u16::from(get_ip_header_length_from_slice(&pkt)) 
+        >= len {
+        return Err(Ipv4CheckError::WrongSizeError)
+    }
+    if get_ipv4_hdr_checksum_from_slice(&pkt) 
+        != v4::checksum(&pkt) {
+        return Err(Ipv4CheckError::WrongChecksumError)
+    }
+    Ok(())
 }
 
 /// Updates the checksum of a IPv4 header to be correct.
@@ -175,6 +244,7 @@ pub fn recalculate_checksum(pkt: &mut Vec<u8>) {
     let ip_ver = pkt[0] >> 4;
 
     if ip_ver == 6 {
+        // TODO: Implement recalculation for ipv6 packets
         todo!();
     }
 
