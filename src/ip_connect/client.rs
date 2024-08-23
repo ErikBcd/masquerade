@@ -23,7 +23,7 @@ use crate::ip_connect::capsules::{
 };
 use crate::ip_connect::util::*;
 
-const MAX_CHANNEL_MSG: usize = 10;
+const MAX_CHANNEL_MSG: usize = 50;
 
 /// 
 /// Information about packets, wether they are

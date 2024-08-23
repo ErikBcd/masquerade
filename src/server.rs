@@ -27,7 +27,7 @@ use crate::ip_connect::capsules::*;
 use crate::ip_connect::client::encapsulate_ipv4;
 use crate::ip_connect::util::*;
 
-const MAX_CHANNEL_MESSAGES: usize = 10;
+const MAX_CHANNEL_MESSAGES: usize = 50;
 
 #[derive(Debug)]
 pub enum ClientError {
