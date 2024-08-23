@@ -137,7 +137,7 @@ impl Capsule {
             }
         };
 
-        return oct.to_vec();
+        oct.to_vec()
     }
 
     pub fn as_address_assign(&self) -> Option<&AddressAssign> {
@@ -196,7 +196,7 @@ impl AddressAssign {
             })
         }
         Ok(AddressAssign {
-            length: length,
+            length,
             assigned_address: adresses,
         })
     }
@@ -253,7 +253,7 @@ impl AddressRequest {
             })
         }
         Ok(AddressRequest {
-            length: length,
+            length,
             requested: adresses,
         })
     }
@@ -312,7 +312,7 @@ impl RouteAdvertisement {
             });
         }
         Ok(RouteAdvertisement {
-            length: length,
+            length,
             addr_ranges: adv,
         })
     }

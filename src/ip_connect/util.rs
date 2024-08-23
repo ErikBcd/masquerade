@@ -147,12 +147,12 @@ pub enum Ipv4CheckError {
 }
 
 pub fn check_ipv4_packet(pkt: &[u8], len: u16) -> Result<(), Ipv4CheckError> {
-    if u16::from(get_ip_header_length(&pkt)) 
+    if u16::from(get_ip_header_length(pkt)) 
         >= len {
         return Err(Ipv4CheckError::WrongSizeError)
     }
     let hdr_len = usize::from(get_ip_header_length(pkt));
-    if get_ipv4_hdr_checksum(&pkt) 
+    if get_ipv4_hdr_checksum(pkt) 
         != v4::checksum(&pkt[..hdr_len]) {
         
         return Err(Ipv4CheckError::WrongChecksumError)
@@ -219,8 +219,8 @@ pub fn calculate_tcp_udp_checksum(
     let mut chk: u32 = 0;
 
     chk += checksum_add(payload_len, &pkt[ip_header_len..]);
-    chk += checksum_add(4, &source);
-    chk += checksum_add(4, &dest);
+    chk += checksum_add(4, source);
+    chk += checksum_add(4, dest);
     chk += u32::from(proto) + (payload_len as u32);
 
     while chk >> 16 != 0 {

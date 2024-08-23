@@ -72,9 +72,9 @@ pub fn get_next_ipv4(
     ip: Ipv4Addr,
     netmask: u32,
 ) -> Result<Ipv4Addr, IPError> {
-    let temp = ip.clone();
+    let temp = ip;
     let mut val: u32 = u32::from(temp);
-    let compare = val.clone();
+    let compare = val;
     val += 1;
     if (val & netmask) == (compare & netmask) {
         Ok(Ipv4Addr::from(val))
@@ -143,7 +143,7 @@ pub fn decode_var_int(data: &[u8]) -> (u64, &[u8]) {
 
     // Once the length is known, remove these bits and read any
     // remaining bytes.
-    v = v & 0x3f;
+    v &= 0x3f;
     for i in 1..length-1 {
         v = (v << 8) + Into::<u64>::into(data[i]);
     }
@@ -167,7 +167,7 @@ pub fn decode_var_int_get_length(data: &[u8]) -> (u64, usize) {
 
     // Once the length is known, remove these bits and read any
     // remaining bytes.
-    v = v & 0x3f;
+    v &= 0x3f;
     for i in 1..length-1 {
         v = (v << 8) + Into::<u64>::into(data[i]);
     }
@@ -194,7 +194,7 @@ pub fn encode_var_int(v: u64) -> Vec<u8> {
 
     let mut encoded = v.to_be_bytes()[..length].to_vec();
     let prefix: u8 = prefix << 6;
-    encoded[0] = encoded[0] | prefix;
+    encoded[0] |= prefix;
     encoded
 }
 
