@@ -234,17 +234,16 @@ async fn ip_handler_t(
             );
             let http3_dispatch_clone = http3_dispatch.clone();
             let ip_disp_clone = ip_dispatch.clone();
-            let ip_addr_clone = device_addr.clone();
-            let _ = tokio::spawn(async move {
-                ip_message_handler(
-                    pkt,
-                    http3_dispatch_clone,
-                    ip_disp_clone,
-                    conn_info,
-                    ip_addr_clone,
-                )
-                .await
-            });
+            let ip_addr_clone = device_addr;
+            ip_message_handler(
+                pkt,
+                http3_dispatch_clone,
+                ip_disp_clone,
+                conn_info,
+                ip_addr_clone,
+            )
+            .await;
+            
         }
         debug!("[ip_handler_t] Handled a packet!");
     }
@@ -490,13 +489,12 @@ async fn quic_conn_handler(
                                     hdrs_to_strings(&list),
                                     stream_id
                                 );
-                                if stream.lock().await.stream_id.is_some() {
-                                    if stream.lock().await.stream_id.unwrap() == stream_id {
-                                        let binding = stream.as_ref().lock().await;
-                                        let sender = binding.stream_sender.as_ref().unwrap();
-                                        sender.send(Content::Headers { headers: list })
-                                            .expect("Couldn't send headers through channel!");
-                                    }
+                                if stream.lock().await.stream_id.is_some() 
+                                    && stream.lock().await.stream_id.unwrap() == stream_id {
+                                    let binding = stream.as_ref().lock().await;
+                                    let sender = binding.stream_sender.as_ref().unwrap();
+                                    sender.send(Content::Headers { headers: list })
+                                        .expect("Couldn't send headers through channel!");
                                 }
                             }
 
