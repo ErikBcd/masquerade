@@ -117,10 +117,10 @@ impl Server {
      * Get the socket address the server is bound to. Returns None if server is not bound to a socket yet
      */
     pub fn listen_addr(&self) -> Option<SocketAddr> {
-        return self
+        self
             .socket
             .clone()
-            .map(|socket| socket.local_addr().unwrap());
+            .map(|socket| socket.local_addr().unwrap())
     }
 
     /**
@@ -353,7 +353,7 @@ impl Server {
                 tokio::spawn(async move {
                     handle_client(
                         client,
-                        current_ip.clone(),
+                        current_ip,
                         &tun_sender_clone,
                         ip_connect_clients_clone,
                     )
@@ -434,7 +434,7 @@ async fn handle_client(
                     let result = match &to_send.content {
                         Content::Request { headers: _, stream_id_sender: _} => unreachable!(),
                         Content::Headers { headers } => {
-                            debug!("sending http3 response {:?}", hdrs_to_strings(&headers));
+                            debug!("sending http3 response {:?}", hdrs_to_strings(headers));
                             http3_conn.send_response(&mut client.conn, to_send.stream_id, headers, to_send.finished)
                         },
                         Content::Data { data } => {
@@ -457,7 +457,7 @@ async fn handle_client(
                         Content::Datagram { payload } => {
                             debug!("sending http3 datagram of {} bytes to flow {}", payload.len(), to_send.stream_id);
                             //http3_conn.send_dgram(&mut client.conn, to_send.stream_id, &payload)
-                            match send_h3_dgram(&mut client.conn, to_send.stream_id, &payload) {
+                            match send_h3_dgram(&mut client.conn, to_send.stream_id, payload) {
                                         Ok(v) => Ok(v),
                                         Err(e) => {
                                             error!("sending http3 datagram failed! {:?}", e);
@@ -534,7 +534,7 @@ async fn handle_client(
                             &mut connect_sockets,
                             &mut connect_streams,
                             &mut connect_ip_session,
-                            &tun_sender,
+                            tun_sender,
                             &client_ip,
                             &ip_connect_clients).await {
                                 Ok(_) => {},
@@ -553,7 +553,7 @@ async fn handle_client(
                 let result = match &to_send.content {
                     Content::Request { headers: _, stream_id_sender: _ } => unreachable!(),
                     Content::Headers { headers } => {
-                        debug!("retry sending http3 response {:?}", hdrs_to_strings(&headers));
+                        debug!("retry sending http3 response {:?}", hdrs_to_strings(headers));
                         http3_conn.send_response(&mut client.conn, to_send.stream_id, headers, to_send.finished)
                     },
                     Content::Data { data } => {
@@ -576,7 +576,7 @@ async fn handle_client(
                     Content::Datagram { payload } => {
                         debug!("retry sending http3 datagram of {} bytes", payload.len());
                        // http3_conn.send_dgram(&mut client.conn, to_send.stream_id, &payload)
-                        match send_h3_dgram(&mut client.conn, to_send.stream_id, &payload) {
+                        match send_h3_dgram(&mut client.conn, to_send.stream_id, payload) {
                                         Ok(v) => Ok(v),
                                         Err(e) => {
                                             error!("sending http3 datagram failed: {:?}", e);
@@ -658,10 +658,10 @@ async fn handle_client(
  */
 fn path_to_socketaddr(path: &[u8]) -> Option<net::SocketAddr> {
     // for now, let's assume path pattern is "/something.../target-host/target-port/"
-    let mut split_iter = std::io::BufRead::split(path, b'/');
+    let split_iter = std::io::BufRead::split(path, b'/');
     let mut second_last = None;
     let mut last = None;
-    while let Some(curr) = split_iter.next() {
+    for curr in split_iter {
         if let Ok(curr) = curr {
             second_last = last;
             last = Some(curr);
@@ -1003,14 +1003,14 @@ async fn handle_http3_event(
                     );
                 }
             }
-            if connect_ip_clients.lock().await.contains_key(&next_free_ip) {
+            if connect_ip_clients.lock().await.contains_key(next_free_ip) {
                 // stop the connect_ip_connection
                 {
                     let ip_session = connect_ip_session.as_ref().unwrap();
                     ip_session.handler_thread.as_ref().unwrap().abort();
                 }
                 connect_ip_session.take();
-                connect_ip_clients.lock().await.remove(&next_free_ip);
+                connect_ip_clients.lock().await.remove(next_free_ip);
             }
             remove_stream(connect_streams, stream_id, &mut client.conn);
         }
@@ -1038,14 +1038,14 @@ async fn handle_http3_event(
                     );
                 }
             }
-            if connect_ip_clients.lock().await.contains_key(&next_free_ip) {
+            if connect_ip_clients.lock().await.contains_key(next_free_ip) {
                 // stop the connect_ip_connection
                 {
                     let ip_session = connect_ip_session.as_ref().unwrap();
                     ip_session.handler_thread.as_ref().unwrap().abort();
                 }
                 connect_ip_session.take();
-                connect_ip_clients.lock().await.remove(&next_free_ip);
+                connect_ip_clients.lock().await.remove(next_free_ip);
             }
             remove_stream(connect_streams, stream_id, &mut client.conn);
         }
@@ -1054,12 +1054,12 @@ async fn handle_http3_event(
         Ok((_goaway_id, quiche::h3::Event::GoAway)) => unreachable!(),
 
         Err(quiche::h3::Error::Done) => {
-            return Err(ClientError::Other(format!("quiche error: Done")));
+            return Err(ClientError::Other("quiche error: Done".to_string()));
         }
 
         Err(e) => {
             error!("{} HTTP/3 error {:?}", client.conn.trace_id(), e);
-            return Err(ClientError::Other(format!("HTTP/3 error")));
+            return Err(ClientError::Other("HTTP/3 error".to_string()));
         }
     }
     Ok(())
@@ -1130,7 +1130,7 @@ async fn tcp_stream_handler(
             );
             http3_sender_clone_1
                 .send(ToSend {
-                    stream_id: stream_id,
+                    stream_id,
                     content: Content::Data {
                         data: buf[..read].to_vec(),
                     },
@@ -1140,7 +1140,7 @@ async fn tcp_stream_handler(
         }
         http3_sender_clone_1
             .send(ToSend {
-                stream_id: stream_id,
+                stream_id,
                 content: Content::Finished,
                 finished: true,
             })
@@ -1212,7 +1212,7 @@ fn set_ip_settings(server_config: ServerConfig) -> Result<(), Box<dyn Error>> {
             "link",
             "set",
             "dev",
-            &server_config.tun_name.as_ref().unwrap(),
+            (server_config.tun_name.as_ref().unwrap()),
             "up",
         ])
         .output()?;
@@ -1229,9 +1229,9 @@ fn set_ip_settings(server_config: ServerConfig) -> Result<(), Box<dyn Error>> {
         .args([
             "addr",
             "add",
-            &server_config.tun_addr.as_ref().unwrap(),
+            (server_config.tun_addr.as_ref().unwrap()),
             "dev",
-            &server_config.tun_name.as_ref().unwrap(),
+            (server_config.tun_name.as_ref().unwrap()),
         ])
         .output()?;
 
@@ -1265,9 +1265,9 @@ fn set_ip_settings(server_config: ServerConfig) -> Result<(), Box<dyn Error>> {
             "add",
             &ip_range,
             "via",
-            &server_config.local_ip.as_ref().unwrap(),
+            (server_config.local_ip.as_ref().unwrap()),
             "dev",
-            &server_config.link_dev.as_ref().unwrap(),
+            (server_config.link_dev.as_ref().unwrap()),
         ])
         .output()
         .expect("Failed to execute IP ROUTE command");
@@ -1286,7 +1286,7 @@ fn set_ip_settings(server_config: ServerConfig) -> Result<(), Box<dyn Error>> {
             "-A",
             "POSTROUTING",
             "-o",
-            &server_config.link_dev.as_ref().unwrap(),
+            (server_config.link_dev.as_ref().unwrap()),
             "-j",
             "MASQUERADE",
         ])
@@ -1349,7 +1349,7 @@ async fn tun_socket_handler(
     });
 
     //config.destination("192.168.0.71");
-    config.tun_name(&server_config.tun_name.as_ref().unwrap());
+    config.tun_name(server_config.tun_name.as_ref().unwrap());
 
     let dev = tun2::create_as_async(&config).unwrap();
     set_ip_settings(server_config).unwrap_or_else(|e| panic!("Error setting up TUN: {e}"));
@@ -1441,7 +1441,7 @@ async fn tun_socket_handler(
         }
         (_, _) => {}
     }
-    let _ = destroy_tun_interface();
+    destroy_tun_interface();
 }
 
 async fn connect_ip_handler(
@@ -1469,7 +1469,7 @@ async fn connect_ip_handler(
             if let Some(mut pkt) = tun_receiver.recv().await {
                 // debug!("Received TUN message size {}", pkt.len());
                 // Decrease ttl
-                pkt[8] = pkt[8] - 1;
+                pkt[8] -= 1;
                 recalculate_checksum(&mut pkt);
 
                 let to_send = encapsulate_ipv4(pkt, &flow_id, &0);
@@ -1528,7 +1528,7 @@ async fn connect_ip_handler(
                                 req_cap.serialize(&mut cap_buf);
                                 http3_sender_clone_2
                                     .send(ToSend {
-                                        stream_id: stream_id,
+                                        stream_id,
                                         content: Content::Data {
                                             data: cap_buf.to_vec(),
                                         },
@@ -1549,9 +1549,9 @@ async fn connect_ip_handler(
                         }
 
                         let pkt = &payload[length..];
-                        match get_ip_version(&pkt) {
+                        match get_ip_version(pkt) {
                             4 => {
-                                match check_ipv4_packet(&pkt, (payload.len() - length) as u16) {
+                                match check_ipv4_packet(pkt, (payload.len() - length) as u16) {
                                     Ok(_) => {}
                                     Err(Ipv4CheckError::WrongChecksumError) => {
                                         error!("Received IPv4 packet with invalid checksum, discarding..");
@@ -1565,7 +1565,7 @@ async fn connect_ip_handler(
                                     }
                                 }
                                 // If packet TTL is 0 or will be 0 after decreasing, discard
-                                if get_ipv4_ttl(&pkt) <= 1 {
+                                if get_ipv4_ttl(pkt) <= 1 {
                                     debug!("TTL 0, discarding packet..");
                                     continue;
                                 }
@@ -1596,50 +1596,6 @@ async fn connect_ip_handler(
                                 debug!("Received an invalid packet version: {n}");
                             }
                         }
-
-                        /*
-                        let mut ip_packet = payload[length..].to_vec();
-                        match ip::Packet::new(&payload[length..]) {
-                            Ok(ip::Packet::V4(v)) => {
-
-                                if !v.is_valid() {
-                                    debug!(
-                                        "Received invalid ipv4 packet, discarding. chksm hdr: {} | calculated: {}",
-                                        v.checksum(),
-                                        checksum(&ip_packet)
-                                    );
-                                    continue;
-                                }
-                                // Decrease TTL of packet
-                                let ttl = v.ttl();
-                                if ttl == 0 {
-                                    continue;
-                                }
-                                ip_packet[8] = ttl - 1;
-                                recalculate_checksum(&mut ip_packet);
-
-                                // Check if we maybe know the destination address of the packet
-                                // In that case we can send the packet straight to that client
-                                if let Some(ip_client) = clients.lock().await.get(&v.destination()) {
-                                    info!("Client {} directly sending message to {}", v.source(), v.destination());
-                                    ip_client.send(ip_packet)
-                                        .await
-                                        .expect("IP Channel sender error!")
-                                } else {
-                                    tun_sender
-                                        .send(ip_packet)
-                                        .await
-                                        .expect("Wasn't able to send ip packet to tun handler");
-                                }
-                            }
-                            Ok(ip::Packet::V6(_)) => {
-                                //debug!("Received IPv6 packet via http3 (not implemented yet)");
-                                continue;
-                            }
-                            Err(err) => {
-                                debug!("Received an invalid packet: {:?}", err)
-                            }
-                        }*/
                     }
                     Content::Finished => unreachable!(), //TODO: Maybe we can actually use this to terminate connections?
                 }
@@ -1695,7 +1651,7 @@ async fn udp_connect_handler(
         error!("Error connecting to UDP {}", peer_addr);
         return;
     };
-    let peer_addr_clone = peer_addr.clone();
+    let peer_addr_clone = peer_addr;
     let socket = Arc::new(socket);
     let socket_clone = socket.clone();
     let read_task = tokio::spawn(async move {
@@ -1730,7 +1686,7 @@ async fn udp_connect_handler(
         }
     });
 
-    let peer_addr_clone_2 = peer_addr.clone();
+    let peer_addr_clone_2 = peer_addr;
     let write_task = tokio::spawn(async move {
         loop {
             let data = match udp_receiver.recv().await {
