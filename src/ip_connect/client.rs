@@ -391,7 +391,7 @@ async fn quic_conn_handler(
                 }
                 
                 let header_len = varint_len(flow_id) + varint_len(context_id);
-                match get_ip_version_from_slice(&buf[header_len..len]) {
+                match get_ip_version(&buf[header_len..len]) {
                     4 => {
                         // Check if packet is valid (checksum check)
                         match check_ipv4_packet(&buf[header_len..len], 

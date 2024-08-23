@@ -1,8 +1,6 @@
 use futures::lock::Mutex;
 use log::*;
 use octets::varint_len;
-use packet::icmp::checksum;
-use packet::ip;
 use packet::ip::v4::Packet;
 use quiche::h3::NameValue;
 use tokio::task::JoinHandle;
@@ -27,7 +25,7 @@ use ring::rand::*;
 use crate::common::*;
 use crate::ip_connect::capsules::*;
 use crate::ip_connect::client::encapsulate_ipv4;
-use crate::ip_connect::util::recalculate_checksum;
+use crate::ip_connect::util::*;
 
 const MAX_CHANNEL_MESSAGES: usize = 10;
 
@@ -1465,7 +1463,7 @@ async fn connect_ip_handler(
                             CapsuleType::RouteAdvertisement(_) => todo!(),
                         }
                     }
-                    Content::Datagram { payload } => {
+                    Content::Datagram { mut payload } => {
                         // just send the datagram
                         debug!("Received a datagram from connect-ip client");
                         let (context_id, length) = decode_var_int_get_length(&payload);
@@ -1473,6 +1471,51 @@ async fn connect_ip_handler(
                             debug!("Received non-zero context_id (not implemented)!");
                             continue;
                         }
+                        
+                        let pkt = &payload[length..];
+                        match get_ip_version(&pkt) {
+                            4 => {
+                                match check_ipv4_packet(&pkt, 
+                                    (payload.len() - length) as u16) {
+                                    Ok(_) => {},
+                                    Err(Ipv4CheckError::WrongChecksumError) => {
+                                        error!("Received IPv4 packet with invalid checksum, discarding..");
+                                        continue;
+                                    },
+                                    Err(Ipv4CheckError::WrongSizeError) => {
+                                        error!("Received IPv4 packet with invalid size, discarding...");
+                                        continue;
+                                    },
+                                }
+                                // If packet TTL is 0 or will be 0 after decreasing, discard
+                                if get_ipv4_ttl(&pkt) <= 1 {
+                                    debug!("TTL 0, discarding packet..");
+                                    continue;
+                                }
+                                payload[length + 8] -= 1;
+                                recalculate_checksum(&mut payload[length..]);
+
+                                // Check if we maybe know the destination address of the packet
+                                // In that case we can send the packet straight to that client
+                                // TODO: This might be slow if the writer thread is blocking this 
+                                //       too much, test this more in depth!
+                                let dest = get_ipv4_pkt_dest(&payload[length..]);
+                                if let Some(ip_client) = clients.lock().await.get(&dest) {
+                                    ip_client.send(payload[length..].to_vec())
+                                        .await
+                                        .expect("IP Channel sender error!")
+                                } else {
+                                    tun_sender
+                                        .send(payload[length..].to_vec())
+                                        .await
+                                        .expect("Wasn't able to send ip packet to tun handler");
+                                }
+                            },
+                            6 => { continue; },
+                            n => { debug!("Received an invalid packet version: {n}"); }
+                        }
+
+                        /*
                         let mut ip_packet = payload[length..].to_vec();
                         match ip::Packet::new(&payload[length..]) {
                             Ok(ip::Packet::V4(v)) => {
@@ -1514,7 +1557,7 @@ async fn connect_ip_handler(
                             Err(err) => {
                                 debug!("Received an invalid packet: {:?}", err)
                             }
-                        }
+                        }*/
                     }
                     Content::Finished => unreachable!(), //TODO: Maybe we can actually use this to terminate connections?
                 }

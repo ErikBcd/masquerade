@@ -61,34 +61,27 @@ impl std::fmt::Display for QUICStreamError {
 
 #[inline]
 ///
-/// Returns the version of the ip packet, given in the first nibble
-pub fn get_ip_version(pkt: &Vec<u8>) -> u8 {
-    pkt[0] >> 4
-}
-
-#[inline]
-///
 /// Returns the version of the ip packet slice, given in the first nibble
-pub fn get_ip_version_from_slice(pkt: &[u8]) -> u8 {
+pub fn get_ip_version(pkt: &[u8]) -> u8 {
     pkt[0] >> 4
 }
 
-#[inline]
-///
-/// Return the header length of a given packet
-/// The header len is at the second nibble of a ipv4 packet
-/// Header length is given in 32bit words. A header value of 0b1111 = 15, 15*32=480bit=60byte
-pub fn get_ip_header_length(pkt: &Vec<u8>) -> u8 {
-    4 * (pkt[0] & 0b1111)
-}
+
 
 #[inline]
 ///
 /// Return the header length of a given packet slice
 /// The header len is at the second nibble of a ipv4 packet
 /// Header length is given in 32bit words. A header value of 0b1111 = 15, 15*32=480bit=60byte
-pub fn get_ip_header_length_from_slice(pkt: &[u8]) -> u8 {
+pub fn get_ip_header_length(pkt: &[u8]) -> u8 {
     4 * (pkt[0] & 0b1111)
+}
+
+#[inline]
+///
+/// Return the ttl of a given packet slice
+pub fn get_ipv4_ttl(pkt: &[u8]) -> u8 {
+    pkt[8]
 }
 
 #[inline]
@@ -98,7 +91,7 @@ pub fn get_ip_header_length_from_slice(pkt: &[u8]) -> u8 {
 /// Warning: This does NOT check if this is a valid IP packet, or even if the pkt
 /// is long enough.
 ///
-pub fn set_ipv4_pkt_source(pkt: &mut Vec<u8>, ip: &Ipv4Addr) {
+pub fn set_ipv4_pkt_source(pkt: &mut [u8], ip: &Ipv4Addr) {
     pkt[12] = ip.octets()[0];
     pkt[13] = ip.octets()[1];
     pkt[14] = ip.octets()[2];
@@ -112,7 +105,7 @@ pub fn set_ipv4_pkt_source(pkt: &mut Vec<u8>, ip: &Ipv4Addr) {
 /// Warning: This does NOT check if this is a valid IP packet, or even if the pkt
 /// is long enough.
 ///
-pub fn set_ipv4_pkt_destination(pkt: &mut Vec<u8>, ip: &Ipv4Addr) {
+pub fn set_ipv4_pkt_destination(pkt: &mut [u8], ip: &Ipv4Addr) {
     pkt[16] = ip.octets()[0];
     pkt[17] = ip.octets()[1];
     pkt[18] = ip.octets()[2];
@@ -125,23 +118,25 @@ pub fn set_ipv4_pkt_destination(pkt: &mut Vec<u8>, ip: &Ipv4Addr) {
 /// Warning: This does NOT check if this is a valid IP packet, or even if the pkt
 /// is long enough.
 ///
-pub fn get_ipv4_pkt_source(pkt: &Vec<u8>) -> Ipv4Addr {
+pub fn get_ipv4_pkt_source(pkt: &[u8]) -> Ipv4Addr {
     Ipv4Addr::new(pkt[12], pkt[13], pkt[14], pkt[15])
 }
 
 #[inline]
 ///
-/// Read the checksum of a ipv4 packet
-/// Does not *calculate* the checksum, only reads it from the header!
-pub fn get_ipv4_hdr_checksum(pkt: &Vec<u8>) -> u16 {
-    u16::from_be_bytes([pkt[10], pkt[11]])
+/// Reads the destination addr of a given IPv4 packet.
+/// Warning: This does NOT check if this is a valid IP packet, or even if the pkt
+/// is long enough.
+///
+pub fn get_ipv4_pkt_dest(pkt: &[u8]) -> Ipv4Addr {
+    Ipv4Addr::new(pkt[16], pkt[17], pkt[18], pkt[19])
 }
 
 #[inline]
 ///
 /// Read the checksum of a ipv4 packet
 /// Does not *calculate* the checksum, only reads it from the header!
-pub fn get_ipv4_hdr_checksum_from_slice(pkt: &[u8]) -> u16 {
+pub fn get_ipv4_hdr_checksum(pkt: &[u8]) -> u16 {
     u16::from_be_bytes([pkt[10], pkt[11]])
 }
 
@@ -152,12 +147,12 @@ pub enum Ipv4CheckError {
 }
 
 pub fn check_ipv4_packet(pkt: &[u8], len: u16) -> Result<(), Ipv4CheckError> {
-    if u16::from(get_ip_header_length_from_slice(&pkt)) 
+    if u16::from(get_ip_header_length(&pkt)) 
         >= len {
         return Err(Ipv4CheckError::WrongSizeError)
     }
-    let hdr_len = usize::from(get_ip_header_length_from_slice(pkt));
-    if get_ipv4_hdr_checksum_from_slice(&pkt) 
+    let hdr_len = usize::from(get_ip_header_length(pkt));
+    if get_ipv4_hdr_checksum(&pkt) 
         != v4::checksum(&pkt[..hdr_len]) {
         
         return Err(Ipv4CheckError::WrongChecksumError)
@@ -172,7 +167,7 @@ pub fn check_ipv4_packet(pkt: &[u8], len: u16) -> Result<(), Ipv4CheckError> {
 ///     update_ipv4_checksum(&mut pkt.message, 60);
 /// ```
 ///
-pub fn update_ipv4_checksum(pkt: &mut Vec<u8>, header_length: u8) {
+pub fn update_ipv4_checksum(pkt: &mut [u8], header_length: u8) {
     let new_chcksm = v4::checksum(&pkt[..header_length.into()]).to_be_bytes();
     pkt[10] = new_chcksm[0];
     pkt[11] = new_chcksm[1];
@@ -196,10 +191,10 @@ fn checksum_add(len: usize, buf: &[u8]) -> u32 {
 ///  - https://gist.github.com/fxlv/81209bbd150abfeaceb1f85ff076c9f3
 ///  - http://profesores.elo.utfsm.cl/~agv/elo322/UDP_Checksum_HowTo.html
 pub fn calculate_tcp_udp_checksum(
-    source: Vec<u8>,
-    dest: Vec<u8>,
+    source: &[u8],
+    dest: &[u8],
     proto: u8,
-    pkt: &mut Vec<u8>,
+    pkt: &mut [u8],
     ip_header_len: usize,
 ) {
     if pkt.len() > 65535 {
@@ -241,7 +236,7 @@ pub fn calculate_tcp_udp_checksum(
 /// 
 /// Recalculates the checksum of a ipv4 packet.
 /// If the payload is TCP or UDP we also recalculate that checksum.
-pub fn recalculate_checksum(pkt: &mut Vec<u8>) {
+pub fn recalculate_checksum(pkt: &mut [u8]) {
     // First recalculate the ipv4 header checksum
     let ip_ver = pkt[0] >> 4;
 
@@ -259,7 +254,7 @@ pub fn recalculate_checksum(pkt: &mut Vec<u8>) {
     if proto != UDP_ID && proto != TCP_ID {
         return;
     }
-    let source = vec![pkt[12], pkt[13], pkt[14], pkt[15]];
-    let dest = vec![pkt[16], pkt[17], pkt[18], pkt[19]];
-    calculate_tcp_udp_checksum(source, dest, proto, pkt, header_length.into());
+    let source = [pkt[12], pkt[13], pkt[14], pkt[15]];
+    let dest = [pkt[16], pkt[17], pkt[18], pkt[19]];
+    calculate_tcp_udp_checksum(&source, &dest, proto, pkt, header_length.into());
 }
