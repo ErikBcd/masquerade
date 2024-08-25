@@ -96,8 +96,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     };
 
     info!("Starting server with config: {}", conf);
-    
-    let mut server = Server::new();
+    let mut server = Server::default();
     server.bind(conf.bind_addr.as_ref().unwrap()).await?;
 
     server.run(conf).await

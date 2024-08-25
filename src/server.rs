@@ -39,6 +39,9 @@ pub struct ServerConfig {
     pub link_dev: Option<String>,
 }
 
+/// Map of Senders to an connected IP client, mapped by their assigned IP adresses
+type ConnectIpClients = Arc<Mutex<HashMap<Ipv4Addr, Sender<Vec<u8>>>>>;
+
 impl std::fmt::Display for ServerConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(
@@ -104,15 +107,12 @@ struct Client {
 
 type ClientMap = HashMap<quiche::ConnectionId<'static>, mpsc::UnboundedSender<QuicReceived>>;
 
+#[derive(Default)]
 pub struct Server {
     socket: Option<Arc<UdpSocket>>,
 }
 
 impl Server {
-    pub fn new() -> Server {
-        Server { socket: None }
-    }
-
     /**
      * Get the socket address the server is bound to. Returns None if server is not bound to a socket yet
      */
@@ -213,7 +213,7 @@ impl Server {
             }
         };
 
-        let ip_connect_clients: Arc<Mutex<HashMap<Ipv4Addr, Sender<Vec<u8>>>>> =
+        let ip_connect_clients: ConnectIpClients =
             Arc::new(Mutex::new(HashMap::new()));
         let (tun_sender, tun_receiver) =
             tokio::sync::mpsc::channel::<Vec<u8>>(MAX_CHANNEL_MESSAGES);
@@ -396,6 +396,14 @@ impl Server {
     }
 }
 
+struct ClientHandler {
+    connect_streams: HashMap<u64, UnboundedSender<Vec<u8>>>,
+    connect_sockets: HashMap<u64, UnboundedSender<Vec<u8>>>,
+    connect_ip_session: Option<IpConnectSession>,
+    client_ip: Ipv4Addr,
+    http3_sender: mpsc::UnboundedSender<ToSend>,
+}
+
 /**
  * Client handler that handles the connection for a single client
  */
@@ -403,14 +411,17 @@ async fn handle_client(
     mut client: Client,
     client_ip: Ipv4Addr,
     tun_sender: &tokio::sync::mpsc::Sender<Vec<u8>>,
-    ip_connect_clients: Arc<Mutex<HashMap<Ipv4Addr, Sender<Vec<u8>>>>>,
+    ip_connect_clients: ConnectIpClients,
 ) {
     let mut http3_conn: Option<quiche::h3::Connection> = None;
-    let mut connect_streams: HashMap<u64, UnboundedSender<Vec<u8>>> = HashMap::new(); // for TCP CONNECT
-    let mut connect_sockets: HashMap<u64, UnboundedSender<Vec<u8>>> = HashMap::new(); // for CONNECT UDP
-    let mut connect_ip_session: Option<IpConnectSession> = None;
-
     let (http3_sender, mut http3_receiver) = mpsc::unbounded_channel::<ToSend>();
+    let mut client_handler = ClientHandler {
+        connect_streams: HashMap::new(),
+        connect_sockets: HashMap::new(),
+        connect_ip_session: None,
+        client_ip,
+        http3_sender
+    };
 
     let mut out = [0; MAX_DATAGRAM_SIZE];
 
@@ -466,7 +477,7 @@ async fn handle_client(
                                     }
                         },
                         Content::Finished => {
-                            remove_stream(&mut connect_streams, to_send.stream_id, &mut client.conn);
+                            remove_stream(&mut client_handler.connect_streams, to_send.stream_id, &mut client.conn);
                             Ok(())
                         },
                     };
@@ -474,7 +485,7 @@ async fn handle_client(
                         Ok(_) => {},
                         Err(quiche::h3::Error::StreamBlocked | quiche::h3::Error::Done) => {
                             if client.conn.stream_finished(to_send.stream_id) {
-                                remove_stream(&mut connect_streams, to_send.stream_id, &mut client.conn);
+                                remove_stream(&mut client_handler.connect_streams, to_send.stream_id, &mut client.conn);
                                 break;
                             }
 
@@ -484,7 +495,7 @@ async fn handle_client(
                         },
                         Err(e) => {
                             error!("A Connection {} stream {} send failed {:?}", client.conn.trace_id(), to_send.stream_id, e);
-                            remove_stream(&mut connect_streams, to_send.stream_id, &mut client.conn);
+                            remove_stream(&mut client_handler.connect_streams, to_send.stream_id, &mut client.conn);
                         }
                     };
                     to_send = match http3_receiver.try_recv() {
@@ -526,23 +537,12 @@ async fn handle_client(
                 if http3_conn.is_some() {
                     // Process HTTP/3 events.
                     let http3_conn = http3_conn.as_mut().unwrap();
-                    loop {
-                        match handle_http3_event(
-                            http3_conn,
-                            &mut client,
-                            http3_sender.clone(),
-                            &mut connect_sockets,
-                            &mut connect_streams,
-                            &mut connect_ip_session,
-                            tun_sender,
-                            &client_ip,
-                            &ip_connect_clients).await {
-                                Ok(_) => {},
-                                Err(_) => {
-                                    break;
-                                }
-                            };
-                    }
+                    while (handle_http3_event(
+                        http3_conn,
+                        &mut client,
+                        &mut client_handler,
+                        tun_sender,
+                        &ip_connect_clients).await).is_ok() {};
                 }
             },
 
@@ -598,7 +598,7 @@ async fn handle_client(
                         error!("B Connection {} stream {} send failed {:?}",
                             client.conn.trace_id(),
                             to_send.stream_id, e);
-                        remove_stream(&mut connect_streams, to_send.stream_id, &mut client.conn);
+                        remove_stream(&mut client_handler.connect_streams, to_send.stream_id, &mut client.conn);
                         http3_retry_send = None;
                     }
                 };
@@ -719,13 +719,9 @@ fn create_http3_conn(client: &mut Client) -> Option<quiche::h3::Connection> {
 async fn handle_http3_event(
     http3_conn: &mut quiche::h3::Connection,
     client: &mut Client,
-    http3_sender: UnboundedSender<ToSend>,
-    connect_sockets: &mut HashMap<u64, UnboundedSender<Vec<u8>>>,
-    connect_streams: &mut HashMap<u64, UnboundedSender<Vec<u8>>>,
-    connect_ip_session: &mut Option<IpConnectSession>,
+    client_handler: &mut ClientHandler,
     tun_sender: &tokio::sync::mpsc::Sender<Vec<u8>>,
-    next_free_ip: &Ipv4Addr,
-    connect_ip_clients: &Arc<Mutex<HashMap<Ipv4Addr, Sender<Vec<u8>>>>>,
+    connect_ip_clients: &ConnectIpClients,
 ) -> Result<(), ClientError> {
     let mut buf = [0; 65535];
     // Process datagram-related events.
@@ -738,16 +734,16 @@ async fn handle_http3_event(
             // length of the flow_id
 
             let flow_id_len = varint_len(flow_id);
-            if connect_sockets.contains_key(&flow_id) {
+            if client_handler.connect_sockets.contains_key(&flow_id) {
                 let data = &buf[flow_id_len..len];
-                connect_sockets
+                client_handler.connect_sockets
                     .get(&flow_id)
                     .unwrap()
                     .send(data.to_vec())
                     .expect("Send to udp connect handler failed.");
-            } else if connect_ip_session.is_some() {
+            } else if client_handler.connect_ip_session.is_some() {
                 {
-                    let ip_session = connect_ip_session.as_ref().unwrap();
+                    let ip_session = client_handler.connect_ip_session.as_ref().unwrap();
                     if ip_session.flow_id == flow_id {
                         let data = &buf[flow_id_len..len];
                         ip_session
@@ -801,12 +797,12 @@ async fn handle_http3_event(
                                 peer_addr,
                                 authority
                             );
-                            let http3_sender_clone_1 = http3_sender.clone();
-                            let http3_sender_clone_2 = http3_sender.clone();
+                            let http3_sender_clone_1 = client_handler.http3_sender.clone();
+                            let http3_sender_clone_2 = client_handler.http3_sender.clone();
                             let (udp_sender, udp_receiver) =
                                 mpsc::unbounded_channel::<Vec<u8>>();
                             let flow_id = stream_id / 4;
-                            connect_sockets.insert(flow_id, udp_sender);
+                            client_handler.connect_sockets.insert(flow_id, udp_sender);
 
                             tokio::spawn(async move {
                                 udp_connect_handler(
@@ -838,7 +834,7 @@ async fn handle_http3_event(
                         // acquire http3 and TUN sender clones
 
                         // For sending messages from the ip handler to the http3 sender
-                        let http3_sender_clone = http3_sender.clone();
+                        let http3_sender_clone = client_handler.http3_sender.clone();
 
                         // These are for receiving messages from the TUN device
                         let (tun_sender_from, from_tun_receiver) =
@@ -846,24 +842,24 @@ async fn handle_http3_event(
                         connect_ip_clients
                             .lock()
                             .await
-                            .insert(*next_free_ip, tun_sender_from);
+                            .insert(client_handler.client_ip, tun_sender_from);
 
                         // For sending received http3 messages to the ip connect handler
                         let (ip_http3_sender, ip_http3_receiver) =
                             mpsc::channel::<Content>(MAX_CHANNEL_MESSAGES);
                         let flow_id = stream_id / 4;
 
-                        if connect_ip_session.is_some() {
+                        if client_handler.connect_ip_session.is_some() {
                             debug!("Replacing old IpConnectSession!");
                             {
-                                let ip_session = connect_ip_session.as_ref().unwrap();
+                                let ip_session = client_handler.connect_ip_session.as_ref().unwrap();
                                 if !ip_session.handler_thread.as_ref().unwrap().is_finished() {
                                     ip_session.handler_thread.as_ref().unwrap().abort();
                                 }
                             }
                         }
                         let _ = std::mem::replace(
-                            connect_ip_session,
+                            &mut client_handler.connect_ip_session,
                             Some(IpConnectSession {
                                 flow_id,
                                 stream_id,
@@ -873,14 +869,14 @@ async fn handle_http3_event(
                         );
 
                         // spawn handler thread for this one
-                        let assigned_ip = *next_free_ip;
+                        let assigned_ip = client_handler.client_ip;
 
                         // For sending messages to the TUN device
                         let tun_sender_clone = tun_sender.clone();
 
                         // For looking up other clients
                         let connect_ip_clients_clone = connect_ip_clients.clone();
-                        connect_ip_session.as_mut().unwrap().handler_thread =
+                        client_handler.connect_ip_session.as_mut().unwrap().handler_thread =
                             Some(tokio::spawn(async move {
                                 connect_ip_handler(
                                     stream_id,
@@ -905,11 +901,11 @@ async fn handle_http3_event(
                         );
                         if let Ok(mut socket_addrs) = target_url.to_socket_addrs() {
                             let peer_addr = socket_addrs.next().unwrap();
-                            let http3_sender_clone_1 = http3_sender.clone();
-                            let http3_sender_clone_2 = http3_sender.clone();
+                            let http3_sender_clone_1 = client_handler.http3_sender.clone();
+                            let http3_sender_clone_2 = client_handler.http3_sender.clone();
                             let (tcp_sender, tcp_receiver) =
                                 mpsc::unbounded_channel::<Vec<u8>>();
-                            connect_streams.insert(stream_id, tcp_sender);
+                            client_handler.connect_streams.insert(stream_id, tcp_sender);
 
                             tokio::spawn(async move {
                                 tcp_stream_handler(
@@ -941,18 +937,18 @@ async fn handle_http3_event(
                 stream_id
             );
             while let Ok(read) = http3_conn.recv_body(&mut client.conn, stream_id, &mut buf) {
-                if connect_streams.contains_key(&stream_id) {
+                if client_handler.connect_streams.contains_key(&stream_id) {
                     debug!("got {} bytes of data on stream {}", read, stream_id);
                     trace!("{}", unsafe { std::str::from_utf8_unchecked(&buf[..read]) });
                     let data = &buf[..read];
-                    connect_streams
+                    client_handler.connect_streams
                         .get(&stream_id)
                         .unwrap()
                         .send(data.to_vec())
                         .expect("channel send failed");
-                } else if connect_ip_session.is_some() {
+                } else if client_handler.connect_ip_session.is_some() {
                     {
-                        let ip_session = connect_ip_session.as_ref().unwrap();
+                        let ip_session = client_handler.connect_ip_session.as_ref().unwrap();
                         if ip_session.stream_id == stream_id {
                             // connect-ip data, must be a capsule
                             debug!(
@@ -982,11 +978,11 @@ async fn handle_http3_event(
             info!("finished received, stream id: {} closing", stream_id);
             // TODO: do we need to shutdown the stream on our side?
             while let Ok(read) = http3_conn.recv_body(&mut client.conn, stream_id, &mut buf) {
-                if connect_streams.contains_key(&stream_id) {
+                if client_handler.connect_streams.contains_key(&stream_id) {
                     debug!("got {} bytes of data on stream {}", read, stream_id);
                     trace!("{}", unsafe { std::str::from_utf8_unchecked(&buf[..read]) });
                     let data = &buf[..read];
-                    connect_streams
+                    client_handler.connect_streams
                         .get(&stream_id)
                         .unwrap()
                         .send(data.to_vec())
@@ -998,16 +994,16 @@ async fn handle_http3_event(
                     );
                 }
             }
-            if connect_ip_clients.lock().await.contains_key(next_free_ip) {
+            if connect_ip_clients.lock().await.contains_key(&client_handler.client_ip) {
                 // stop the connect_ip_connection
                 {
-                    let ip_session = connect_ip_session.as_ref().unwrap();
+                    let ip_session = client_handler.connect_ip_session.as_ref().unwrap();
                     ip_session.handler_thread.as_ref().unwrap().abort();
                 }
-                connect_ip_session.take();
-                connect_ip_clients.lock().await.remove(next_free_ip);
+                client_handler.connect_ip_session.take();
+                connect_ip_clients.lock().await.remove(&client_handler.client_ip);
             }
-            remove_stream(connect_streams, stream_id, &mut client.conn);
+            remove_stream(&mut client_handler.connect_streams, stream_id, &mut client.conn);
         }
 
         Ok((stream_id, quiche::h3::Event::Reset(e))) => {
@@ -1017,11 +1013,11 @@ async fn handle_http3_event(
             );
             // TODO: do we need to shutdown the stream on our side?
             while let Ok(read) = http3_conn.recv_body(&mut client.conn, stream_id, &mut buf) {
-                if connect_streams.contains_key(&stream_id) {
+                if client_handler.connect_streams.contains_key(&stream_id) {
                     debug!("got {} bytes of data on stream {}", read, stream_id);
                     trace!("{}", unsafe { std::str::from_utf8_unchecked(&buf[..read]) });
                     let data = &buf[..read];
-                    connect_streams
+                    client_handler.connect_streams
                         .get(&stream_id)
                         .unwrap()
                         .send(data.to_vec())
@@ -1033,16 +1029,16 @@ async fn handle_http3_event(
                     );
                 }
             }
-            if connect_ip_clients.lock().await.contains_key(next_free_ip) {
+            if connect_ip_clients.lock().await.contains_key(&client_handler.client_ip) {
                 // stop the connect_ip_connection
                 {
-                    let ip_session = connect_ip_session.as_ref().unwrap();
+                    let ip_session = client_handler.connect_ip_session.as_ref().unwrap();
                     ip_session.handler_thread.as_ref().unwrap().abort();
                 }
-                connect_ip_session.take();
-                connect_ip_clients.lock().await.remove(next_free_ip);
+                client_handler.connect_ip_session.take();
+                connect_ip_clients.lock().await.remove(&client_handler.client_ip);
             }
-            remove_stream(connect_streams, stream_id, &mut client.conn);
+            remove_stream(&mut client_handler.connect_streams, stream_id, &mut client.conn);
         }
         Ok((_prioritized_element_id, quiche::h3::Event::PriorityUpdate)) => unreachable!(),
 
@@ -1331,7 +1327,7 @@ fn destroy_tun_interface() {
  * Will then create a writer and a reader thread which are connected to channels.
  */
 async fn tun_socket_handler(
-    ip_handlers: Arc<Mutex<HashMap<Ipv4Addr, Sender<Vec<u8>>>>>,
+    ip_handlers: ConnectIpClients,
     mut tun_sender: tokio::sync::mpsc::Receiver<Vec<u8>>,
     server_config: ServerConfig,
 ) {
@@ -1447,7 +1443,7 @@ async fn connect_ip_handler(
     tun_sender: tokio::sync::mpsc::Sender<Vec<u8>>,
     mut http3_receiver: tokio::sync::mpsc::Receiver<Content>,
     assigned_ip: Ipv4Addr,
-    clients: Arc<Mutex<HashMap<Ipv4Addr, Sender<Vec<u8>>>>>,
+    clients: ConnectIpClients,
 ) {
     debug!("Creating new IP connect handler!");
     let http3_sender_clone_1 = http3_sender.clone();
@@ -1462,7 +1458,6 @@ async fn connect_ip_handler(
             // The packets are confirmed to be ipv4 packets so we don't need to worry about anything.
             // Just create the http3 datagram and send the packet.
             if let Some(mut pkt) = tun_receiver.recv().await {
-                // debug!("Received TUN message size {}", pkt.len());
                 // Decrease ttl
                 pkt[8] -= 1;
                 recalculate_checksum(&mut pkt);
