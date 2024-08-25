@@ -19,7 +19,7 @@ use tun2::AsyncDevice;
 
 use crate::common::*;
 use crate::ip_connect::capsules::{
-    AddressRequest, Capsule, IpLength, RequestedAddress, ADDRESS_REQUEST_ID,
+    AddressRequest, Capsule, CapsuleType, IpLength, RequestedAddress, ADDRESS_REQUEST_ID
 };
 use crate::ip_connect::util::*;
 
@@ -520,7 +520,7 @@ async fn quic_conn_handler(
                                     };
 
                                     match parsed.capsule_type {
-                                        crate::ip_connect::capsules::CapsuleType::AddressAssign(c) => {
+                                        CapsuleType::AddressAssign(c) => {
                                             debug!("Received a AddressAssign capsule from the server!");
                                             // TODO: Check if this packet is correctly structured
                                             //       Potentially we also want to make sure that we can
@@ -547,12 +547,18 @@ async fn quic_conn_handler(
                                                 panic!("Received an ipv6 address even tho we only allow ipv4");
                                             }
                                         },
-                                        crate::ip_connect::capsules::CapsuleType::AddressRequest(_) => {
+                                        CapsuleType::AddressRequest(_) => {
                                             // We should not be receiving this one.
                                             error!("Received a AddressRequest capsule from the server!");
                                         },
-                                        crate::ip_connect::capsules::CapsuleType::RouteAdvertisement(_) => {
+                                        CapsuleType::RouteAdvertisement(_) => {
                                             error!("Received a RouteAdvertisement capsule from the server! Not implemented yet.");
+                                        },
+                                        CapsuleType::ClientIdentify(_) => {
+                                            todo!()
+                                        },
+                                        CapsuleType::ClientRegister(_) => {
+                                            todo!()
                                         },
                                     }
                                 }

@@ -86,46 +86,11 @@ async fn addr_assign_capsule_parsing_test() {
         length: 9,
         assigned_address: vec![ass_addr]
     };
-    
-    // Ensure both are the same
-    assert_eq!(
-        &cap.as_ref().unwrap().as_address_assign().unwrap().length, 
-        &addr_assign_real.length, 
-        "Testing on length: {} | {}",
-        &cap.as_ref().unwrap().as_address_assign().unwrap().length, 
-        &addr_assign_real.length, 
-    );
 
-    assert_eq!(
-        &cap.as_ref().unwrap().as_address_assign().unwrap().assigned_address[0].request_id, 
-        &addr_assign_real.assigned_address[0].request_id, 
-        "Testing for request ID: {} | {}",
-        &cap.as_ref().unwrap().as_address_assign().unwrap().assigned_address[0].request_id, 
-        &addr_assign_real.assigned_address[0].request_id, 
-    );
-
-    assert_eq!(
-        &cap.as_ref().unwrap().as_address_assign().unwrap().assigned_address[0].ip_version, 
-        &addr_assign_real.assigned_address[0].ip_version, 
-        "Testing for ip_version: {} | {}",
-        &cap.as_ref().unwrap().as_address_assign().unwrap().assigned_address[0].ip_version, 
-        &addr_assign_real.assigned_address[0].ip_version, 
-    );
-
-    assert_eq!(
-        &cap.as_ref().unwrap().as_address_assign().unwrap().assigned_address[0].ip_address, 
-        &addr_assign_real.assigned_address[0].ip_address, 
-        "Testing for IP: {} | {}",
-        &cap.as_ref().unwrap().as_address_assign().unwrap().assigned_address[0].ip_address, 
-        &addr_assign_real.assigned_address[0].ip_address, 
-    );
-
-    assert_eq!(
-        &cap.as_ref().unwrap().as_address_assign().unwrap().assigned_address[0].ip_prefix_len, 
-        &addr_assign_real.assigned_address[0].ip_prefix_len, 
-        "Testing for ip_prefix: {} | {}",
-        &cap.as_ref().unwrap().as_address_assign().unwrap().assigned_address[0].ip_prefix_len, 
-        &addr_assign_real.assigned_address[0].ip_prefix_len, 
+    assert_eq!(cap.as_ref().unwrap().as_address_assign().unwrap(), &addr_assign_real, 
+        "Testing Addr Assign Parsing. Parsed={:?} | Original={:?}", 
+        cap.as_ref().unwrap().as_address_assign().unwrap(),
+        &addr_assign_real
     );
 
     // Test serialization
@@ -171,46 +136,11 @@ async fn addr_request_capsule_parsing_test() {
         length: 9,
         requested: vec![ass_addr]
     };
-    
-    // Ensure both are the same
-    assert_eq!(
-        &cap.as_ref().unwrap().as_address_request().unwrap().length, 
-        &addr_request_real.length, 
-        "Testing on length: {} | {}",
-        &cap.as_ref().unwrap().as_address_request().unwrap().length, 
-        &addr_request_real.length, 
-    );
 
-    assert_eq!(
-        &cap.as_ref().unwrap().as_address_request().unwrap().requested[0].request_id, 
-        &addr_request_real.requested[0].request_id, 
-        "Testing for request ID: {} | {}",
-        &cap.as_ref().unwrap().as_address_request().unwrap().requested[0].request_id, 
-        &addr_request_real.requested[0].request_id, 
-    );
-
-    assert_eq!(
-        &cap.as_ref().unwrap().as_address_request().unwrap().requested[0].ip_version, 
-        &addr_request_real.requested[0].ip_version, 
-        "Testing for ip_version: {} | {}",
-        &cap.as_ref().unwrap().as_address_request().unwrap().requested[0].ip_version, 
-        &addr_request_real.requested[0].ip_version, 
-    );
-
-    assert_eq!(
-        &cap.as_ref().unwrap().as_address_request().unwrap().requested[0].ip_address, 
-        &addr_request_real.requested[0].ip_address, 
-        "Testing for IP: {} | {}",
-        &cap.as_ref().unwrap().as_address_request().unwrap().requested[0].ip_address, 
-        &addr_request_real.requested[0].ip_address, 
-    );
-
-    assert_eq!(
-        &cap.as_ref().unwrap().as_address_request().unwrap().requested[0].ip_prefix_len, 
-        &addr_request_real.requested[0].ip_prefix_len, 
-        "Testing for ip_prefix: {} | {}",
-        &cap.as_ref().unwrap().as_address_request().unwrap().requested[0].ip_prefix_len, 
-        &addr_request_real.requested[0].ip_prefix_len, 
+    assert_eq!(cap.as_ref().unwrap().as_address_request().unwrap(), &addr_request_real, 
+        "Testing Addr Request Parsing. Parsed={:?} | Original={:?}", 
+        cap.as_ref().unwrap().as_address_request().unwrap(),
+        &addr_request_real
     );
 
     // Test serialization
@@ -254,46 +184,106 @@ async fn route_advertisement_parsing_test() {
         length: 12,
         addr_ranges: vec![ass_addr]
     };
-    
-    // Ensure both are the same
-    assert_eq!(
-        &cap.as_ref().unwrap().as_route_advertisement().unwrap().length, 
-        &route_real.length, 
-        "Testing on length: {} | {}",
-        &cap.as_ref().unwrap().as_route_advertisement().unwrap().length, 
-        &route_real.length, 
+    //let temp = *cap.unwrap().as_route_advertisement().as_deref().unwrap();
+    assert_eq!(cap.as_ref().unwrap().as_route_advertisement().unwrap(), &route_real, 
+        "Testing Route Advertisement Parsing. Parsed={:?} | Original={:?}", 
+        cap.as_ref().unwrap().as_route_advertisement().unwrap(),
+        &route_real
     );
 
-    assert_eq!(
-        &cap.as_ref().unwrap().as_route_advertisement().unwrap().addr_ranges[0].ip_version, 
-        &route_real.addr_ranges[0].ip_version, 
-        "Testing for ip_version: {} | {}",
-        &cap.as_ref().unwrap().as_route_advertisement().unwrap().addr_ranges[0].ip_version, 
-        &route_real.addr_ranges[0].ip_version, 
+    // Test serialization
+    let mut testbuf = [0; 128];
+    cap.unwrap().serialize(&mut testbuf);
+
+    assert_eq!(testbuf, buffer, "Testing deserialization: Serialized={:?} | Original={:?}", testbuf, buffer);
+}
+
+/**
+ * Simple test to check if capsule parsing and serialization for 
+ * ADRESS_REQUEST works
+ */
+#[test_log::test(tokio::test)]
+async fn client_identify_parsing_test() {
+    // first create example capsule ADDRESS_ASSIGN
+    let mut buffer = [0; 128];
+
+    {
+        let mut addr_request = OctetsMut::with_slice(&mut buffer);
+
+        assert!(addr_request.put_varint(CLIENT_IDENTIFY_ID).is_ok()); // Type
+        assert!(addr_request.put_varint(13).is_ok()); // Length
+        assert!(addr_request.put_u8(4).is_ok()); // id length
+        assert!(addr_request.put_u8(b'B').is_ok());
+        assert!(addr_request.put_u8(b'R').is_ok());
+        assert!(addr_request.put_u8(b'U').is_ok());
+        assert!(addr_request.put_u8(b'H').is_ok());
+        assert!(addr_request.put_u8(4).is_ok()); // ip ver
+        assert!(addr_request.put_u32(Ipv4Addr::new(192, 168, 0, 45).into()).is_ok()); // IP 192.168.0.45
+        assert!(addr_request.put_u8(0).is_ok()); // ip prefix
+    }
+    println!("Raw Testdata: {:?}", buffer);
+
+    let cap = Capsule::new(&buffer)
+        .map_err(|e| error!("Could not parse capsule! {:?}", e));
+
+    let client_id = ClientIdentify {
+        length: 13,
+        id_length: 4,
+        identifier: vec![b'B', b'R', b'U', b'H'],
+        ip_version: 4,
+        ip_address: IpLength::V4(Ipv4Addr::new(192, 168, 0, 45).into()),
+        ip_prefix: 0,
+    };
+
+    //let temp = *cap.unwrap().as_route_advertisement().as_deref().unwrap();
+    assert_eq!(cap.as_ref().unwrap().as_client_identify().unwrap(), &client_id, 
+        "Testing Client Identify Parsing. Parsed={:?} | Original={:?}", 
+        cap.as_ref().unwrap().as_client_identify().unwrap(),
+        &client_id
     );
 
-    assert_eq!(
-        &cap.as_ref().unwrap().as_route_advertisement().unwrap().addr_ranges[0].start_ip, 
-        &route_real.addr_ranges[0].start_ip, 
-        "Testing for start_ip: {} | {}",
-        &cap.as_ref().unwrap().as_route_advertisement().unwrap().addr_ranges[0].start_ip, 
-        &route_real.addr_ranges[0].start_ip, 
-    );
+    // Test serialization
+    let mut testbuf = [0; 128];
+    cap.unwrap().serialize(&mut testbuf);
 
-    assert_eq!(
-        &cap.as_ref().unwrap().as_route_advertisement().unwrap().addr_ranges[0].end_ip, 
-        &route_real.addr_ranges[0].end_ip, 
-        "Testing for end_ip: {} | {}",
-        &cap.as_ref().unwrap().as_route_advertisement().unwrap().addr_ranges[0].end_ip, 
-        &route_real.addr_ranges[0].end_ip, 
-    );
+    assert_eq!(testbuf, buffer, "Testing deserialization: Serialized={:?} | Original={:?}", testbuf, buffer);
+}
 
-    assert_eq!(
-        &cap.as_ref().unwrap().as_route_advertisement().unwrap().addr_ranges[0].ip_proto, 
-        &route_real.addr_ranges[0].ip_proto, 
-        "Testing for ip_proto: {} | {}",
-        &cap.as_ref().unwrap().as_route_advertisement().unwrap().addr_ranges[0].ip_proto, 
-        &route_real.addr_ranges[0].ip_proto, 
+/**
+ * Simple test to check if capsule parsing and serialization for 
+ * ADRESS_REQUEST works
+ */
+#[test_log::test(tokio::test)]
+async fn client_register_parsing_test() {
+    // first create example capsule ADDRESS_ASSIGN
+    let mut buffer = [0; 128];
+
+    {
+        let mut addr_request = OctetsMut::with_slice(&mut buffer);
+
+        assert!(addr_request.put_varint(CLIENT_REGISTER_ID).is_ok()); // Type
+        assert!(addr_request.put_varint(8).is_ok()); // Length
+        assert!(addr_request.put_u8(1).is_ok()); // status
+        assert!(addr_request.put_u8(4).is_ok()); // ip ver
+        assert!(addr_request.put_u32(Ipv4Addr::new(192, 168, 0, 45).into()).is_ok()); // IP 192.168.0.45
+    }
+    println!("Raw Testdata: {:?}", buffer);
+
+    let cap = Capsule::new(&buffer)
+        .map_err(|e| error!("Could not parse capsule! {:?}", e));
+
+    let reg = ClientRegister {
+        length: 8,
+        status: 1,     // 0=failed, 1=success
+        ip_version: 4, // either 4 or 6
+        ip_address: IpLength::V4(Ipv4Addr::new(192, 168, 0, 45).into()),
+    };
+
+    //let temp = *cap.unwrap().as_route_advertisement().as_deref().unwrap();
+    assert_eq!(cap.as_ref().unwrap().as_client_register().unwrap(), &reg, 
+        "Testing Client Register Parsing. Parsed={:?} | Original={:?}", 
+        cap.as_ref().unwrap().as_client_register().unwrap(),
+        &reg
     );
 
     // Test serialization
