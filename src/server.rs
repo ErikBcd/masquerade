@@ -4,6 +4,7 @@ use octets::varint_len;
 use packet::ip::v4::Packet;
 use quiche::h3::NameValue;
 use serde::{Deserialize, Serialize};
+use tokio::fs::OpenOptions;
 use tokio::task::JoinHandle;
 use url::Url;
 
@@ -18,7 +19,7 @@ use std::sync::Arc;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
-use tokio::sync::mpsc::{self, Sender, UnboundedSender};
+use tokio::sync::mpsc::{self, Receiver, Sender, UnboundedSender};
 use tokio::time::{self, Duration};
 
 use ring::rand::*;
@@ -1749,4 +1750,141 @@ async fn udp_connect_handler(
         }
         (_, _) => {}
     };
+}
+struct IpRegisterRequest {
+    requested_address: Ipv4Addr,
+    id: String,
+    callback: Sender<Ipv4Addr>,
+    sender: Sender<Vec<u8>>,
+    static_addr: bool,
+}
+
+#[derive(Clone)]
+struct ConnectIpClient {
+    assigned_addr: Ipv4Addr,
+    id: String,
+    static_addr: bool,
+    sender: Option<Sender<Vec<u8>>>,
+}
+
+type ConnectIpClientList = Arc<Mutex<HashMap<Ipv4Addr, ConnectIpClient>>>;
+
+const STANDARD_NETMASK: u32 = 0xFFFFFF00;
+
+///
+/// Waits for new connecting clients.
+/// If the client doesn't wish to be registered with a static IP it gets the first free ip address
+/// we can find.
+/// If the client does wish to be registered with a static IP we check if the address (range) has
+/// a free address that is not in use at the moment. If there is none we reply with 0.0.0.0,
+/// if we found a fitting address we reply with that address.
+/// 
+/// //TODO: Implement IP address *range* queries
+/// //TODO: Can we take the address of a non-static client and give it to the requesting client?
+///         The client would have to be able to handle address changes
+/// //TODO: Currently we can't remove a client
+async fn client_register_handler(
+    mut receiver: Receiver<IpRegisterRequest>,
+    connect_ip_clients: ConnectIpClientList,
+    config_path: String,
+) {
+    
+    
+    // Save registered IPs in another list so we don't always have to wait for the
+    // mutex
+    let mut assigned_ips: Vec<Ipv4Addr>;
+    {
+        let temp_binding = connect_ip_clients.lock().await;
+        assigned_ips = temp_binding.clone().into_keys().collect();
+    }
+
+    loop {
+        if let Some(request) = receiver.recv().await {
+            if assigned_ips.contains(&request.requested_address) {
+                if !request.static_addr {
+                    // Client does not want to get registered
+                    // We can simply give it the next free ip we find
+                    let mut assigned_addr = request.requested_address;
+                    loop {
+                        assigned_addr = match get_next_ipv4(assigned_addr, STANDARD_NETMASK) {
+                            Ok(v) => {
+                                if assigned_ips.contains(&v) {
+                                    v
+                                } else {
+                                    // Pseudo register client and send address to callback
+                                    request.callback.send(v).await
+                                        .expect("Couldn't send message to channel!");
+                                    let client = ConnectIpClient {
+                                        assigned_addr: v,
+                                        id: "".to_string(),
+                                        static_addr: false,
+                                        sender: Some(request.sender),
+                                    };
+                                    connect_ip_clients.lock().await
+                                        .insert(v, client);
+                                    assigned_ips.push(v);
+                                    break;
+                                }
+                            },
+                            Err(e) => {
+                                error!("Could not assign address to new client: {e}");
+                                break;
+                            },
+                        }
+                    }   
+                } else {
+                    let mut binding = connect_ip_clients.lock().await;
+                    let client = binding.get_mut(&request.requested_address).unwrap();
+                    if client.id == request.id {
+                        // send reply with requested address to the client
+                        // TODO: This is currently insecure. A unauthorized client could
+                        //       simply hijack this by taking over the same name and requested IP
+                        //       from the original client.
+
+                        request.callback.send(request.requested_address).await
+                            .expect("Couldn't send message to channel!");
+                        client.static_addr = true;
+                        client.sender = Some(request.sender.clone());
+                    } else {
+                        // Requested IP is blocked by another client
+                        // send reply with 0.0.0.0 to the client
+                        request.callback.send(Ipv4Addr::new(0, 0, 0, 0)).await
+                            .expect("Couldn't send message to channel!");
+                    }
+                }
+            } else {
+                // We can simply assign this client the new ip
+                // We don't need to do anything special, we can simply give this client the ip
+                request.callback.send(request.requested_address).await
+                    .expect("Couldn't send message to channel!");
+                let client = ConnectIpClient {
+                    assigned_addr: request.requested_address,
+                    id: request.id.clone(),
+                    static_addr: request.static_addr,
+                    sender: Some(request.sender),
+                };
+                connect_ip_clients.lock().await
+                    .insert(request.requested_address, client);
+                assigned_ips.push(request.requested_address);
+
+                if request.static_addr {
+                    // Write the client to our config file
+                    // We only need to write id + ip to file
+                    let toml_entry = format!("[client]\n
+                        id = {}\n
+                        ip = {}\n", 
+                        request.id, request.requested_address);
+                    let mut file = OpenOptions::new()
+                        .write(true)
+                        .append(true)
+                        .open(config_path.clone())
+                        .await
+                        .unwrap();
+                    if let Err(e) = file.write_all(toml_entry.as_bytes()).await {
+                        error!("Couldn't write to static client list: {e}");
+                    }
+                }
+            }
+        }
+    }
 }
