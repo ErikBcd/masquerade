@@ -249,6 +249,52 @@ async fn client_identify_parsing_test() {
     assert_eq!(testbuf, buffer, "Testing deserialization: Serialized={:?} | Original={:?}", testbuf, buffer);
 }
 
+
+/**
+ * Simple test to check if capsule parsing and serialization for 
+ * ADRESS_REQUEST works
+ */
+#[test_log::test(tokio::test)]
+async fn client_hello_parsing_test() {
+    // first create example capsule ADDRESS_ASSIGN
+    let mut buffer = [0; 128];
+
+    {
+        let mut addr_request = OctetsMut::with_slice(&mut buffer);
+
+        assert!(addr_request.put_varint(CLIENT_HELLO_ID).is_ok()); // Type
+        assert!(addr_request.put_varint(7).is_ok()); // Length
+        assert!(addr_request.put_u8(4).is_ok()); // id length
+        assert!(addr_request.put_u8(b'B').is_ok());
+        assert!(addr_request.put_u8(b'R').is_ok());
+        assert!(addr_request.put_u8(b'U').is_ok());
+        assert!(addr_request.put_u8(b'H').is_ok());
+    }
+    println!("Raw Testdata: {:?}", buffer);
+
+    let cap = Capsule::new(&buffer)
+        .map_err(|e| error!("Could not parse capsule! {:?}", e));
+
+    let client_id = ClientHello {
+        length: 7,
+        id_length: 4,
+        id: vec![b'B', b'R', b'U', b'H'],
+    };
+
+    //let temp = *cap.unwrap().as_route_advertisement().as_deref().unwrap();
+    assert_eq!(cap.as_ref().unwrap().as_client_hello().unwrap(), &client_id, 
+        "Testing ClientHello Parsing. Parsed={:?} | Original={:?}", 
+        cap.as_ref().unwrap().as_client_hello().unwrap(),
+        &client_id
+    );
+
+    // Test serialization
+    let mut testbuf = [0; 128];
+    cap.unwrap().serialize(&mut testbuf);
+
+    assert_eq!(testbuf, buffer, "Testing deserialization: Serialized={:?} | Original={:?}", testbuf, buffer);
+}
+
 /**
  * Simple test to check if capsule parsing and serialization for 
  * ADRESS_REQUEST works

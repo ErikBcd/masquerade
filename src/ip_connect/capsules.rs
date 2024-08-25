@@ -20,6 +20,7 @@ pub const ADDRESS_REQUEST_ID: u64       = 0x02;
 pub const ROUTE_ADVERTISEMENT_ID: u64   = 0x03;
 pub const CLIENT_IDENTIFY_ID: u64       = 0x04;
 pub const CLIENT_REGISTER_ID: u64       = 0x05;
+pub const CLIENT_HELLO_ID: u64             = 0x06;
 
 
 impl std::error::Error for CapsuleParseError {}
@@ -31,6 +32,7 @@ pub enum CapsuleType {
     RouteAdvertisement(RouteAdvertisement),
     ClientIdentify(ClientIdentify),
     ClientRegister(ClientRegister),
+    ClientHello(ClientHello),
 }
 
 #[derive(PartialEq, Debug)]
@@ -48,6 +50,13 @@ impl std::fmt::Display for IpLength {
 pub struct Capsule {
     pub capsule_id: u64,
     pub capsule_type: CapsuleType,
+}
+
+#[derive(PartialEq, Debug)]
+pub struct ClientHello {
+    pub length: u64,
+    pub id_length: u8,
+    pub id: Vec<u8>,
 }
 
 #[derive(PartialEq, Debug)]
@@ -145,6 +154,10 @@ impl Capsule {
             CLIENT_REGISTER_ID => match ClientRegister::new(&mut oct) {
                 Ok(v) => CapsuleType::ClientRegister(v),
                 Err(e) => return Err(e),
+            },
+            CLIENT_HELLO_ID => match ClientHello::new(&mut oct) {
+                Ok(v) => CapsuleType::ClientHello(v),
+                Err(e) => return Err(e),
             }
             _ => return Err(CapsuleParseError::InvalidCapsuleType),
         };
@@ -178,6 +191,9 @@ impl Capsule {
                 v.serialize(&mut oct);
             },
             CapsuleType::ClientRegister(v) => {
+                v.serialize(&mut oct);
+            },
+            CapsuleType::ClientHello(v) => {
                 v.serialize(&mut oct);
             },
         };
@@ -220,6 +236,14 @@ impl Capsule {
     pub fn as_client_register(&self) -> Option<&ClientRegister> {
         if let CapsuleType::ClientRegister(ref client_register) = self.capsule_type {
             Some(client_register)
+        } else {
+            None
+        }
+    }
+
+    pub fn as_client_hello(&self) -> Option<&ClientHello> {
+        if let CapsuleType::ClientHello(ref client_hello) = self.capsule_type {
+            Some(client_hello)
         } else {
             None
         }
@@ -436,6 +460,35 @@ impl ClientRegister {
             IpLength::V6(v) => {
                 buf.put_bytes(&v.to_be_bytes()).unwrap();
             }
+        }
+    }
+}
+
+impl ClientHello {
+    pub fn new(oct: &mut Octets) -> Result<ClientHello, CapsuleParseError> {
+        let length = oct
+            .get_varint()
+            .map_err(|_| CapsuleParseError::BufferTooShort)?;
+        let id_length = oct
+            .get_u8()
+            .map_err(|_| CapsuleParseError::BufferTooShort)?;
+        let mut id: Vec<u8> = Vec::new();
+        for _ in 0..id_length {
+            id.push(
+                oct.get_u8()
+                   .map_err(|_| CapsuleParseError::BufferTooShort)?
+            );
+        }
+
+        Ok(ClientHello { length, id_length, id})
+    }
+
+    pub fn serialize(&self, buf: &mut OctetsMut) {
+        buf.put_varint(self.length).unwrap();
+        buf.put_u8(self.id_length).unwrap();
+
+        for i in &self.id {
+            buf.put_u8(*i).unwrap();
         }
     }
 }

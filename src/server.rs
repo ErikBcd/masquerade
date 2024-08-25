@@ -1527,8 +1527,14 @@ async fn connect_ip_handler(
                                     .expect("Could not send to http3 channel..");
                             }
                             CapsuleType::RouteAdvertisement(_) => todo!(),
-                            CapsuleType::ClientIdentify(_) => todo!(),
+                            CapsuleType::ClientIdentify(v) => {
+                                // First check if we know that client
+                                // If we do we can just check if the requested ID matches
+                                // 
+                                todo!()
+                            },
                             CapsuleType::ClientRegister(_) => todo!(),
+                            CapsuleType::ClientHello(_) => todo!(),
                         }
                     }
                     Content::Datagram { mut payload } => {

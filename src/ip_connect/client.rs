@@ -560,6 +560,9 @@ async fn quic_conn_handler(
                                         CapsuleType::ClientRegister(_) => {
                                             todo!()
                                         },
+                                        CapsuleType::ClientHello(_) => {
+                                            error!("Received ClientHello from server?");
+                                        }
                                     }
                                 }
                             }
