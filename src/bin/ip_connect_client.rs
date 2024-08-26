@@ -99,7 +99,7 @@ fn read_config() -> Result<ClientConfig, ConfigError> {
         config.desired_addr = Some("0.0.0.0/32".to_owned());
     }
 
-    if config.desired_addr.is_none() {
+    if config.client_name.is_none() {
         config.client_name = Some("".to_owned());
     }
 
