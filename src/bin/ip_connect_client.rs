@@ -1,43 +1,55 @@
 use clap::{arg, command};
-use masquerade_proxy::ip_connect::client::{ClientConfig, ConnectIPClient};
 use masquerade_proxy::common::ConfigError;
+use masquerade_proxy::ip_connect::client::{ClientConfig, ConnectIPClient};
 
 use std::env;
 use std::error::Error;
 use std::fs::File;
 use std::io::Read;
 
-fn read_config() -> Result<ClientConfig, ConfigError> { 
+fn read_config() -> Result<ClientConfig, ConfigError> {
     let matches = command!()
         .about("The CONNECT-IP client for Masquerade")
         .arg(arg!(-s --server_name <VALUE>).required(false))
         .arg(arg!(-a --tun_addr <VALUE>).required(false))
         .arg(arg!(-g --tun_gateway <VALUE>).required(false))
         .arg(arg!(-n --tun_name <VALUE>).required(false))
-        .arg(arg!(-c --config <VALUE>).default_value("./config/client_config.toml").required(false))
+        .arg(
+            arg!(-c --config <VALUE>)
+                .default_value("./config/client_config.toml")
+                .required(false),
+        )
         .arg(arg!(--use_static_ip <bool>).required(false))
         .arg(arg!(--static_ip <VALUE>).required(false))
         .arg(arg!(--client_name <VALUE>).required(false))
         .get_matches();
 
-    let config_path = matches.get_one::<String>("config").expect("Config path not here?");
+    let config_path = matches
+        .get_one::<String>("config")
+        .expect("Config path not here?");
 
     let mut file = match File::open(config_path) {
         Ok(v) => v,
         Err(e) => {
-            return Err(ConfigError::ConfigFileError((e.to_string(), config_path.to_owned())));
-        },
+            return Err(ConfigError::ConfigFileError((
+                e.to_string(),
+                config_path.to_owned(),
+            )));
+        }
     };
     let mut config_contents = String::new();
     match file.read_to_string(&mut config_contents) {
-        Ok(_) => {},
+        Ok(_) => {}
         Err(e) => {
-            return Err(ConfigError::ConfigFileError((e.to_string(), config_path.to_owned())));
-        },
+            return Err(ConfigError::ConfigFileError((
+                e.to_string(),
+                config_path.to_owned(),
+            )));
+        }
     }
     let mut config: ClientConfig = toml::from_str(&config_contents).unwrap();
 
-    // Check for existing command line arguments and swap the values out 
+    // Check for existing command line arguments and swap the values out
     if let Some(server_name) = matches.get_one::<String>("server_name") {
         config.server_name = Some(server_name.to_owned());
     }
@@ -94,9 +106,10 @@ fn read_config() -> Result<ClientConfig, ConfigError> {
     // Sanity checks
 
     if config.client_name.as_ref().unwrap().len() > 255 {
-        return Err(ConfigError::WrongArgument(
-            format!("Given client name is too long! Length: {} | Max allowed is 256", 
-            config.client_name.unwrap().len())));
+        return Err(ConfigError::WrongArgument(format!(
+            "Given client name is too long! Length: {} | Max allowed is 256",
+            config.client_name.unwrap().len()
+        )));
     }
 
     Ok(config)
@@ -111,7 +124,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Ok(v) => v,
         Err(e) => {
             panic!("Error when reading config: {e}");
-        },
+        }
     };
 
     println!("Starting connect-ip client with config: {}", conf);

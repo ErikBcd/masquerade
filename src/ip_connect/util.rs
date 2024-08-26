@@ -3,6 +3,7 @@ use std::{error::Error, net::Ipv4Addr};
 use log::{debug, error};
 use packet::ip::v4::{self};
 
+use crate::common::{encode_var_int, Content, ToSend};
 
 const UDP_ID: u8 = 17;
 const TCP_ID: u8 = 6;
@@ -59,14 +60,25 @@ impl std::fmt::Display for QUICStreamError {
     }
 }
 
+///
+/// Creates a ToSend struct for sending IPSend
+///
+pub fn encapsulate_ipv4(pkt: Vec<u8>, flow_id: &u64, context_id: &u64) -> ToSend {
+    let context_id_enc = encode_var_int(*context_id);
+    let payload = [&context_id_enc, pkt.as_slice()].concat();
+    ToSend {
+        stream_id: *flow_id,
+        content: Content::Datagram { payload },
+        finished: false,
+    }
+}
+
 #[inline]
 ///
 /// Returns the version of the ip packet slice, given in the first nibble
 pub fn get_ip_version(pkt: &[u8]) -> u8 {
     pkt[0] >> 4
 }
-
-
 
 #[inline]
 ///
@@ -147,15 +159,12 @@ pub enum Ipv4CheckError {
 }
 
 pub fn check_ipv4_packet(pkt: &[u8], len: u16) -> Result<(), Ipv4CheckError> {
-    if u16::from(get_ip_header_length(pkt)) 
-        >= len {
-        return Err(Ipv4CheckError::WrongSizeError)
+    if u16::from(get_ip_header_length(pkt)) >= len {
+        return Err(Ipv4CheckError::WrongSizeError);
     }
     let hdr_len = usize::from(get_ip_header_length(pkt));
-    if get_ipv4_hdr_checksum(pkt) 
-        != v4::checksum(&pkt[..hdr_len]) {
-        
-        return Err(Ipv4CheckError::WrongChecksumError)
+    if get_ipv4_hdr_checksum(pkt) != v4::checksum(&pkt[..hdr_len]) {
+        return Err(Ipv4CheckError::WrongChecksumError);
     }
     Ok(())
 }
@@ -213,7 +222,7 @@ pub fn calculate_tcp_udp_checksum(
     };
 
     // Set old checksum to 0
-    pkt[checksum_offset + ip_header_len]     = 0;
+    pkt[checksum_offset + ip_header_len] = 0;
     pkt[checksum_offset + ip_header_len + 1] = 0;
 
     let mut chk: u32 = 0;
@@ -230,10 +239,9 @@ pub fn calculate_tcp_udp_checksum(
 
     pkt[ip_header_len + checksum_offset] = (final_sum >> 8).try_into().unwrap();
     pkt[ip_header_len + checksum_offset + 1] = (final_sum & 0xff).try_into().unwrap();
-
 }
 
-/// 
+///
 /// Recalculates the checksum of a ipv4 packet.
 /// If the payload is TCP or UDP we also recalculate that checksum.
 pub fn recalculate_checksum(pkt: &mut [u8]) {

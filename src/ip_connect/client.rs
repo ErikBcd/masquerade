@@ -18,9 +18,7 @@ use tokio::time::{self};
 use tun2::AsyncDevice;
 
 use crate::common::*;
-use crate::ip_connect::capsules::{
-    AddressRequest, Capsule, CapsuleType, ClientHello, IpLength, RequestedAddress, ADDRESS_REQUEST_ID, CLIENT_HELLO_ID
-};
+use crate::ip_connect::capsules::*;
 use crate::ip_connect::util::*;
 
 const MAX_CHANNEL_MSG: usize = 50;
@@ -48,18 +46,23 @@ impl std::fmt::Display for ClientConfig {
             desired_addr  = {:?}\n
             client_name   = {:?}\n
             ",
-            self.server_name, self.tun_addr, self.tun_name, self.tun_gateway,
-            self.use_static_ip, self.desired_addr, self.client_name,
+            self.server_name,
+            self.tun_addr,
+            self.tun_name,
+            self.tun_gateway,
+            self.use_static_ip,
+            self.desired_addr,
+            self.client_name,
         )
     }
 }
 
-/// 
+///
 /// Information about packets, wether they are
 /// to be sent to the server or to the client.
 /// Generally, packets that were received from the server (from the QUIC connection)
 /// are labeled as ToClient, and packets from the TUN device as ToServer
-/// 
+///
 #[derive(Debug)]
 pub enum Direction {
     ToServer,
@@ -68,17 +71,17 @@ pub enum Direction {
 
 ///
 /// Useful for holding some basic data for a HTTP3 Stream
-/// 
+///
 pub struct QuicStream {
     pub stream_sender: Option<UnboundedSender<Content>>,
     pub stream_id: Option<u64>,
     pub flow_id: Option<u64>,
 }
 
-/// 
+///
 /// Infos about the CONNECT-IP session
 /// Includes converters for local ip's to destination ip's (and the other way around)
-/// 
+///
 #[derive(Clone, Copy)]
 pub struct ConnectIpInfo {
     pub stream_id: u64,
@@ -88,7 +91,7 @@ pub struct ConnectIpInfo {
 
 ///
 /// Holds an ip packet and its direction
-/// 
+///
 struct IpMessage {
     message: Vec<u8>,
     dir: Direction,
@@ -137,7 +140,15 @@ fn set_client_ip_and_route(dev_addr: &String, tun_gateway: &String, tun_name: &S
     }
 
     let route_output = Command::new("ip")
-        .args(["route", "add", "0.0.0.0/0", "via", tun_gateway, "dev", tun_name])
+        .args([
+            "route",
+            "add",
+            "0.0.0.0/0",
+            "via",
+            tun_gateway,
+            "dev",
+            tun_name,
+        ])
         .output()
         .expect("Failed to execute first IP ROUTE command");
 
@@ -150,11 +161,23 @@ fn set_client_ip_and_route(dev_addr: &String, tun_gateway: &String, tun_name: &S
 
     // sudo iptables -t nat -A POSTROUTING -o tunMC -j MASQUERADE
     let iptables = Command::new("iptables")
-        .args(["-t", "nat", "-A", "POSTROUTING", "-o", tun_name, "-j", "MASQUERADE"])
+        .args([
+            "-t",
+            "nat",
+            "-A",
+            "POSTROUTING",
+            "-o",
+            tun_name,
+            "-j",
+            "MASQUERADE",
+        ])
         .output()
         .expect("Failed to execute ip tables cmd");
     if !iptables.status.success() {
-        error!("Failed to set up iptables: {}", String::from_utf8_lossy(&iptables.stderr));
+        error!(
+            "Failed to set up iptables: {}",
+            String::from_utf8_lossy(&iptables.stderr)
+        );
     }
 
     // Allow ipv4 proxying
@@ -164,21 +187,21 @@ fn set_client_ip_and_route(dev_addr: &String, tun_gateway: &String, tun_name: &S
         .output()
         .expect("Failed to execute sysctl command!");
     if !sysctl_cmd.status.success() {
-        error!("Failed to allow ipv4 forwarding: {}", String::from_utf8_lossy(&sysctl_cmd.stderr));
+        error!(
+            "Failed to allow ipv4 forwarding: {}",
+            String::from_utf8_lossy(&sysctl_cmd.stderr)
+        );
     }
 }
 
-/// 
+///
 /// Receives raw IP messages from a TUN.the
 /// Will send received messages to the ip_handler_t
 /// Arguments:
 ///  * ip_handler: Channel that handles received ip messages
 ///  * reader: Receiver for raw ip messages
-/// 
-async fn ip_receiver_t(
-    ip_handler: Sender<IpMessage>,
-    mut reader: ReadHalf<AsyncDevice>, 
-) {
+///
+async fn ip_receiver_t(ip_handler: Sender<IpMessage>, mut reader: ReadHalf<AsyncDevice>) {
     debug!("[ip_receiver_t] Started ip_receiver thread!");
     let mut buf = [0; 4096];
     loop {
@@ -207,10 +230,10 @@ async fn ip_receiver_t(
     }
 }
 
-/// 
+///
 /// Receives IP Packets from rx.
 /// Will then handle these packets accordingly and send messages to quic_dispatcher_t
-/// 
+///
 async fn ip_handler_t(
     mut ip_recv: Receiver<IpMessage>, // Other side is ip_receiver_t
     mut conn_info_recv: Receiver<ConnectIpInfo>, // Other side is quic_handler_t
@@ -226,7 +249,10 @@ async fn ip_handler_t(
     }
     let conn_info = conn_info.unwrap();
     debug!("[ip_handler_t] Received connection info!");
-    println!("Connected to server! Assigned IP: {}", conn_info.assigned_ip);
+    println!(
+        "Connected to server! Assigned IP: {}",
+        conn_info.assigned_ip
+    );
     loop {
         debug!("[ip_handler_t] Waiting for new packet..");
         debug!(
@@ -250,7 +276,6 @@ async fn ip_handler_t(
                 ip_addr_clone,
             )
             .await;
-            
         }
         debug!("[ip_handler_t] Handled a packet!");
     }
@@ -259,12 +284,12 @@ async fn ip_handler_t(
 ///
 /// Handles ip messages received by either the QUIC connection
 /// or the TUN device.
-/// 
+///
 /// Arguments:
 ///     - pkt: The IP Message
 ///     - http3_dispatch: Channel that is connected to the quic connection handler
 ///     - ip_dispatch: Channel that is connected to the ip dispatcher
-///     - conn_info: Information about the connection, 
+///     - conn_info: Information about the connection,
 ///                  used for setting the ToServer IP and the flow ID for the h3 datagram
 ///     - device_addr: The local device address, used for correcting the IP for ToClient packets
 async fn ip_message_handler(
@@ -274,9 +299,11 @@ async fn ip_message_handler(
     conn_info: ConnectIpInfo,
     device_addr: Ipv4Addr,
 ) {
-    debug!("[ip_message_handler] got message! ip version={} | header len={}", 
+    debug!(
+        "[ip_message_handler] got message! ip version={} | header len={}",
         get_ip_version(&pkt.message),
-        get_ip_header_length(&pkt.message));
+        get_ip_header_length(&pkt.message)
+    );
     match get_ip_version(&pkt.message) {
         4 => {
             match pkt.dir {
@@ -300,7 +327,7 @@ async fn ip_message_handler(
                     set_ipv4_pkt_destination(&mut pkt.message, &device_addr);
                     // Recalculate checksum after ipv4 change
                     recalculate_checksum(&mut pkt.message);
-    
+
                     debug!(
                         "[ip_handler_t] Sending IPv4 packet towards client (tun): {:?}",
                         pkt.message
@@ -313,33 +340,20 @@ async fn ip_message_handler(
                     }
                 }
             }
-        },
+        }
         6 => {
             debug!("[ip_handler_t] Received IPv6 messages at ip_handler_t, not supported!");
-        },
+        }
         _ => {
             error!("[ip_handler_t] Received message with unknown IP protocol.");
         }
     };
 }
 
-/// 
-/// Creates a ToSend struct for sending IP
-/// 
-pub fn encapsulate_ipv4(pkt: Vec<u8>, flow_id: &u64, context_id: &u64) -> ToSend {
-    let context_id_enc = encode_var_int(*context_id);
-    let payload = [&context_id_enc, pkt.as_slice()].concat();
-    ToSend {
-        stream_id: *flow_id,
-        content: Content::Datagram { payload },
-        finished: false,
-    }
-}
-
-/// 
+///
 /// Receives ready-to-send ip packets and then sends them
 /// to the TUN device.
-/// 
+///
 async fn ip_dispatcher_t(
     mut ip_dispatch_reader: Receiver<Vec<u8>>,
     mut writer: WriteHalf<AsyncDevice>,
@@ -417,22 +431,21 @@ async fn quic_conn_handler(
                 if context_id != 0 {
                     continue;
                 }
-                
+
                 let header_len = varint_len(flow_id) + varint_len(context_id);
                 match get_ip_version(&buf[header_len..len]) {
                     4 => {
                         // Check if packet is valid (checksum check)
-                        match check_ipv4_packet(&buf[header_len..len], 
-                                (len - header_len) as u16) {
-                            Ok(_) => {},
+                        match check_ipv4_packet(&buf[header_len..len], (len - header_len) as u16) {
+                            Ok(_) => {}
                             Err(Ipv4CheckError::WrongChecksumError) => {
                                 debug!("Received IPv4 packet with invalid checksum, discarding..");
                                 continue;
-                            },
+                            }
                             Err(Ipv4CheckError::WrongSizeError) => {
                                 debug!("Received IPv4 packet with invalid size, discarding...");
                                 continue;
-                            },
+                            }
                         }
                         match ip_handler
                             .send(IpMessage {
@@ -446,12 +459,11 @@ async fn quic_conn_handler(
                                 debug!("Couldn't send ip packet to ip sender: {}", e);
                             }
                         }
-
-                    },
+                    }
                     6 => {
                         debug!("Received IPv6 packet via http3 (not implemented yet)");
                         continue;
-                    },
+                    }
                     v => {
                         error!("Received packet with invalid version: {v}");
                     }
@@ -496,7 +508,7 @@ async fn quic_conn_handler(
                                     hdrs_to_strings(&list),
                                     stream_id
                                 );
-                                if stream.lock().await.stream_id.is_some() 
+                                if stream.lock().await.stream_id.is_some()
                                     && stream.lock().await.stream_id.unwrap() == stream_id {
                                     let binding = stream.as_ref().lock().await;
                                     let sender = binding.stream_sender.as_ref().unwrap();
@@ -529,7 +541,7 @@ async fn quic_conn_handler(
                                     match parsed.capsule_type {
                                         CapsuleType::AddressAssign(c) => {
                                             debug!("Received a AddressAssign capsule from the server!");
-                                            // TODO: Handling is technically incomplete but works for 
+                                            // TODO: Handling is technically incomplete but works for
                                             //       our purpose
                                             if let IpLength::V4(ipv4) = c.assigned_address[0].ip_address {
                                                 let assigned_addr = Ipv4Addr::from(ipv4);
@@ -577,7 +589,7 @@ async fn quic_conn_handler(
                                             // CLIENT_HELLO from server means that the server doesn't
                                             // know us yet, so we need to ask for an IP
                                             // We don't need to parse this message
-                                            // If we get this message we should also be 
+                                            // If we get this message we should also be
                                             // configured to only take static addresses
                                             let (addr, prefix) = split_ip_prefix(
                                                 config.desired_addr.as_ref().unwrap().clone()
@@ -593,19 +605,19 @@ async fn quic_conn_handler(
                                                     .expect("Couldn't parse given static address!").into()),
                                                 ip_prefix_len: prefix,
                                             };
-                
+
                                             let request_capsule = AddressRequest {
                                                 length: 9,
                                                 requested: vec![addr_request],
                                             };
-                
+
                                             let cap = Capsule {
                                                 capsule_id: ADDRESS_REQUEST_ID,
                                                 capsule_type: super::capsules::CapsuleType::AddressRequest(
                                                     request_capsule,
                                                 ),
                                             };
-                
+
                                             let mut buf = vec![0; 9];
                                             cap.serialize(&mut buf);
                                             http3_sender
@@ -893,9 +905,9 @@ async fn quic_conn_handler(
     debug!("quic conn handler exiting.")
 }
 
-/// 
+///
 /// Initiates the CONNECT-IP request.
-/// 
+///
 async fn handle_ip_connect_stream(
     http3_sender: Sender<ToSend>,
     stream: Arc<Mutex<QuicStream>>,
@@ -908,8 +920,8 @@ async fn handle_ip_connect_stream(
     let headers = vec![
         quiche::h3::Header::new(b":method", b"CONNECT"),
         quiche::h3::Header::new(b":protocol", b"connect-ip"),
-        quiche::h3::Header::new(b":scheme", b"https"), 
-        quiche::h3::Header::new(b":authority", config.server_name.unwrap().as_bytes()), 
+        quiche::h3::Header::new(b":scheme", b"https"),
+        quiche::h3::Header::new(b":authority", config.server_name.unwrap().as_bytes()),
         quiche::h3::Header::new(b":path", b"/.well-known/masque/ip/*/*/"),
         quiche::h3::Header::new(b"connect-ip-version", b"3"),
     ];
@@ -1039,10 +1051,7 @@ async fn handle_ip_connect_stream(
 pub struct ConnectIPClient;
 
 impl ConnectIPClient {
-    pub async fn run(
-        &self,
-        config: ClientConfig,
-    ) {
+    pub async fn run(&self, config: ClientConfig) {
         // 1) Create QUIC connection, connect to server
         let mut socket = match self.get_udp(config.server_name.as_ref().unwrap()).await {
             Ok(v) => v,
@@ -1052,8 +1061,10 @@ impl ConnectIPClient {
             }
         };
         debug!("Created UDP socket");
-        let quic_conn = match self.create_quic_conn(&mut socket, 
-                config.server_name.as_ref().unwrap()).await {
+        let quic_conn = match self
+            .create_quic_conn(&mut socket, config.server_name.as_ref().unwrap())
+            .await
+        {
             Ok(v) => v,
             Err(e) => {
                 error!("could not create quic connection: {}", e);
@@ -1068,9 +1079,10 @@ impl ConnectIPClient {
 
         // 3) Create TUN
         let dev = match self.create_tun(
-            config.tun_addr.as_ref().unwrap(), 
-            config.tun_gateway.as_ref().unwrap(), 
-            config.tun_name.as_ref().unwrap()) {
+            config.tun_addr.as_ref().unwrap(),
+            config.tun_gateway.as_ref().unwrap(),
+            config.tun_name.as_ref().unwrap(),
+        ) {
             Ok(v) => v,
             Err(e) => {
                 error!("could not create TUN: {}", e);
@@ -1078,7 +1090,7 @@ impl ConnectIPClient {
             }
         };
         let (addr, _prefix) = split_ip_prefix(config.tun_addr.as_ref().unwrap().clone());
-        
+
         let ipaddr = Ipv4Addr::from_str(&addr).unwrap();
         info!("Local address for packets: {}", ipaddr);
         let (reader, writer) = tokio::io::split(dev);
@@ -1086,7 +1098,7 @@ impl ConnectIPClient {
         // 4) Create receivers/senders
 
         // ip_sender for ip_receiver_t, ip_recv for ip_handler_t
-        let (ip_sender, ip_recv) = tokio::sync::mpsc::channel(MAX_CHANNEL_MSG); 
+        let (ip_sender, ip_recv) = tokio::sync::mpsc::channel(MAX_CHANNEL_MSG);
         let (http3_dispatch, http3_dispatch_reader) = tokio::sync::mpsc::channel(MAX_CHANNEL_MSG);
         let (ip_dispatch, ip_dispatch_reader) = tokio::sync::mpsc::channel(MAX_CHANNEL_MSG);
         let (conn_info_sender, conn_info_recv) = tokio::sync::mpsc::channel(MAX_CHANNEL_MSG);
@@ -1130,7 +1142,7 @@ impl ConnectIPClient {
     ///
     /// Creates a basic QUIC connection to the given server address.
     /// Connection will be in early data after this.
-    /// 
+    ///
     async fn create_quic_conn(
         &self,
         udp_socket: &mut UdpSocket,
@@ -1266,9 +1278,9 @@ impl ConnectIPClient {
         dev
     }
 
-    /// 
+    ///
     /// Creates and binds the UDP socket used for QUIC
-    /// 
+    ///
     async fn get_udp(&self, server_addr: &String) -> Result<UdpSocket, UdpBindError> {
         let mut http_start = "";
         if !server_addr.starts_with("https://") {

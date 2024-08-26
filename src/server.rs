@@ -26,7 +26,6 @@ use ring::rand::*;
 
 use crate::common::*;
 use crate::ip_connect::capsules::*;
-use crate::ip_connect::client::encapsulate_ipv4;
 use crate::ip_connect::util::*;
 
 const MAX_CHANNEL_MESSAGES: usize = 50;
@@ -118,8 +117,7 @@ impl Server {
      * Get the socket address the server is bound to. Returns None if server is not bound to a socket yet
      */
     pub fn listen_addr(&self) -> Option<SocketAddr> {
-        self
-            .socket
+        self.socket
             .clone()
             .map(|socket| socket.local_addr().unwrap())
     }
@@ -208,8 +206,7 @@ impl Server {
             }
         };
 
-        let ip_connect_clients: ConnectIpClients =
-            Arc::new(Mutex::new(HashMap::new()));
+        let ip_connect_clients: ConnectIpClients = Arc::new(Mutex::new(HashMap::new()));
         let (tun_sender, tun_receiver) =
             tokio::sync::mpsc::channel::<Vec<u8>>(MAX_CHANNEL_MESSAGES);
         // Create TUN handler (creates device automatically)
@@ -415,7 +412,7 @@ async fn handle_client(
         connect_sockets: HashMap::new(),
         connect_ip_session: None,
         client_ip,
-        http3_sender
+        http3_sender,
     };
 
     let mut out = [0; MAX_DATAGRAM_SIZE];
@@ -731,7 +728,8 @@ async fn handle_http3_event(
             let flow_id_len = varint_len(flow_id);
             if client_handler.connect_sockets.contains_key(&flow_id) {
                 let data = &buf[flow_id_len..len];
-                client_handler.connect_sockets
+                client_handler
+                    .connect_sockets
                     .get(&flow_id)
                     .unwrap()
                     .send(data.to_vec())
@@ -794,8 +792,7 @@ async fn handle_http3_event(
                             );
                             let http3_sender_clone_1 = client_handler.http3_sender.clone();
                             let http3_sender_clone_2 = client_handler.http3_sender.clone();
-                            let (udp_sender, udp_receiver) =
-                                mpsc::unbounded_channel::<Vec<u8>>();
+                            let (udp_sender, udp_receiver) = mpsc::unbounded_channel::<Vec<u8>>();
                             let flow_id = stream_id / 4;
                             client_handler.connect_sockets.insert(flow_id, udp_sender);
 
@@ -811,9 +808,7 @@ async fn handle_http3_event(
                                 .await;
                             });
                         }
-                    } else if protocol == Some(b"connect-ip")
-                        && scheme.is_some()
-                        && path.is_some()
+                    } else if protocol == Some(b"connect-ip") && scheme.is_some() && path.is_some()
                     // && !authority.is_empty()
                     {
                         debug!("Got request for connect-ip!");
@@ -847,7 +842,8 @@ async fn handle_http3_event(
                         if client_handler.connect_ip_session.is_some() {
                             debug!("Replacing old IpConnectSession!");
                             {
-                                let ip_session = client_handler.connect_ip_session.as_ref().unwrap();
+                                let ip_session =
+                                    client_handler.connect_ip_session.as_ref().unwrap();
                                 if !ip_session.handler_thread.as_ref().unwrap().is_finished() {
                                     ip_session.handler_thread.as_ref().unwrap().abort();
                                 }
@@ -871,20 +867,23 @@ async fn handle_http3_event(
 
                         // For looking up other clients
                         let connect_ip_clients_clone = connect_ip_clients.clone();
-                        client_handler.connect_ip_session.as_mut().unwrap().handler_thread =
-                            Some(tokio::spawn(async move {
-                                connect_ip_handler(
-                                    stream_id,
-                                    flow_id,
-                                    http3_sender_clone,
-                                    from_tun_receiver,
-                                    tun_sender_clone,
-                                    ip_http3_receiver,
-                                    assigned_ip,
-                                    connect_ip_clients_clone,
-                                )
-                                .await;
-                            }));
+                        client_handler
+                            .connect_ip_session
+                            .as_mut()
+                            .unwrap()
+                            .handler_thread = Some(tokio::spawn(async move {
+                            connect_ip_handler(
+                                stream_id,
+                                flow_id,
+                                http3_sender_clone,
+                                from_tun_receiver,
+                                tun_sender_clone,
+                                ip_http3_receiver,
+                                assigned_ip,
+                                connect_ip_clients_clone,
+                            )
+                            .await;
+                        }));
                     } else if let Ok(target_url) = if authority.contains("://") {
                         url::Url::parse(authority)
                     } else {
@@ -898,8 +897,7 @@ async fn handle_http3_event(
                             let peer_addr = socket_addrs.next().unwrap();
                             let http3_sender_clone_1 = client_handler.http3_sender.clone();
                             let http3_sender_clone_2 = client_handler.http3_sender.clone();
-                            let (tcp_sender, tcp_receiver) =
-                                mpsc::unbounded_channel::<Vec<u8>>();
+                            let (tcp_sender, tcp_receiver) = mpsc::unbounded_channel::<Vec<u8>>();
                             client_handler.connect_streams.insert(stream_id, tcp_sender);
 
                             tokio::spawn(async move {
@@ -936,7 +934,8 @@ async fn handle_http3_event(
                     debug!("got {} bytes of data on stream {}", read, stream_id);
                     trace!("{}", unsafe { std::str::from_utf8_unchecked(&buf[..read]) });
                     let data = &buf[..read];
-                    client_handler.connect_streams
+                    client_handler
+                        .connect_streams
                         .get(&stream_id)
                         .unwrap()
                         .send(data.to_vec())
@@ -977,7 +976,8 @@ async fn handle_http3_event(
                     debug!("got {} bytes of data on stream {}", read, stream_id);
                     trace!("{}", unsafe { std::str::from_utf8_unchecked(&buf[..read]) });
                     let data = &buf[..read];
-                    client_handler.connect_streams
+                    client_handler
+                        .connect_streams
                         .get(&stream_id)
                         .unwrap()
                         .send(data.to_vec())
@@ -989,16 +989,27 @@ async fn handle_http3_event(
                     );
                 }
             }
-            if connect_ip_clients.lock().await.contains_key(&client_handler.client_ip) {
+            if connect_ip_clients
+                .lock()
+                .await
+                .contains_key(&client_handler.client_ip)
+            {
                 // stop the connect_ip_connection
                 {
                     let ip_session = client_handler.connect_ip_session.as_ref().unwrap();
                     ip_session.handler_thread.as_ref().unwrap().abort();
                 }
                 client_handler.connect_ip_session.take();
-                connect_ip_clients.lock().await.remove(&client_handler.client_ip);
+                connect_ip_clients
+                    .lock()
+                    .await
+                    .remove(&client_handler.client_ip);
             }
-            remove_stream(&mut client_handler.connect_streams, stream_id, &mut client.conn);
+            remove_stream(
+                &mut client_handler.connect_streams,
+                stream_id,
+                &mut client.conn,
+            );
         }
 
         Ok((stream_id, quiche::h3::Event::Reset(e))) => {
@@ -1012,7 +1023,8 @@ async fn handle_http3_event(
                     debug!("got {} bytes of data on stream {}", read, stream_id);
                     trace!("{}", unsafe { std::str::from_utf8_unchecked(&buf[..read]) });
                     let data = &buf[..read];
-                    client_handler.connect_streams
+                    client_handler
+                        .connect_streams
                         .get(&stream_id)
                         .unwrap()
                         .send(data.to_vec())
@@ -1024,16 +1036,27 @@ async fn handle_http3_event(
                     );
                 }
             }
-            if connect_ip_clients.lock().await.contains_key(&client_handler.client_ip) {
+            if connect_ip_clients
+                .lock()
+                .await
+                .contains_key(&client_handler.client_ip)
+            {
                 // stop the connect_ip_connection
                 {
                     let ip_session = client_handler.connect_ip_session.as_ref().unwrap();
                     ip_session.handler_thread.as_ref().unwrap().abort();
                 }
                 client_handler.connect_ip_session.take();
-                connect_ip_clients.lock().await.remove(&client_handler.client_ip);
+                connect_ip_clients
+                    .lock()
+                    .await
+                    .remove(&client_handler.client_ip);
             }
-            remove_stream(&mut client_handler.connect_streams, stream_id, &mut client.conn);
+            remove_stream(
+                &mut client_handler.connect_streams,
+                stream_id,
+                &mut client.conn,
+            );
         }
         Ok((_prioritized_element_id, quiche::h3::Event::PriorityUpdate)) => unreachable!(),
 
@@ -1525,9 +1548,9 @@ async fn connect_ip_handler(
                             CapsuleType::ClientIdentify(v) => {
                                 // First check if we know that client
                                 // If we do we can just check if the requested ID matches
-                                // 
+                                //
                                 todo!()
-                            },
+                            }
                             CapsuleType::ClientRegister(_) => todo!(),
                             CapsuleType::ClientHello(_) => todo!(),
                         }
@@ -1772,7 +1795,7 @@ const STANDARD_NETMASK: u32 = 0xFFFFFF00;
 /// If the client does wish to be registered with a static IP we check if the address (range) has
 /// a free address that is not in use at the moment. If there is none we reply with 0.0.0.0,
 /// if we found a fitting address we reply with that address.
-/// 
+///
 /// //TODO: Implement IP address *range* queries
 /// //TODO: Can we take the address of a non-static client and give it to the requesting client?
 ///         The client would have to be able to handle address changes
@@ -1782,8 +1805,6 @@ async fn client_register_handler(
     connect_ip_clients: ConnectIpClientList,
     config_path: String,
 ) {
-    
-    
     // Save registered IPs in another list so we don't always have to wait for the
     // mutex
     let mut assigned_ips: Vec<Ipv4Addr>;
@@ -1806,7 +1827,10 @@ async fn client_register_handler(
                                     v
                                 } else {
                                     // Pseudo register client and send address to callback
-                                    request.callback.send(v).await
+                                    request
+                                        .callback
+                                        .send(v)
+                                        .await
                                         .expect("Couldn't send message to channel!");
                                     let client = ConnectIpClient {
                                         assigned_addr: v,
@@ -1814,18 +1838,17 @@ async fn client_register_handler(
                                         static_addr: false,
                                         sender: Some(request.sender),
                                     };
-                                    connect_ip_clients.lock().await
-                                        .insert(v, client);
+                                    connect_ip_clients.lock().await.insert(v, client);
                                     assigned_ips.push(v);
                                     break;
                                 }
-                            },
+                            }
                             Err(e) => {
                                 error!("Could not assign address to new client: {e}");
                                 break;
-                            },
+                            }
                         }
-                    }   
+                    }
                 } else {
                     let mut binding = connect_ip_clients.lock().await;
                     let client = binding.get_mut(&request.requested_address).unwrap();
@@ -1835,21 +1858,30 @@ async fn client_register_handler(
                         //       simply hijack this by taking over the same name and requested IP
                         //       from the original client.
 
-                        request.callback.send(request.requested_address).await
+                        request
+                            .callback
+                            .send(request.requested_address)
+                            .await
                             .expect("Couldn't send message to channel!");
                         client.static_addr = true;
                         client.sender = Some(request.sender.clone());
                     } else {
                         // Requested IP is blocked by another client
                         // send reply with 0.0.0.0 to the client
-                        request.callback.send(Ipv4Addr::new(0, 0, 0, 0)).await
+                        request
+                            .callback
+                            .send(Ipv4Addr::new(0, 0, 0, 0))
+                            .await
                             .expect("Couldn't send message to channel!");
                     }
                 }
             } else {
                 // We can simply assign this client the new ip
                 // We don't need to do anything special, we can simply give this client the ip
-                request.callback.send(request.requested_address).await
+                request
+                    .callback
+                    .send(request.requested_address)
+                    .await
                     .expect("Couldn't send message to channel!");
                 let client = ConnectIpClient {
                     assigned_addr: request.requested_address,
@@ -1857,17 +1889,21 @@ async fn client_register_handler(
                     static_addr: request.static_addr,
                     sender: Some(request.sender),
                 };
-                connect_ip_clients.lock().await
+                connect_ip_clients
+                    .lock()
+                    .await
                     .insert(request.requested_address, client);
                 assigned_ips.push(request.requested_address);
 
                 if request.static_addr {
                     // Write the client to our config file
                     // We only need to write id + ip to file
-                    let toml_entry = format!("[client]\n
+                    let toml_entry = format!(
+                        "[client]\n
                         id = {}\n
-                        ip = {}\n", 
-                        request.id, request.requested_address);
+                        ip = {}\n",
+                        request.id, request.requested_address
+                    );
                     let mut file = OpenOptions::new()
                         .write(true)
                         .append(true)
