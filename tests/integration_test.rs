@@ -1,8 +1,8 @@
 use log::error;
-use masquerade_proxy::{common::split_ip_prefix, ip_connect::{capsules::*, util::{check_ipv4_packet, recalculate_checksum, IPError}}};
+use masquerade_proxy::{common::split_ip_prefix, ip_connect::{capsules::*, util::{check_ipv4_packet, recalculate_checksum, IPError}}, server::{read_known_clients, StaticClientMap}};
 use octets::OctetsMut;
-use tokio::time::timeout;
-use std::{net::Ipv4Addr, time::Duration};
+use tokio::{sync::Mutex, time::timeout};
+use std::{collections::HashMap, net::Ipv4Addr, path::Path, sync::Arc, time::Duration};
 
 mod common;
 
@@ -449,4 +449,27 @@ async fn ip_prefix_split_test() {
     
     assert_eq!(split_ip_prefix("192.168.0.0/ab".to_string()),
                 ("192.168.0.0".to_string(), None));
+}
+
+#[ignore]
+#[test_log::test(tokio::test)]
+async fn read_known_clients_test() {
+    let read_clients = 
+        read_known_clients(&"./config/server_known_clients_test.toml".to_string()).await;
+    let actual_clients: StaticClientMap =  Arc::new(Mutex::new(HashMap::new()));
+
+    actual_clients.lock().await.insert("client1".to_string(), Ipv4Addr::new(192, 168, 0, 0));
+    actual_clients.lock().await.insert("client2".to_string(), Ipv4Addr::new(192, 168, 0, 1));
+
+    assert_eq!(
+        read_clients.as_ref().unwrap().lock().await.get("client1"), 
+        actual_clients.lock().await.get("client1"));
+    assert_eq!(
+        read_clients.unwrap().lock().await.get("client2"), 
+        actual_clients.lock().await.get("client2"));
+
+    let empty_clients = 
+        read_known_clients(&"./config/server_known_clients_test_2.toml".to_string()).await;
+    assert!(empty_clients.unwrap().lock().await.is_empty());
+    assert!(Path::new(&"./config/server_known_clients_test_2.toml".to_string()).exists());
 }

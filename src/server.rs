@@ -1,10 +1,10 @@
-use futures::lock::Mutex;
 use log::*;
 use octets::varint_len;
 use packet::ip::v4::Packet;
 use quiche::h3::NameValue;
 use serde::{Deserialize, Serialize};
-use tokio::fs::OpenOptions;
+use tokio::fs::{File, OpenOptions};
+use tokio::sync::{Mutex, MutexGuard};
 use tokio::task::JoinHandle;
 use url::Url;
 
@@ -13,6 +13,7 @@ use std::error::Error;
 use std::io::ErrorKind;
 use std::net::{self, SocketAddr};
 use std::net::{Ipv4Addr, ToSocketAddrs};
+use std::path::Path;
 use std::process::Command;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -29,6 +30,28 @@ use crate::ip_connect::capsules::*;
 use crate::ip_connect::util::*;
 
 const MAX_CHANNEL_MESSAGES: usize = 50;
+const STANDARD_NETMASK: u32 = 0xFFFFFF00;
+
+struct IpRegisterRequest {
+    requested_address: Ipv4Addr,
+    id: String,
+    callback: Sender<Ipv4Addr>,
+    former_ip: Ipv4Addr,
+    static_addr: bool,
+}
+
+#[derive(Clone)]
+struct ConnectIpClient {
+    assigned_addr: Ipv4Addr,
+    id: String,
+    static_addr: bool,
+    sender: Option<Sender<Vec<u8>>>,
+}
+
+/// Map of known clients that operate via CONNECT-IP, identified by their assigned IPs
+type ConnectIpClientList = Arc<Mutex<HashMap<Ipv4Addr, ConnectIpClient>>>;
+/// Map of registered clients that use CONNECT-IP and want specific IPs
+pub type StaticClientMap = Arc<Mutex<HashMap<String, Ipv4Addr>>>;
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ServerConfig {
@@ -37,21 +60,19 @@ pub struct ServerConfig {
     pub tun_name: Option<String>,
     pub local_ip: Option<String>,
     pub link_dev: Option<String>,
+    pub client_config_path: Option<String>,
 }
-
-/// Map of Senders to an connected IP client, mapped by their assigned IP adresses
-type ConnectIpClients = Arc<Mutex<HashMap<Ipv4Addr, Sender<Vec<u8>>>>>;
 
 impl std::fmt::Display for ServerConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(
             f,
             "bind_addr = {:?}\n
-                   tun_addr  = {:?}\n
-                   tun_name  = {:?}\n
-                   local_ip  = {:?}\n
-                   link_dev  = {:?}\n
-                    ",
+            tun_addr  = {:?}\n
+            tun_name  = {:?}\n
+            local_ip  = {:?}\n
+            link_dev  = {:?}\n
+            ",
             self.bind_addr, self.tun_addr, self.tun_name, self.local_ip, self.link_dev
         )
     }
@@ -142,10 +163,6 @@ impl Server {
     pub async fn run(
         &self,
         server_config: ServerConfig,
-        // tun_addr: String,
-        // tun_name: String,
-        // local_ip: String,
-        // link_dev: String
     ) -> Result<(), Box<dyn Error>> {
         if self.socket.is_none() {
             return Err(Box::new(RunBeforeBindError));
@@ -206,13 +223,39 @@ impl Server {
             }
         };
 
-        let ip_connect_clients: ConnectIpClients = Arc::new(Mutex::new(HashMap::new()));
+        // Read statically assigned clients from config file if it exists 
+        let static_clients = match read_known_clients(
+            server_config.client_config_path.as_ref().unwrap()
+        ).await {
+            Ok(v) => v,
+            Err(e) => {
+                panic!("Could not read static clients: {e}");
+            }
+        };
+
+        let connect_ip_clients: ConnectIpClientList = Arc::new(Mutex::new(HashMap::new()));
+
+        // Start the handler for new clients
+        let (client_register_sender, client_register_recv) = tokio::sync::mpsc::channel(1);
+        let connect_ip_clients_clone = connect_ip_clients.clone();
+        let static_clients_clone = static_clients.clone();
+        let client_conf_path = server_config.client_config_path.as_ref().unwrap().clone();
+        let _client_register_t = tokio::spawn( 
+            async move {
+                client_register_handler(
+                    client_register_recv, 
+                    connect_ip_clients_clone, 
+                    static_clients_clone,
+                    client_conf_path).await
+            }
+        );
+        
         let (tun_sender, tun_receiver) =
             tokio::sync::mpsc::channel::<Vec<u8>>(MAX_CHANNEL_MESSAGES);
         // Create TUN handler (creates device automatically)
-        let ip_connect_clients_clone = ip_connect_clients.clone();
+        let connect_ip_clients_clone = connect_ip_clients.clone();
         let _tun_thread = tokio::spawn(async move {
-            tun_socket_handler(ip_connect_clients_clone, tun_receiver, server_config).await;
+            tun_socket_handler(connect_ip_clients_clone, tun_receiver, server_config).await;
         });
 
         let local_addr = socket.local_addr().unwrap();
@@ -341,13 +384,30 @@ impl Server {
 
                 clients.insert(scid.clone(), tx);
                 let tun_sender_clone = tun_sender.clone();
-                let ip_connect_clients_clone = ip_connect_clients.clone();
+                let connect_ip_clients_clone = connect_ip_clients.clone();
+                let static_clients_clone = static_clients.clone();
+                let register_handler_clone = client_register_sender.clone();
+                // FIrst reserve an address for the client
+                {
+                    let mut clients_bind = connect_ip_clients.lock().await;
+                    if let Some(v) = 
+                        get_next_free_ip(current_ip, &clients_bind) {
+                        current_ip = v;
+                        clients_bind.insert(current_ip, ConnectIpClient { 
+                            assigned_addr: current_ip, 
+                            id: "".to_string(), 
+                            static_addr: false, 
+                            sender: None });
+                    }
+                }
                 tokio::spawn(async move {
                     handle_client(
                         client,
                         current_ip,
                         &tun_sender_clone,
-                        ip_connect_clients_clone,
+                        connect_ip_clients_clone,
+                        static_clients_clone,
+                        register_handler_clone,
                     )
                     .await
                 });
@@ -388,12 +448,71 @@ impl Server {
     }
 }
 
+///
+/// Reads the known-clients toml file from disk and parses it
+/// If the file doesn't exist we create it in the default location
+/// 
+pub async fn read_known_clients(config_path: &String) -> Result<StaticClientMap, ConfigError> {
+    // Check if the file exists
+    if !Path::new(&config_path).exists() {
+        File::create_new(&config_path).await
+            .unwrap_or_else(|e| panic!("Could not create config file at \"{}\": {}",
+        config_path, e));
+        return Ok(Arc::new(Mutex::new(HashMap::new())));
+    }
+
+    let mut file = match File::open(config_path.clone()).await {
+        Ok(v) => v,
+        Err(e) => {
+            return Err(ConfigError::ConfigFileError((e.to_string(), config_path.to_owned())));
+        },
+    };
+    let mut config_contents = String::new();
+    match file.read_to_string(&mut config_contents).await {
+        Ok(_) => {},
+        Err(e) => {
+            return Err(ConfigError::ConfigFileError((e.to_string(), config_path.to_owned())));
+        },
+    }
+    #[derive(Deserialize, Debug)]
+    struct Client {
+        ip: String,
+        id: String,
+    }
+
+    #[derive(Deserialize, Debug)]
+    struct Config {
+        clients: Vec<Client>,
+    }
+
+    let clients: Config = toml::from_str(&config_contents).unwrap();
+    let res: StaticClientMap =  Arc::new(Mutex::new(HashMap::new()));
+    for c in clients.clients {
+        res.lock().await.insert(c.id, Ipv4Addr::from_str(&c.ip).unwrap());
+    }
+    Ok(res)
+}
+
+fn get_next_free_ip(mut start_ip: Ipv4Addr, existing_clients: &MutexGuard<HashMap<Ipv4Addr, ConnectIpClient>>) -> Option<Ipv4Addr> {
+    while let Ok(v) = get_next_ipv4(start_ip, STANDARD_NETMASK) {
+        if existing_clients.contains_key(&v) {
+            start_ip = v;
+        } else {
+            return Some(v);
+        }
+    }
+    None
+}
+
 struct ClientHandler {
     connect_streams: HashMap<u64, UnboundedSender<Vec<u8>>>,
     connect_sockets: HashMap<u64, UnboundedSender<Vec<u8>>>,
     connect_ip_session: Option<IpConnectSession>,
     client_ip: Ipv4Addr,
     http3_sender: mpsc::UnboundedSender<ToSend>,
+    connect_ip_clients: ConnectIpClientList,
+    static_clients: StaticClientMap,
+    register_handler: tokio::sync::mpsc::Sender<IpRegisterRequest>,
 }
 
 /**
@@ -403,7 +522,9 @@ async fn handle_client(
     mut client: Client,
     client_ip: Ipv4Addr,
     tun_sender: &tokio::sync::mpsc::Sender<Vec<u8>>,
-    ip_connect_clients: ConnectIpClients,
+    ip_connect_clients: ConnectIpClientList,
+    static_clients: StaticClientMap,
+    register_handler: tokio::sync::mpsc::Sender<IpRegisterRequest>
 ) {
     let mut http3_conn: Option<quiche::h3::Connection> = None;
     let (http3_sender, mut http3_receiver) = mpsc::unbounded_channel::<ToSend>();
@@ -413,6 +534,9 @@ async fn handle_client(
         connect_ip_session: None,
         client_ip,
         http3_sender,
+        connect_ip_clients: ip_connect_clients.clone(),
+        static_clients: static_clients.clone(),
+        register_handler,
     };
 
     let mut out = [0; MAX_DATAGRAM_SIZE];
@@ -533,8 +657,7 @@ async fn handle_client(
                         http3_conn,
                         &mut client,
                         &mut client_handler,
-                        tun_sender,
-                        &ip_connect_clients).await).is_ok() {};
+                        tun_sender).await).is_ok() {};
                 }
             },
 
@@ -713,7 +836,6 @@ async fn handle_http3_event(
     client: &mut Client,
     client_handler: &mut ClientHandler,
     tun_sender: &tokio::sync::mpsc::Sender<Vec<u8>>,
-    connect_ip_clients: &ConnectIpClients,
 ) -> Result<(), ClientError> {
     let mut buf = [0; 65535];
     // Process datagram-related events.
@@ -829,10 +951,16 @@ async fn handle_http3_event(
                         // These are for receiving messages from the TUN device
                         let (tun_sender_from, from_tun_receiver) =
                             mpsc::channel::<Vec<u8>>(MAX_CHANNEL_MESSAGES);
-                        connect_ip_clients
+                        let conn_ip_client = ConnectIpClient {
+                            assigned_addr: client_handler.client_ip,
+                            id: "".to_string(),
+                            static_addr: false,
+                            sender: Some(tun_sender_from)
+                        };
+                        client_handler.connect_ip_clients
                             .lock()
                             .await
-                            .insert(client_handler.client_ip, tun_sender_from);
+                            .insert(client_handler.client_ip, conn_ip_client);
 
                         // For sending received http3 messages to the ip connect handler
                         let (ip_http3_sender, ip_http3_receiver) =
@@ -861,6 +989,8 @@ async fn handle_http3_event(
 
                         // spawn handler thread for this one
                         let assigned_ip = client_handler.client_ip;
+                        let static_clients_clone = client_handler.static_clients.clone();
+                        let client_handler_clone = client_handler.register_handler.clone();
 
                         // For sending messages to the TUN device
                         let tun_sender_clone = tun_sender.clone();
@@ -879,6 +1009,8 @@ async fn handle_http3_event(
                                 tun_sender_clone,
                                 ip_http3_receiver,
                                 assigned_ip,
+                                static_clients_clone,
+                                client_handler_clone,
                             )
                             .await;
                         }));
@@ -987,7 +1119,7 @@ async fn handle_http3_event(
                     );
                 }
             }
-            if connect_ip_clients
+            if client_handler.connect_ip_clients
                 .lock()
                 .await
                 .contains_key(&client_handler.client_ip)
@@ -998,7 +1130,7 @@ async fn handle_http3_event(
                     ip_session.handler_thread.as_ref().unwrap().abort();
                 }
                 client_handler.connect_ip_session.take();
-                connect_ip_clients
+                client_handler.connect_ip_clients
                     .lock()
                     .await
                     .remove(&client_handler.client_ip);
@@ -1034,7 +1166,7 @@ async fn handle_http3_event(
                     );
                 }
             }
-            if connect_ip_clients
+            if client_handler.connect_ip_clients
                 .lock()
                 .await
                 .contains_key(&client_handler.client_ip)
@@ -1045,7 +1177,7 @@ async fn handle_http3_event(
                     ip_session.handler_thread.as_ref().unwrap().abort();
                 }
                 client_handler.connect_ip_session.take();
-                connect_ip_clients
+                client_handler.connect_ip_clients
                     .lock()
                     .await
                     .remove(&client_handler.client_ip);
@@ -1323,6 +1455,7 @@ fn set_ip_settings(server_config: ServerConfig) -> Result<(), Box<dyn Error>> {
 }
 
 fn destroy_tun_interface() {
+    // TODO: Properly destroy the interface
     let output = Command::new("ip")
         .arg("link")
         .arg("delete")
@@ -1343,7 +1476,7 @@ fn destroy_tun_interface() {
  * Will then create a writer and a reader thread which are connected to channels.
  */
 async fn tun_socket_handler(
-    ip_handlers: ConnectIpClients,
+    ip_handlers: ConnectIpClientList,
     mut tun_sender: tokio::sync::mpsc::Receiver<Vec<u8>>,
     server_config: ServerConfig,
 ) {
@@ -1416,23 +1549,23 @@ async fn tun_socket_handler(
                             .await
                             .expect("IP Channel sender error! Direct IP sending to client");
                     } else {
-                    // All is okay, send the packet to the TUN interface
-                    // call write as long as needed to send the entire packet
-                    let mut pos = 0;
-                    while pos < pkt.len() {
-                        let written = match writer.write(&pkt[pos..]).await {
-                            Ok(n) => n,
-                            Err(e) => {
-                                if e.kind() == ErrorKind::Interrupted {
-                                    0
-                                } else {
-                                    panic!("Could not write to TUN device: {e}");
+                        // All is okay, send the packet to the TUN interface
+                        // call write as long as needed to send the entire packet
+                        let mut pos = 0;
+                        while pos < pkt.len() {
+                            let written = match writer.write(&pkt[pos..]).await {
+                                Ok(n) => n,
+                                Err(e) => {
+                                    if e.kind() == ErrorKind::Interrupted {
+                                        0
+                                    } else {
+                                        panic!("Could not write to TUN device: {e}");
+                                    }
                                 }
-                            }
-                        };
-                        pos += written;
-                    }
-                    debug!("TUN wrote {pos} bytes to device!");
+                            };
+                            pos += written;
+                        }
+                        debug!("TUN wrote {pos} bytes to device!");
                     }
                 } else if version == 6 {
                     debug!("TUN Writer Received ipv6 packet, ignoring for now...");
@@ -1471,11 +1604,38 @@ async fn connect_ip_handler(
     tun_sender: tokio::sync::mpsc::Sender<Vec<u8>>,
     mut http3_receiver: tokio::sync::mpsc::Receiver<Content>,
     mut assigned_ip: Ipv4Addr,
+    static_clients: StaticClientMap,
+    ip_register_handler: Sender<IpRegisterRequest>,
 ) {
     debug!("Creating new IP connect handler!");
+
+    // SETUP STUFF
     let http3_sender_clone_1 = http3_sender.clone();
     let http3_sender_clone_2 = http3_sender.clone();
     let http3_sender_clone_3 = http3_sender.clone();
+
+    let mut static_client = false;
+    let mut client_id = String::new();
+
+    let create_addr_assign = |addr: Ipv4Addr, request_id: u64| -> Vec<u8> {
+        let addr = AssignedAddress {
+            request_id,
+            ip_version: 4,
+            ip_address: IpLength::V4(addr.into()),
+            ip_prefix_len: 0, // we only give out a single IP per client
+        };
+        let req_inner_cap = AddressAssign {
+            length: 9,
+            assigned_address: vec![addr],
+        };
+        let req_cap = Capsule {
+            capsule_id: ADDRESS_ASSIGN_ID,
+            capsule_type: CapsuleType::AddressAssign(req_inner_cap),
+        };
+        let mut cap_buf = vec![0; 9];
+        req_cap.serialize(&mut cap_buf);
+        cap_buf
+    };
 
     let read_task = tokio::spawn(async move {
         loop {
@@ -1524,25 +1684,38 @@ async fn connect_ip_handler(
                                 debug!("Got ADDRESS_ASSIGN capsule, ignoring...");
                             }
                             CapsuleType::AddressRequest(c) => {
-                                // TODO: Very basic capsule handling, can be improved in the future
-                                //       This_works_for_now.txt
+                                // Ask the address handler if the address is free
+                                let mut ret_addr = Ipv4Addr::UNSPECIFIED;
+                                if let IpLength::V4(addr) = c.requested.first().unwrap().ip_address {
+                                    let addr = Ipv4Addr::from(addr);
+                                    if addr == Ipv4Addr::UNSPECIFIED {
+                                        ret_addr = assigned_ip;
+                                    } else {
+                                        let (ip_addr_sender, mut ip_addr_receiver) 
+                                            = tokio::sync::mpsc::channel(1);
+                                        let req = IpRegisterRequest {
+                                            callback: ip_addr_sender,
+                                            requested_address: addr,
+                                            id: client_id.clone(),
+                                            former_ip: assigned_ip,
+                                            static_addr: static_client,
+                                        };
+                                        ip_register_handler.send(req)
+                                            .await
+                                            .expect("Could not send channel message to ip register handler!");
+                                        if let Some(ret) = ip_addr_receiver.recv().await {
+                                            ret_addr = ret;
+                                        }
+                                    }
+                                } else {
+                                    error!("Client requested ipv6 address, not supported");
+                                    // TODO: Implement some proper closing of the connection
+                                    return;
+                                }
+                                
+
                                 debug!("Got ADDRESS_REQUEST capsule, sending ADDRESS_ASSIGN...");
-                                let addr = AssignedAddress {
-                                    request_id: c.requested[0].request_id,
-                                    ip_version: 4,
-                                    ip_address: IpLength::V4(assigned_ip.into()),
-                                    ip_prefix_len: 16,
-                                };
-                                let req_inner_cap = AddressAssign {
-                                    length: 9,
-                                    assigned_address: vec![addr],
-                                };
-                                let req_cap = Capsule {
-                                    capsule_id: ADDRESS_ASSIGN_ID,
-                                    capsule_type: CapsuleType::AddressAssign(req_inner_cap),
-                                };
-                                let mut cap_buf = [0; 9];
-                                req_cap.serialize(&mut cap_buf);
+                                let cap_buf = create_addr_assign(ret_addr, c.requested[0].request_id);
                                 http3_sender_clone_2
                                     .send(ToSend {
                                         stream_id,
@@ -1554,14 +1727,67 @@ async fn connect_ip_handler(
                                     .expect("Could not send to http3 channel..");
                             }
                             CapsuleType::RouteAdvertisement(_) => todo!(),
-                            CapsuleType::ClientIdentify(v) => {
+                            CapsuleType::ClientIdentify(_) => {
                                 // First check if we know that client
                                 // If we do we can just check if the requested ID matches
                                 //
                                 todo!()
                             }
                             CapsuleType::ClientRegister(_) => todo!(),
-                            CapsuleType::ClientHello(_) => todo!(),
+                            CapsuleType::ClientHello(v) => {
+                                // This means the client wants a static address
+                                // Look up this client, if we already know the client
+                                // we can simply reply with the assigned address.
+                                // Otherwise we reply with another ClientHello to signal
+                                // that we need the clients address information
+                                static_client = true;
+                                client_id = String::from_utf8(v.id)
+                                    .expect("Client provided a invalid utf8 string");
+                                let mut cap_buf = Vec::new();
+                                if let Some(ip_addr) = static_clients.lock().await.get(&client_id) {
+                                    // We know this client already. Register it and send AddressAssign
+                                    let mut ret_addr = Ipv4Addr::UNSPECIFIED;
+                                    let (ip_addr_sender, mut ip_addr_receiver) = tokio::sync::mpsc::channel(1);
+                                    let req = IpRegisterRequest {
+                                        callback: ip_addr_sender,
+                                        requested_address: *ip_addr,
+                                        id: client_id.clone(),
+                                        former_ip: assigned_ip,
+                                        static_addr: true,
+                                    };
+                                    ip_register_handler.send(req)
+                                            .await
+                                            .expect("Could not send channel message to ip register handler!");
+                                    if let Some(ret) = ip_addr_receiver.recv().await {
+                                        ret_addr = ret;
+                                    }
+                                    // TODO: if this didn't succeed we might wanna handle this somehow
+                                    //       for now we just send back an UNSPECIFIED message
+                                    cap_buf = create_addr_assign(ret_addr, 0);
+                                } else {
+                                    // Create a CLIENT_HELLO capsule to signal that we don't know
+                                    // the client
+                                    let hell = ClientHello {
+                                        length: 9,
+                                        id_length: 6,
+                                        id: vec![b'S', b'E', b'R', b'V', b'E', b'R'],
+                                    };
+                                    let cap = Capsule {
+                                        capsule_id: CLIENT_HELLO_ID,
+                                        capsule_type: CapsuleType::ClientHello(hell),
+                                    };
+                                    cap.serialize(&mut cap_buf);
+                                }
+                                http3_sender_clone_2
+                                    .send(ToSend {
+                                        stream_id,
+                                        content: Content::Data {
+                                            data: cap_buf.to_vec(),
+                                        },
+                                        finished: false,
+                                    })
+                                    .expect("Could not send to http3 channel..");
+                            },
                         }
                     }
                     Content::Datagram { mut payload } => {
@@ -1596,10 +1822,10 @@ async fn connect_ip_handler(
                                 }
                                 payload[length + 8] -= 1;
                                 recalculate_checksum(&mut payload[length..]);
-                                    tun_sender
-                                        .send(payload[length..].to_vec())
-                                        .await
-                                        .expect("Wasn't able to send ip packet to tun handler");
+                                tun_sender
+                                    .send(payload[length..].to_vec())
+                                    .await
+                                    .expect("Wasn't able to send ip packet to tun handler");
                                 
                             }
                             6 => {
@@ -1765,25 +1991,7 @@ async fn udp_connect_handler(
         (_, _) => {}
     };
 }
-struct IpRegisterRequest {
-    requested_address: Ipv4Addr,
-    id: String,
-    callback: Sender<Ipv4Addr>,
-    sender: Sender<Vec<u8>>,
-    static_addr: bool,
-}
 
-#[derive(Clone)]
-struct ConnectIpClient {
-    assigned_addr: Ipv4Addr,
-    id: String,
-    static_addr: bool,
-    sender: Option<Sender<Vec<u8>>>,
-}
-
-type ConnectIpClientList = Arc<Mutex<HashMap<Ipv4Addr, ConnectIpClient>>>;
-
-const STANDARD_NETMASK: u32 = 0xFFFFFF00;
 
 ///
 /// Waits for new connecting clients.
@@ -1800,68 +2008,48 @@ const STANDARD_NETMASK: u32 = 0xFFFFFF00;
 async fn client_register_handler(
     mut receiver: Receiver<IpRegisterRequest>,
     connect_ip_clients: ConnectIpClientList,
+    static_clients: StaticClientMap,
     config_path: String,
 ) {
-    // Save registered IPs in another list so we don't always have to wait for the
-    // mutex
-    let mut assigned_ips: Vec<Ipv4Addr>;
-    {
-        let temp_binding = connect_ip_clients.lock().await;
-        assigned_ips = temp_binding.clone().into_keys().collect();
-    }
-
     loop {
         if let Some(request) = receiver.recv().await {
-            if assigned_ips.contains(&request.requested_address) {
+            // We have to make sure noone adds a client during this
+            let mut clients_binding = connect_ip_clients.lock().await;
+            if clients_binding.contains_key(&request.requested_address) {
                 if !request.static_addr {
                     // Client does not want to get registered
                     // We can simply give it the next free ip we find
-                    let mut assigned_addr = request.requested_address;
-                    loop {
-                        assigned_addr = match get_next_ipv4(assigned_addr, STANDARD_NETMASK) {
-                            Ok(v) => {
-                                if assigned_ips.contains(&v) {
-                                    v
-                                } else {
-                                    // Pseudo register client and send address to callback
-                                    request
-                                        .callback
-                                        .send(v)
-                                        .await
-                                        .expect("Couldn't send message to channel!");
-                                    let client = ConnectIpClient {
-                                        assigned_addr: v,
-                                        id: "".to_string(),
-                                        static_addr: false,
-                                        sender: Some(request.sender),
-                                    };
-                                    connect_ip_clients.lock().await.insert(v, client);
-                                    assigned_ips.push(v);
-                                    break;
-                                }
-                            }
-                            Err(e) => {
-                                error!("Could not assign address to new client: {e}");
-                                break;
-                            }
+                    let assigned_addr = request.requested_address;
+                    if let Some(v) = get_next_free_ip(assigned_addr, &clients_binding) {
+                        let old_client = clients_binding.remove(&request.former_ip);
+                        if old_client.is_none() {
+                            panic!("Tried to remove client from connected clients that wasn't in there!");
                         }
+
+                        let mut new_client = old_client.unwrap();
+                        new_client.assigned_addr = v;
+                        clients_binding.insert(v, new_client);
+                        // Pseudo register client and send address to callback
+                        request
+                            .callback
+                            .send(v)
+                            .await
+                            .expect("Couldn't send message to channel!");
+                        break;
+                    } else {
+                        error!("Could not assign address to new client!");
+                        break;
                     }
                 } else {
-                    let mut binding = connect_ip_clients.lock().await;
-                    let client = binding.get_mut(&request.requested_address).unwrap();
+                    let client = clients_binding.get_mut(&request.requested_address).unwrap();
                     if client.id == request.id {
                         // send reply with requested address to the client
-                        // TODO: This is currently insecure. A unauthorized client could
-                        //       simply hijack this by taking over the same name and requested IP
-                        //       from the original client.
-
                         request
                             .callback
                             .send(request.requested_address)
                             .await
                             .expect("Couldn't send message to channel!");
                         client.static_addr = true;
-                        client.sender = Some(request.sender.clone());
                     } else {
                         // Requested IP is blocked by another client
                         // send reply with 0.0.0.0 to the client
@@ -1875,28 +2063,31 @@ async fn client_register_handler(
             } else {
                 // We can simply assign this client the new ip
                 // We don't need to do anything special, we can simply give this client the ip
+                // get client's former entry, remove it, and reinsert it
+                let old_client = clients_binding.remove(&request.former_ip);
+                if old_client.is_none() {
+                    panic!("Tried to remove client from connected clients that wasn't in there!");
+                }
+                let mut new_client = old_client.unwrap();
+
+                // update the old clients data
+                new_client.assigned_addr = request.requested_address;
+                new_client.id = request.id.clone();
+                new_client.static_addr = request.static_addr;
+
+                clients_binding.insert(request.requested_address, new_client);
+
                 request
                     .callback
                     .send(request.requested_address)
                     .await
                     .expect("Couldn't send message to channel!");
-                let client = ConnectIpClient {
-                    assigned_addr: request.requested_address,
-                    id: request.id.clone(),
-                    static_addr: request.static_addr,
-                    sender: Some(request.sender),
-                };
-                connect_ip_clients
-                    .lock()
-                    .await
-                    .insert(request.requested_address, client);
-                assigned_ips.push(request.requested_address);
 
                 if request.static_addr {
                     // Write the client to our config file
                     // We only need to write id + ip to file
                     let toml_entry = format!(
-                        "[client]\n
+                        "[[client]]\n
                         id = {}\n
                         ip = {}\n",
                         request.id, request.requested_address
@@ -1910,6 +2101,9 @@ async fn client_register_handler(
                     if let Err(e) = file.write_all(toml_entry.as_bytes()).await {
                         error!("Couldn't write to static client list: {e}");
                     }
+
+                    // save client to static_clients list as well
+                    static_clients.lock().await.insert(request.id, request.requested_address);
                 }
             }
         }

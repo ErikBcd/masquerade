@@ -18,6 +18,7 @@ fn read_config() -> Result<ServerConfig, ConfigError> {
         .arg(arg!(-n --tun_name <VALUE>).required(false))
         .arg(arg!(-l --local_ip <VALUE>).required(false))
         .arg(arg!(-c --config <VALUE>).default_value("./config/server_config.toml").required(false))
+        .arg(arg!(--client_config <VALUE>).required(false))
         .arg(arg!(-d --link_dev <VALUE>).required(false))
         .get_matches();
 
@@ -58,6 +59,10 @@ fn read_config() -> Result<ServerConfig, ConfigError> {
         config.link_dev = Some(link_dev.to_owned());
     }
 
+    if let Some(client_config_path) = matches.get_one::<String>("client_config_path") {
+        config.client_config_path = Some(client_config_path.to_owned());
+    }
+
     // Check the config for any missing arguments
     // Default arguments will be filled out automatically
     if config.bind_addr.is_none() {
@@ -74,6 +79,10 @@ fn read_config() -> Result<ServerConfig, ConfigError> {
 
     if config.local_ip.is_none() {
         config.local_ip = Some("0.0.0.0".to_owned());
+    }
+
+    if config.client_config_path.is_none() {
+        config.client_config_path = Some("./config/server_known_clients.toml".to_owned());
     }
 
     if config.link_dev.is_none() {

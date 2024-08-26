@@ -31,6 +31,7 @@ pub async fn setup_http1_client() -> Result<(TcpStream, TcpStream), Box<dyn Erro
                 tun_name: Some("tunMS".to_owned()),
                 local_ip: Some("0.0.0.0".to_owned()),
                 link_dev: Some("lo".to_owned()),
+                client_config_path: Some("./config/server_known_clients.toml".to_owned()),
         }).await.unwrap_or_else(|e| 
             println!("http1 test: failed tp run server: {:?}", e));
     });
@@ -115,6 +116,7 @@ pub async fn setup_socks5_tcp_client() -> Result<(TcpStream, TcpStream), Box<dyn
                 tun_name: Some("tunMS".to_owned()),
                 local_ip: Some("0.0.0.0".to_owned()),
                 link_dev: Some("lo".to_owned()),
+                client_config_path: Some("./config/server_known_clients.toml".to_owned()),
         }).await.unwrap_or_else(|e| 
             println!("socks5 udp test: failed tp run server: {:?}", e));
     });
@@ -182,6 +184,7 @@ pub async fn setup_socks5_udp_client() -> Result<(UdpSocket, TcpStream), Box<dyn
                 tun_name: Some("tunMS".to_owned()),
                 local_ip: Some("0.0.0.0".to_owned()),
                 link_dev: Some("lo".to_owned()),
+                client_config_path: Some("./config/server_known_clients.toml".to_owned()),
             }
         ).await.unwrap_or_else(|e| 
             println!("socks5 udp test: failed tp run server: {:?}", e));
