@@ -18,9 +18,7 @@ impl std::fmt::Display for CapsuleParseError {
 pub const ADDRESS_ASSIGN_ID: u64        = 0x01;
 pub const ADDRESS_REQUEST_ID: u64       = 0x02;
 pub const ROUTE_ADVERTISEMENT_ID: u64   = 0x03;
-pub const CLIENT_IDENTIFY_ID: u64       = 0x04;
-pub const CLIENT_REGISTER_ID: u64       = 0x05;
-pub const CLIENT_HELLO_ID: u64             = 0x06;
+pub const CLIENT_HELLO_ID: u64          = 0x04;
 
 
 impl std::error::Error for CapsuleParseError {}
@@ -30,8 +28,6 @@ pub enum CapsuleType {
     AddressAssign(AddressAssign),
     AddressRequest(AddressRequest),
     RouteAdvertisement(RouteAdvertisement),
-    ClientIdentify(ClientIdentify),
-    ClientRegister(ClientRegister),
     ClientHello(ClientHello),
 }
 
@@ -77,24 +73,6 @@ pub struct AssignedAddress {
 pub struct AddressRequest {
     pub length: u64,
     pub requested: Vec<RequestedAddress>,
-}
-
-#[derive(PartialEq, Debug)]
-pub struct ClientIdentify {
-    pub length: u64,
-    pub id_length: u8,
-    pub identifier: Vec<u8>,
-    pub ip_version: u8, // either 4 or 6
-    pub ip_address: IpLength,
-    pub ip_prefix: u8,
-}
-
-#[derive(PartialEq, Debug)]
-pub struct ClientRegister {
-    pub length: u64,
-    pub status: u8,     // 0=failed, 1=success
-    pub ip_version: u8, // either 4 or 6
-    pub ip_address: IpLength,
 }
 
 // Requesting an ip address like 0.0.0.0 or :: means sender doesn't have preference
@@ -147,14 +125,6 @@ impl Capsule {
                 Ok(v) => CapsuleType::RouteAdvertisement(v),
                 Err(e) => return Err(e),
             },
-            CLIENT_IDENTIFY_ID => match ClientIdentify::new(&mut oct) {
-                Ok(v) => CapsuleType::ClientIdentify(v),
-                Err(e) => return Err(e),
-            },
-            CLIENT_REGISTER_ID => match ClientRegister::new(&mut oct) {
-                Ok(v) => CapsuleType::ClientRegister(v),
-                Err(e) => return Err(e),
-            },
             CLIENT_HELLO_ID => match ClientHello::new(&mut oct) {
                 Ok(v) => CapsuleType::ClientHello(v),
                 Err(e) => return Err(e),
@@ -186,12 +156,6 @@ impl Capsule {
             }
             CapsuleType::RouteAdvertisement(v) => {
                 v.serialize(&mut oct);
-            }
-            CapsuleType::ClientIdentify(v) => {
-                v.serialize(&mut oct);
-            },
-            CapsuleType::ClientRegister(v) => {
-                v.serialize(&mut oct);
             },
             CapsuleType::ClientHello(v) => {
                 v.serialize(&mut oct);
@@ -220,22 +184,6 @@ impl Capsule {
     pub fn as_route_advertisement(&self) -> Option<&RouteAdvertisement> {
         if let CapsuleType::RouteAdvertisement(ref route_advertisement) = self.capsule_type {
             Some(route_advertisement)
-        } else {
-            None
-        }
-    }
-
-    pub fn as_client_identify(&self) -> Option<&ClientIdentify> {
-        if let CapsuleType::ClientIdentify(ref client_identify) = self.capsule_type {
-            Some(client_identify)
-        } else {
-            None
-        }
-    }
-
-    pub fn as_client_register(&self) -> Option<&ClientRegister> {
-        if let CapsuleType::ClientRegister(ref client_register) = self.capsule_type {
-            Some(client_register)
         } else {
             None
         }
@@ -362,104 +310,6 @@ impl AddressRequest {
                 }
             }
             buf.put_u8(s.ip_prefix_len).unwrap();
-        }
-    }
-}
-
-impl ClientIdentify {
-    pub fn new(oct: &mut Octets) -> Result<ClientIdentify, CapsuleParseError> {
-        let length = oct
-            .get_varint()
-            .map_err(|_| CapsuleParseError::BufferTooShort)?;
-        let id_length = oct
-            .get_u8()
-            .map_err(|_| CapsuleParseError::BufferTooShort)?;
-        let mut id: Vec<u8> = Vec::new();
-        for _ in 0..id_length {
-            id.push(
-                oct.get_u8()
-                   .map_err(|_| CapsuleParseError::BufferTooShort)?
-            );
-        }
-
-        let ip_ver = oct
-            .get_u8()
-            .map_err(|_| CapsuleParseError::BufferTooShort)?;
-        let addr = match read_ip(oct, &ip_ver) {
-            Ok(v) => v,
-            Err(e) => return Err(e),
-        };
-
-        let ip_pref = oct
-            .get_u8()
-            .map_err(|_| CapsuleParseError::BufferTooShort)?;
-
-        Ok(ClientIdentify {
-            length,
-            id_length,
-            identifier: id,
-            ip_version: ip_ver,
-            ip_address: addr,
-            ip_prefix: ip_pref,
-        })
-    }
-
-    pub fn serialize(&self, buf: &mut OctetsMut) {
-        buf.put_varint(self.length).unwrap();
-        buf.put_u8(self.id_length).unwrap();
-        for i in &self.identifier {
-            buf.put_u8(*i).unwrap();
-        }
-        buf.put_u8(self.ip_version).unwrap();
-        match self.ip_address {
-            IpLength::V4(v) => {
-                buf.put_u32(v).unwrap();
-            }
-            IpLength::V6(v) => {
-                buf.put_bytes(&v.to_be_bytes()).unwrap();
-            }
-        }
-        buf.put_u8(self.ip_prefix).unwrap();
-    }
-}
-
-impl ClientRegister {
-    pub fn new(oct: &mut Octets) -> Result<ClientRegister, CapsuleParseError> {
-        let length = oct
-            .get_varint()
-            .map_err(|_| CapsuleParseError::BufferTooShort)?;
-        let status = oct
-            .get_u8()
-            .map_err(|_| CapsuleParseError::BufferTooShort)?;
-        
-        let ip_ver = oct
-            .get_u8()
-            .map_err(|_| CapsuleParseError::BufferTooShort)?;
-        let addr = match read_ip(oct, &ip_ver) {
-            Ok(v) => v,
-            Err(e) => return Err(e),
-        };
-
-        Ok(ClientRegister {
-            length,
-            status,
-            ip_version: ip_ver,
-            ip_address: addr,
-        })
-    }
-
-    pub fn serialize(&self, buf: &mut OctetsMut) {
-        buf.put_varint(self.length).unwrap();
-        buf.put_u8(self.status).unwrap();
-        
-        buf.put_u8(self.ip_version).unwrap();
-        match self.ip_address {
-            IpLength::V4(v) => {
-                buf.put_u32(v).unwrap();
-            }
-            IpLength::V6(v) => {
-                buf.put_bytes(&v.to_be_bytes()).unwrap();
-            }
         }
     }
 }

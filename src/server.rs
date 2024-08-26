@@ -482,6 +482,7 @@ pub async fn read_known_clients(config_path: &String) -> Result<StaticClientMap,
 
     #[derive(Deserialize, Debug)]
     struct Config {
+        #[serde(default)]
         clients: Vec<Client>,
     }
 
@@ -1727,13 +1728,6 @@ async fn connect_ip_handler(
                                     .expect("Could not send to http3 channel..");
                             }
                             CapsuleType::RouteAdvertisement(_) => todo!(),
-                            CapsuleType::ClientIdentify(_) => {
-                                // First check if we know that client
-                                // If we do we can just check if the requested ID matches
-                                //
-                                todo!()
-                            }
-                            CapsuleType::ClientRegister(_) => todo!(),
                             CapsuleType::ClientHello(v) => {
                                 // This means the client wants a static address
                                 // Look up this client, if we already know the client

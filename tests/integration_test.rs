@@ -203,58 +203,6 @@ async fn route_advertisement_parsing_test() {
  * ADRESS_REQUEST works
  */
 #[test_log::test(tokio::test)]
-async fn client_identify_parsing_test() {
-    // first create example capsule ADDRESS_ASSIGN
-    let mut buffer = [0; 128];
-
-    {
-        let mut addr_request = OctetsMut::with_slice(&mut buffer);
-
-        assert!(addr_request.put_varint(CLIENT_IDENTIFY_ID).is_ok()); // Type
-        assert!(addr_request.put_varint(13).is_ok()); // Length
-        assert!(addr_request.put_u8(4).is_ok()); // id length
-        assert!(addr_request.put_u8(b'B').is_ok());
-        assert!(addr_request.put_u8(b'R').is_ok());
-        assert!(addr_request.put_u8(b'U').is_ok());
-        assert!(addr_request.put_u8(b'H').is_ok());
-        assert!(addr_request.put_u8(4).is_ok()); // ip ver
-        assert!(addr_request.put_u32(Ipv4Addr::new(192, 168, 0, 45).into()).is_ok()); // IP 192.168.0.45
-        assert!(addr_request.put_u8(0).is_ok()); // ip prefix
-    }
-    println!("Raw Testdata: {:?}", buffer);
-
-    let cap = Capsule::new(&buffer)
-        .map_err(|e| error!("Could not parse capsule! {:?}", e));
-
-    let client_id = ClientIdentify {
-        length: 13,
-        id_length: 4,
-        identifier: vec![b'B', b'R', b'U', b'H'],
-        ip_version: 4,
-        ip_address: IpLength::V4(Ipv4Addr::new(192, 168, 0, 45).into()),
-        ip_prefix: 0,
-    };
-
-    //let temp = *cap.unwrap().as_route_advertisement().as_deref().unwrap();
-    assert_eq!(cap.as_ref().unwrap().as_client_identify().unwrap(), &client_id, 
-        "Testing Client Identify Parsing. Parsed={:?} | Original={:?}", 
-        cap.as_ref().unwrap().as_client_identify().unwrap(),
-        &client_id
-    );
-
-    // Test serialization
-    let mut testbuf = [0; 128];
-    cap.unwrap().serialize(&mut testbuf);
-
-    assert_eq!(testbuf, buffer, "Testing deserialization: Serialized={:?} | Original={:?}", testbuf, buffer);
-}
-
-
-/**
- * Simple test to check if capsule parsing and serialization for 
- * ADRESS_REQUEST works
- */
-#[test_log::test(tokio::test)]
 async fn client_hello_parsing_test() {
     // first create example capsule ADDRESS_ASSIGN
     let mut buffer = [0; 128];
@@ -286,50 +234,6 @@ async fn client_hello_parsing_test() {
         "Testing ClientHello Parsing. Parsed={:?} | Original={:?}", 
         cap.as_ref().unwrap().as_client_hello().unwrap(),
         &client_id
-    );
-
-    // Test serialization
-    let mut testbuf = [0; 128];
-    cap.unwrap().serialize(&mut testbuf);
-
-    assert_eq!(testbuf, buffer, "Testing deserialization: Serialized={:?} | Original={:?}", testbuf, buffer);
-}
-
-/**
- * Simple test to check if capsule parsing and serialization for 
- * ADRESS_REQUEST works
- */
-#[test_log::test(tokio::test)]
-async fn client_register_parsing_test() {
-    // first create example capsule ADDRESS_ASSIGN
-    let mut buffer = [0; 128];
-
-    {
-        let mut addr_request = OctetsMut::with_slice(&mut buffer);
-
-        assert!(addr_request.put_varint(CLIENT_REGISTER_ID).is_ok()); // Type
-        assert!(addr_request.put_varint(8).is_ok()); // Length
-        assert!(addr_request.put_u8(1).is_ok()); // status
-        assert!(addr_request.put_u8(4).is_ok()); // ip ver
-        assert!(addr_request.put_u32(Ipv4Addr::new(192, 168, 0, 45).into()).is_ok()); // IP 192.168.0.45
-    }
-    println!("Raw Testdata: {:?}", buffer);
-
-    let cap = Capsule::new(&buffer)
-        .map_err(|e| error!("Could not parse capsule! {:?}", e));
-
-    let reg = ClientRegister {
-        length: 8,
-        status: 1,     // 0=failed, 1=success
-        ip_version: 4, // either 4 or 6
-        ip_address: IpLength::V4(Ipv4Addr::new(192, 168, 0, 45).into()),
-    };
-
-    //let temp = *cap.unwrap().as_route_advertisement().as_deref().unwrap();
-    assert_eq!(cap.as_ref().unwrap().as_client_register().unwrap(), &reg, 
-        "Testing Client Register Parsing. Parsed={:?} | Original={:?}", 
-        cap.as_ref().unwrap().as_client_register().unwrap(),
-        &reg
     );
 
     // Test serialization

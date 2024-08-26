@@ -579,12 +579,6 @@ async fn quic_conn_handler(
                                         CapsuleType::RouteAdvertisement(_) => {
                                             error!("Received a RouteAdvertisement capsule from the server! Not implemented yet.");
                                         },
-                                        CapsuleType::ClientIdentify(_) => {
-                                            todo!()
-                                        },
-                                        CapsuleType::ClientRegister(_) => {
-                                            todo!()
-                                        },
                                         CapsuleType::ClientHello(_) => {
                                             // CLIENT_HELLO from server means that the server doesn't
                                             // know us yet, so we need to ask for an IP
