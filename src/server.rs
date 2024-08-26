@@ -191,13 +191,7 @@ impl Server {
         let mut clients = ClientMap::new();
 
         // CONNECT-IP things
-        let prefix_index = server_config.tun_addr.as_ref().unwrap().find("/");
-        if prefix_index.is_none() {
-            error!("Malformed IP address!");
-            return Err(Box::new(InvalidArgumentError));
-        }
-        let addr =
-            String::from_str(&server_config.tun_addr.as_ref().unwrap()[..(prefix_index.unwrap())]).unwrap();
+        let (addr, _prefix) = split_ip_prefix(server_config.tun_addr.as_ref().unwrap().to_string());
         let ipaddr = Ipv4Addr::from_str(&addr).unwrap();
 
         let mut current_ip = match get_next_ipv4(ipaddr, 0xFFFF0000) {

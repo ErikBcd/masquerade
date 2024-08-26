@@ -1,15 +1,16 @@
-use log::info;
+use log::{error, info};
 use quiche::h3::NameValue;
 use tokio::sync::mpsc;
 
-use std::net::{self, Ipv4Addr};
+use std::{net::{self, Ipv4Addr}, str::FromStr};
 use crate::ip_connect::util::*;
 pub const MAX_DATAGRAM_SIZE: usize = 4000;
 
 #[derive(Debug)]
 pub enum ConfigError {
     MissingArgument(String),
-    ConfigFileError((String, String))
+    ConfigFileError((String, String)),
+    WrongArgument(String),
 }
 
 impl std::fmt::Display for ConfigError {
@@ -20,6 +21,9 @@ impl std::fmt::Display for ConfigError {
             },
             ConfigError::ConfigFileError(s) => {
                 write!(f, "Error when reading file \"{}\": {}", s.1, s.0)
+            },
+            ConfigError::WrongArgument(s) => {
+                write!(f, "Wrong Argument: {s}")
             },
         }
         
@@ -81,6 +85,42 @@ pub fn get_next_ipv4(
     } else {
         Err(IPError { message: "Next address out of range!".to_owned() })
     }
+}
+
+///
+/// Parses an IP and splits off the prefix
+/// If the prefix was not found or if it wasn't possible to 
+/// parse the second part of the 2 tuple will be None.
+/// 
+/// # Examples
+/// ```
+///     assert_eq!(split_ip_prefix("192.168.0.0/24".to_string()),
+///                 ("192.168.0.0".to_string(), Some(24)));
+///                
+///     assert_eq!(split_ip_prefix("192.168.0.0".to_string()),
+///                 ("192.168.0.0".to_string(), None));
+///     
+///     assert_eq!(split_ip_prefix("192.168.0.0/ab".to_string()),
+///                 ("192.168.0.0".to_string(), None));
+/// ```
+pub fn split_ip_prefix(ip: String) -> (String, Option<u8>) {
+    let prefix_index = ip.find("/");
+    if prefix_index.is_none() {
+        return (ip, None);
+    }
+    let addr = String::from_str(
+        &ip[..(prefix_index.unwrap())]).unwrap();
+    let prefix_str = String::from_str(
+        &ip[(prefix_index.unwrap()+1)..]).unwrap();
+    let prefix: u8 = match prefix_str.trim().parse() {
+        Ok(v) => v,
+        Err(e) => {
+            error!("Couldn't parse prefix from IP: {} | Error: {}", ip, e);
+            return (addr, None);
+        },
+    };
+
+    (addr, Some(prefix))
 }
 
 pub fn send_h3_dgram(
