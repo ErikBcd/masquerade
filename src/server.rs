@@ -234,6 +234,16 @@ impl Server {
         };
 
         let connect_ip_clients: ConnectIpClientList = Arc::new(Mutex::new(HashMap::new()));
+        // Add all static clients to connect_ip_clients 
+        for (id, ip) in static_clients.lock().await.iter() {
+            connect_ip_clients.lock().await.insert(*ip, 
+                ConnectIpClient { 
+                    assigned_addr: *ip, 
+                    id: id.to_string(), 
+                    static_addr: true, 
+                    sender: None, 
+                });
+        }
 
         // Start the handler for new clients
         let (client_register_sender, client_register_recv) = tokio::sync::mpsc::channel(1);
