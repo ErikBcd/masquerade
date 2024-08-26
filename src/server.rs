@@ -866,7 +866,6 @@ async fn handle_http3_event(
                         let tun_sender_clone = tun_sender.clone();
 
                         // For looking up other clients
-                        let connect_ip_clients_clone = connect_ip_clients.clone();
                         client_handler
                             .connect_ip_session
                             .as_mut()
@@ -880,7 +879,6 @@ async fn handle_http3_event(
                                 tun_sender_clone,
                                 ip_http3_receiver,
                                 assigned_ip,
-                                connect_ip_clients_clone,
                             )
                             .await;
                         }));
@@ -1364,6 +1362,7 @@ async fn tun_socket_handler(
     set_ip_settings(server_config).unwrap_or_else(|e| panic!("Error setting up TUN: {e}"));
 
     let (mut reader, mut writer) = tokio::io::split(dev);
+    let ip_handlers_clone = ip_handlers.clone();
     // create reader thread
     // Reads from the TUN device and sends messages to connect_ip handler(s)
     let read_t = tokio::spawn(async move {
@@ -1377,13 +1376,14 @@ async fn tun_socket_handler(
             // parse packet to get destination ip
             // then send it to handler for dest ip
             if let Ok(ip_pkt) = Packet::new(&pkt[..size]) {
-                if let Some(ip_handler_) = ip_handlers.lock().await.get(&ip_pkt.destination()) {
+                if let Some(ip_handler_) = ip_handlers_clone.lock().await.get(&ip_pkt.destination()) {
                     info!(
                         "Tun Handler received packet | Src: {} To: {}",
                         &ip_pkt.source(),
                         &ip_pkt.destination()
                     );
                     ip_handler_
+                        .sender.as_ref().unwrap()
                         .send(pkt.to_vec())
                         .await
                         .expect("Could not send a message to ip handler channel!");
@@ -1400,6 +1400,7 @@ async fn tun_socket_handler(
 
     // create writer thread
     // Waits for messages from the connect_ip handler(s) and sends them via TUN device
+    // If we know the client this is directed to we should just forward the message to that client
     let write_t = tokio::spawn(async move {
         loop {
             if let Some(pkt) = tun_sender.recv().await {
@@ -1407,6 +1408,14 @@ async fn tun_socket_handler(
                 // Get the version by looking at the first nibble
                 let version = pkt[0] >> 4;
                 if version == 4 {
+                    // check if we can directly forward the packet to one of the other clients
+                    let dest = get_ipv4_pkt_dest(&pkt);
+                    if let Some(client) = ip_handlers.lock().await.get(&dest) {
+                        client.sender.as_ref().unwrap()
+                            .send(pkt)
+                            .await
+                            .expect("IP Channel sender error! Direct IP sending to client");
+                    } else {
                     // All is okay, send the packet to the TUN interface
                     // call write as long as needed to send the entire packet
                     let mut pos = 0;
@@ -1424,6 +1433,7 @@ async fn tun_socket_handler(
                         pos += written;
                     }
                     debug!("TUN wrote {pos} bytes to device!");
+                    }
                 } else if version == 6 {
                     debug!("TUN Writer Received ipv6 packet, ignoring for now...");
                 } else {
@@ -1460,8 +1470,7 @@ async fn connect_ip_handler(
     mut tun_receiver: tokio::sync::mpsc::Receiver<Vec<u8>>,
     tun_sender: tokio::sync::mpsc::Sender<Vec<u8>>,
     mut http3_receiver: tokio::sync::mpsc::Receiver<Content>,
-    assigned_ip: Ipv4Addr,
-    clients: ConnectIpClients,
+    mut assigned_ip: Ipv4Addr,
 ) {
     debug!("Creating new IP connect handler!");
     let http3_sender_clone_1 = http3_sender.clone();
@@ -1587,23 +1596,11 @@ async fn connect_ip_handler(
                                 }
                                 payload[length + 8] -= 1;
                                 recalculate_checksum(&mut payload[length..]);
-
-                                // Check if we maybe know the destination address of the packet
-                                // In that case we can send the packet straight to that client
-                                // TODO: This might be slow if the writer thread is blocking this
-                                //       too much, test this more in depth!
-                                let dest = get_ipv4_pkt_dest(&payload[length..]);
-                                if let Some(ip_client) = clients.lock().await.get(&dest) {
-                                    ip_client
-                                        .send(payload[length..].to_vec())
-                                        .await
-                                        .expect("IP Channel sender error!")
-                                } else {
                                     tun_sender
                                         .send(payload[length..].to_vec())
                                         .await
                                         .expect("Wasn't able to send ip packet to tun handler");
-                                }
+                                
                             }
                             6 => {
                                 continue;
