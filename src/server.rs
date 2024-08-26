@@ -2085,9 +2085,9 @@ async fn client_register_handler(
                     // Write the client to our config file
                     // We only need to write id + ip to file
                     let toml_entry = format!(
-                        "[[client]]\n
-                        id = {}\n
-                        ip = {}\n",
+                        "[[client]]\n\
+                        id = \'{}\'\n\
+                        ip = \'{}\'\n",
                         request.id, request.requested_address
                     );
                     let mut file = OpenOptions::new()
