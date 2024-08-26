@@ -421,12 +421,6 @@ impl Server {
                     )
                     .await
                 });
-                current_ip = match get_next_ipv4(current_ip, 0xFFFF0000) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        panic!("Could not get a new IP: {e}");
-                    }
-                };
 
                 clients.get(&scid).unwrap()
             } else {
