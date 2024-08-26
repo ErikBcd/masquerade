@@ -19,7 +19,7 @@ use tun2::AsyncDevice;
 
 use crate::common::*;
 use crate::ip_connect::capsules::{
-    AddressRequest, Capsule, CapsuleType, IpLength, RequestedAddress, ADDRESS_REQUEST_ID
+    AddressRequest, Capsule, CapsuleType, ClientHello, IpLength, RequestedAddress, ADDRESS_REQUEST_ID, CLIENT_HELLO_ID
 };
 use crate::ip_connect::util::*;
 
@@ -31,6 +31,9 @@ pub struct ClientConfig {
     pub tun_addr: Option<String>,
     pub tun_name: Option<String>,
     pub tun_gateway: Option<String>,
+    pub use_static_ip: Option<bool>,
+    pub desired_addr: Option<String>,
+    pub client_name: Option<String>,
 }
 
 impl std::fmt::Display for ClientConfig {
@@ -38,11 +41,15 @@ impl std::fmt::Display for ClientConfig {
         write!(
             f,
             "server_name  = {:?}\n
-            tun_addr     = {:?}\n
-            tun_name     = {:?}\n
-            tun_gateway  = {:?}\n
+            tun_addr      = {:?}\n
+            tun_name      = {:?}\n
+            tun_gateway   = {:?}\n
+            use_static_ip = {:?}\n
+            desired_addr  = {:?}\n
+            client_name   = {:?}\n
             ",
-            self.server_name, self.tun_addr, self.tun_name, self.tun_gateway
+            self.server_name, self.tun_addr, self.tun_name, self.tun_gateway,
+            self.use_static_ip, self.desired_addr, self.client_name,
         )
     }
 }
@@ -361,9 +368,9 @@ async fn quic_conn_handler(
     info_sender: Sender<ConnectIpInfo>, // other side is the ip_handler_t
     http3_sender: Sender<ToSend>,
     mut http3_receiver: Receiver<ToSend>,
-    peer_addr: String,
     mut conn: Connection,
     udp_socket: UdpSocket,
+    config: ClientConfig,
 ) {
     debug!("quic_conn_handler active!");
     let mut buf = [0; 65535];
@@ -522,13 +529,19 @@ async fn quic_conn_handler(
                                     match parsed.capsule_type {
                                         CapsuleType::AddressAssign(c) => {
                                             debug!("Received a AddressAssign capsule from the server!");
-                                            // TODO: Check if this packet is correctly structured
-                                            //       Potentially we also want to make sure that we can
-                                            //       change our own IP later and notify clients about it?
-                                            //       Also: See if we can use the other values like the prefix
-                                            //       This should not be used like this in prod
+                                            // TODO: Handling is technically incomplete but works for 
+                                            //       our purpose
                                             if let IpLength::V4(ipv4) = c.assigned_address[0].ip_address {
                                                 let assigned_addr = Ipv4Addr::from(ipv4);
+                                                // If we get 0.0.0.0/32 as an address we quit
+                                                // TODO: Implement some sort of renegotiation
+                                                if assigned_addr == Ipv4Addr::new(0, 0, 0, 0) {
+                                                    error!("Server sent assigned 0.0.0.0 as our address, giving up!");
+                                                    return;
+                                                }
+                                                // TODO: Check if this is the address we currently want
+                                                //       The server might still have an old address of ours
+
                                                 debug!("Got address: {:?}", assigned_addr);
                                                 if !got_ip_addr {
                                                     // Send assigned ip to ip handler
@@ -561,7 +574,50 @@ async fn quic_conn_handler(
                                             todo!()
                                         },
                                         CapsuleType::ClientHello(_) => {
-                                            error!("Received ClientHello from server?");
+                                            // CLIENT_HELLO from server means that the server doesn't
+                                            // know us yet, so we need to ask for an IP
+                                            // We don't need to parse this message
+                                            // If we get this message we should also be 
+                                            // configured to only take static addresses
+                                            let (addr, prefix) = split_ip_prefix(
+                                                config.desired_addr.as_ref().unwrap().clone()
+                                            );
+
+                                            let prefix = prefix.unwrap_or(32);
+
+                                            let addr_request = RequestedAddress {
+                                                request_id: 0,
+                                                ip_version: 4,
+                                                ip_address: IpLength::V4(
+                                                    Ipv4Addr::from_str(&addr)
+                                                    .expect("Couldn't parse given static address!").into()),
+                                                ip_prefix_len: prefix,
+                                            };
+                
+                                            let request_capsule = AddressRequest {
+                                                length: 9,
+                                                requested: vec![addr_request],
+                                            };
+                
+                                            let cap = Capsule {
+                                                capsule_id: ADDRESS_REQUEST_ID,
+                                                capsule_type: super::capsules::CapsuleType::AddressRequest(
+                                                    request_capsule,
+                                                ),
+                                            };
+                
+                                            let mut buf = vec![0; 9];
+                                            cap.serialize(&mut buf);
+                                            http3_sender
+                                                .send(ToSend {
+                                                    stream_id: stream.lock().await.stream_id.unwrap(),
+                                                    content: Content::Data { data: buf.to_vec() },
+                                                    finished: false,
+                                                })
+                                                .await
+                                                .unwrap_or_else(|e| {
+                                                    error!("sending http3 data capsule failed: {:?}", e)
+                                                });
                                         }
                                     }
                                 }
@@ -800,9 +856,9 @@ async fn quic_conn_handler(
             // now we can create the ip connect stream
             let stream_clone = stream.clone();
             let http3_sender_clone = http3_sender.clone();
-            let peer_addr_clone = peer_addr.clone(); //rust is stupid
+            let config_clone = config.clone();
             let _ip_connect_thread = tokio::spawn(async move {
-                handle_ip_connect_stream(http3_sender_clone, stream_clone, peer_addr_clone).await;
+                handle_ip_connect_stream(http3_sender_clone, stream_clone, config_clone).await;
             });
         }
 
@@ -843,7 +899,7 @@ async fn quic_conn_handler(
 async fn handle_ip_connect_stream(
     http3_sender: Sender<ToSend>,
     stream: Arc<Mutex<QuicStream>>,
-    peer_addr: String,
+    config: ClientConfig,
 ) {
     // We only need to establish the connect-ip thing first
     // TODO: Check if this packet structure is correct.
@@ -853,7 +909,7 @@ async fn handle_ip_connect_stream(
         quiche::h3::Header::new(b":method", b"CONNECT"),
         quiche::h3::Header::new(b":protocol", b"connect-ip"),
         quiche::h3::Header::new(b":scheme", b"https"), 
-        quiche::h3::Header::new(b":authority", peer_addr.as_bytes()), 
+        quiche::h3::Header::new(b":authority", config.server_name.unwrap().as_bytes()), 
         quiche::h3::Header::new(b":path", b"/.well-known/masque/ip/*/*/"),
         quiche::h3::Header::new(b"connect-ip-version", b"3"),
     ];
@@ -913,30 +969,46 @@ async fn handle_ip_connect_stream(
                 if let Ok(status_code) = status_str.parse::<i32>() {
                     if (200..300).contains(&status_code) {
                         info!("connect-ip established, sending ip request!");
+                        // If we want a static IP we only have to send the client hello for now
+                        let mut buf;
+                        if config.use_static_ip.unwrap() {
+                            let id_len = config.client_name.as_ref().unwrap().len() as u8;
+                            let client_id = ClientHello {
+                                length: u64::from(3 + id_len),
+                                id_length: id_len,
+                                id: Vec::from(config.client_name.unwrap()),
+                            };
+                            let cap = Capsule {
+                                capsule_id: CLIENT_HELLO_ID,
+                                capsule_type: CapsuleType::ClientHello(client_id),
+                            };
+                            buf = vec![0; 3 + id_len as usize];
+                            cap.serialize(&mut buf);
+                        } else {
+                            // If we don't want a static address we just send a normal ADDRESS_REQUEST
+                            // and ask for 0.0.0.0/32 (= no specific addr)
+                            let addr_request = RequestedAddress {
+                                request_id: 0,
+                                ip_version: 4,
+                                ip_address: IpLength::V4(Ipv4Addr::new(0, 0, 0, 0).into()),
+                                ip_prefix_len: 32,
+                            };
 
-                        // Now we ask for an address
-                        let addr_request = RequestedAddress {
-                            request_id: 0,
-                            ip_version: 4,
-                            ip_address: IpLength::V4(Ipv4Addr::new(0, 0, 0, 0).into()),
-                            ip_prefix_len: 32,
-                        };
+                            let request_capsule = AddressRequest {
+                                length: 9,
+                                requested: vec![addr_request],
+                            };
 
-                        let request_capsule = AddressRequest {
-                            length: 9,
-                            requested: vec![addr_request],
-                        };
+                            let cap = Capsule {
+                                capsule_id: ADDRESS_REQUEST_ID,
+                                capsule_type: super::capsules::CapsuleType::AddressRequest(
+                                    request_capsule,
+                                ),
+                            };
 
-                        let cap = Capsule {
-                            capsule_id: ADDRESS_REQUEST_ID,
-                            capsule_type: super::capsules::CapsuleType::AddressRequest(
-                                request_capsule,
-                            ),
-                        };
-
-                        let mut buf = [0; 9];
-                        cap.serialize(&mut buf);
-
+                            buf = vec![0; 9];
+                            cap.serialize(&mut buf);
+                        }
                         http3_sender
                             .send(ToSend {
                                 stream_id: stream.lock().await.stream_id.unwrap(),
@@ -1005,14 +1077,8 @@ impl ConnectIPClient {
                 return;
             }
         };
-        let prefix_index = config.tun_addr.as_ref().unwrap().find("/");
-        if prefix_index.is_none() {
-            error!("Malformed IP address!");
-            return;
-        }
-        let addr = String::from_str(
-            &config.tun_addr.as_ref().unwrap()[..(prefix_index.unwrap())])
-            .unwrap();
+        let (addr, _prefix) = split_ip_prefix(config.tun_addr.as_ref().unwrap().clone());
+        
         let ipaddr = Ipv4Addr::from_str(&addr).unwrap();
         info!("Local address for packets: {}", ipaddr);
         let (reader, writer) = tokio::io::split(dev);
@@ -1042,15 +1108,14 @@ impl ConnectIPClient {
 
         let ip_disp_t = tokio::task::spawn(ip_dispatcher_t(ip_dispatch_reader, writer));
 
-        let peer_addr = config.server_name.unwrap().clone();
         let quic_h_t = tokio::task::spawn(quic_conn_handler(
             ip_from_quic_sender,
             conn_info_sender,
             http3_dispatch_clone,
             http3_dispatch_reader,
-            peer_addr,
             quic_conn,
             socket,
+            config,
         ));
 
         tokio::select! {

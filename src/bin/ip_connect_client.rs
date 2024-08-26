@@ -15,6 +15,9 @@ fn read_config() -> Result<ClientConfig, ConfigError> {
         .arg(arg!(-g --tun_gateway <VALUE>).required(false))
         .arg(arg!(-n --tun_name <VALUE>).required(false))
         .arg(arg!(-c --config <VALUE>).default_value("./config/client_config.toml").required(false))
+        .arg(arg!(--use_static_ip <bool>).required(false))
+        .arg(arg!(--static_ip <VALUE>).required(false))
+        .arg(arg!(--client_name <VALUE>).required(false))
         .get_matches();
 
     let config_path = matches.get_one::<String>("config").expect("Config path not here?");
@@ -46,8 +49,16 @@ fn read_config() -> Result<ClientConfig, ConfigError> {
         config.tun_name = Some(tun_name.to_owned());
     }
 
-    if let Some(tun_gateway) = matches.get_one::<String>("tun_gateway") {
-        config.tun_gateway = Some(tun_gateway.to_owned());
+    if let Some(use_static_ip) = matches.get_one::<bool>("use_static_ip") {
+        config.use_static_ip = Some(use_static_ip.to_owned());
+    }
+
+    if let Some(static_ip) = matches.get_one::<String>("static_ip") {
+        config.desired_addr = Some(static_ip.to_owned());
+    }
+
+    if let Some(client_name) = matches.get_one::<String>("client_name") {
+        config.client_name = Some(client_name.to_owned());
     }
 
     // Check the config for any missing arguments
@@ -66,6 +77,26 @@ fn read_config() -> Result<ClientConfig, ConfigError> {
 
     if config.tun_gateway.is_none() {
         config.tun_gateway = Some("10.9.0.1".to_owned());
+    }
+
+    if config.use_static_ip.is_none() {
+        config.use_static_ip = Some(false);
+    }
+
+    if config.desired_addr.is_none() {
+        config.desired_addr = Some("0.0.0.0/32".to_owned());
+    }
+
+    if config.desired_addr.is_none() {
+        config.client_name = Some("".to_owned());
+    }
+
+    // Sanity checks
+
+    if config.client_name.as_ref().unwrap().len() > 255 {
+        return Err(ConfigError::WrongArgument(
+            format!("Given client name is too long! Length: {} | Max allowed is 256", 
+            config.client_name.unwrap().len())));
     }
 
     Ok(config)

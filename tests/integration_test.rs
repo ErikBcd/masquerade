@@ -1,5 +1,5 @@
 use log::error;
-use masquerade_proxy::ip_connect::{capsules::*, util::{check_ipv4_packet, recalculate_checksum, IPError}};
+use masquerade_proxy::{common::split_ip_prefix, ip_connect::{capsules::*, util::{check_ipv4_packet, recalculate_checksum, IPError}}};
 use octets::OctetsMut;
 use tokio::time::timeout;
 use std::{net::Ipv4Addr, time::Duration};
@@ -437,4 +437,16 @@ async fn recalculate_checksum_test() {
 
     
 
+}
+
+#[test_log::test(tokio::test)]
+async fn ip_prefix_split_test() {
+    assert_eq!(split_ip_prefix("192.168.0.0/24".to_string()),
+                ("192.168.0.0".to_string(), Some(24)));
+
+    assert_eq!(split_ip_prefix("192.168.0.0".to_string()),
+                ("192.168.0.0".to_string(), None));
+    
+    assert_eq!(split_ip_prefix("192.168.0.0/ab".to_string()),
+                ("192.168.0.0".to_string(), None));
 }
