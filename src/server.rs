@@ -2043,7 +2043,9 @@ async fn client_register_handler(
                         break;
                     }
                 } else {
+                    let old_client = clients_binding.remove(&request.former_ip).unwrap();
                     let client = clients_binding.get_mut(&request.requested_address).unwrap();
+                    
                     if client.id == request.id {
                         // send reply with requested address to the client
                         request
@@ -2052,6 +2054,7 @@ async fn client_register_handler(
                             .await
                             .expect("Couldn't send message to channel!");
                         client.static_addr = true;
+                        client.sender = old_client.sender;
                     } else {
                         // Requested IP is blocked by another client
                         // send reply with 0.0.0.0 to the client
@@ -2060,6 +2063,7 @@ async fn client_register_handler(
                             .send(Ipv4Addr::new(0, 0, 0, 0))
                             .await
                             .expect("Couldn't send message to channel!");
+                        clients_binding.insert(request.former_ip, old_client);
                     }
                 }
             } else {
