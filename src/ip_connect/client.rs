@@ -25,33 +25,33 @@ const MAX_CHANNEL_MSG: usize = 50;
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ClientConfig {
-    pub server_name: Option<String>,
-    pub tun_addr: Option<String>,
-    pub tun_name: Option<String>,
-    pub tun_gateway: Option<String>,
-    pub use_static_ip: Option<bool>,
-    pub desired_addr: Option<String>,
+    pub server_address: Option<String>,
+    pub interface_address: Option<String>,
+    pub interface_name: Option<String>,
+    pub interface_gateway: Option<String>,
+    pub use_static_address: Option<bool>,
+    pub static_address: Option<String>,
     pub client_name: Option<String>,
 }
 
 impl std::fmt::Display for ClientConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(
-            f,
-            "server_name  = {:?}\n
-            tun_addr      = {:?}\n
-            tun_name      = {:?}\n
-            tun_gateway   = {:?}\n
-            use_static_ip = {:?}\n
-            desired_addr  = {:?}\n
-            client_name   = {:?}\n
+            f,"\
+            server_address    = {:?}\n\
+            interface_address = {:?}\n\
+            interface_name    = {:?}\n\
+            interface_gateway = {:?}\n\
+            use_static_ip     = {:?}\n\
+            static_address    = {:?}\n\
+            client_name       = {:?}\n\
             ",
-            self.server_name,
-            self.tun_addr,
-            self.tun_name,
-            self.tun_gateway,
-            self.use_static_ip,
-            self.desired_addr,
+            self.server_address,
+            self.interface_address,
+            self.interface_name,
+            self.interface_gateway,
+            self.use_static_address,
+            self.static_address,
             self.client_name,
         )
     }
@@ -586,7 +586,7 @@ async fn quic_conn_handler(
                                             // If we get this message we should also be
                                             // configured to only take static addresses
                                             let (addr, prefix) = split_ip_prefix(
-                                                config.desired_addr.as_ref().unwrap().clone()
+                                                config.static_address.as_ref().unwrap().clone()
                                             );
 
                                             let prefix = prefix.unwrap_or(32);
@@ -915,7 +915,7 @@ async fn handle_ip_connect_stream(
         quiche::h3::Header::new(b":method", b"CONNECT"),
         quiche::h3::Header::new(b":protocol", b"connect-ip"),
         quiche::h3::Header::new(b":scheme", b"https"),
-        quiche::h3::Header::new(b":authority", config.server_name.unwrap().as_bytes()),
+        quiche::h3::Header::new(b":authority", config.server_address.unwrap().as_bytes()),
         quiche::h3::Header::new(b":path", b"/.well-known/masque/ip/*/*/"),
         quiche::h3::Header::new(b"connect-ip-version", b"3"),
     ];
@@ -977,7 +977,7 @@ async fn handle_ip_connect_stream(
                         info!("connect-ip established, sending ip request!");
                         // If we want a static IP we only have to send the client hello for now
                         let mut buf;
-                        if config.use_static_ip.unwrap() {
+                        if config.use_static_address.unwrap() {
                             let id_len = config.client_name.as_ref().unwrap().len() as u8;
                             let client_id = ClientHello {
                                 length: u64::from(3 + id_len),
@@ -1047,7 +1047,7 @@ pub struct ConnectIPClient;
 impl ConnectIPClient {
     pub async fn run(&self, config: ClientConfig) {
         // 1) Create QUIC connection, connect to server
-        let mut socket = match self.get_udp(config.server_name.as_ref().unwrap()).await {
+        let mut socket = match self.get_udp(config.server_address.as_ref().unwrap()).await {
             Ok(v) => v,
             Err(e) => {
                 error!("could not create udp socket: {}", e);
@@ -1056,7 +1056,7 @@ impl ConnectIPClient {
         };
         debug!("Created UDP socket");
         let quic_conn = match self
-            .create_quic_conn(&mut socket, config.server_name.as_ref().unwrap())
+            .create_quic_conn(&mut socket, config.server_address.as_ref().unwrap())
             .await
         {
             Ok(v) => v,
@@ -1073,9 +1073,9 @@ impl ConnectIPClient {
 
         // 3) Create TUN
         let dev = match self.create_tun(
-            config.tun_addr.as_ref().unwrap(),
-            config.tun_gateway.as_ref().unwrap(),
-            config.tun_name.as_ref().unwrap(),
+            config.interface_address.as_ref().unwrap(),
+            config.interface_gateway.as_ref().unwrap(),
+            config.interface_name.as_ref().unwrap(),
         ) {
             Ok(v) => v,
             Err(e) => {
@@ -1083,7 +1083,7 @@ impl ConnectIPClient {
                 return;
             }
         };
-        let (addr, _prefix) = split_ip_prefix(config.tun_addr.as_ref().unwrap().clone());
+        let (addr, _prefix) = split_ip_prefix(config.interface_address.as_ref().unwrap().clone());
 
         let ipaddr = Ipv4Addr::from_str(&addr).unwrap();
         info!("Local address for packets: {}", ipaddr);

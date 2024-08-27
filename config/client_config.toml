@@ -1,3 +1,0 @@
-tun_addr = '10.9.0.2/24'
-tun_name = 'tunMasqClient'
-tun_gateway = '10.9.0.1'

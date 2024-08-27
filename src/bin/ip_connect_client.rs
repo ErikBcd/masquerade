@@ -10,18 +10,25 @@ use std::io::Read;
 fn read_config() -> Result<ClientConfig, ConfigError> {
     let matches = command!()
         .about("The CONNECT-IP client for Masquerade")
-        .arg(arg!(-s --server_name <VALUE>).required(false))
-        .arg(arg!(-a --tun_addr <VALUE>).required(false))
-        .arg(arg!(-g --tun_gateway <VALUE>).required(false))
-        .arg(arg!(-n --tun_name <VALUE>).required(false))
+        .arg(arg!(-s --server_address <URL>).required(false)
+            .help("Address of the Masquerade server. Can also be an ipaddress with port"))
+        .arg(arg!(-a --interface_address <IPv4Address>).required(false)
+            .help("Addressspace which the TUN device of the client will use. [default: 10.9.0.2/24]"))
+        .arg(arg!(-g --interface_gateway <IPv4Address>).required(false)
+            .help("Standard gateway the TUN device uses, should be within the addressspace defined in --interface_address. [default: 10.9.0.1]"))
+        .arg(arg!(-n --interface_name <String>).required(false)
+            .help("Name of the created TUN device. [default: tunMC]"))        
         .arg(
-            arg!(-c --config <VALUE>)
+            arg!(-c --config <Path>)
                 .default_value("./config/client_config.toml")
-                .required(false),
+                .required(false).help("Path to the config file the client will use")
         )
-        .arg(arg!(--use_static_ip <bool>).required(false))
-        .arg(arg!(--static_ip <VALUE>).required(false))
-        .arg(arg!(--client_name <VALUE>).required(false))
+        .arg(arg!(--use_static_address <bool>).required(false)
+            .help("Set to true if the client should use a static address. [default: false]"))
+        .arg(arg!(--static_address <IPv4Address>).required(false)
+            .help("Set a static address within the VPN subnet for the client. [default: 0.0.0.0/32]"))
+        .arg(arg!(--client_name <String>).required(false)
+            .help("Identification of the client sent to the server. [default: \"\"/ Empty]"))
         .get_matches();
 
     let config_path = matches
@@ -50,23 +57,23 @@ fn read_config() -> Result<ClientConfig, ConfigError> {
     let mut config: ClientConfig = toml::from_str(&config_contents).unwrap();
 
     // Check for existing command line arguments and swap the values out
-    if let Some(server_name) = matches.get_one::<String>("server_name") {
-        config.server_name = Some(server_name.to_owned());
+    if let Some(server_address) = matches.get_one::<String>("server_address") {
+        config.server_address = Some(server_address.to_owned());
     }
-    if let Some(tun_addr) = matches.get_one::<String>("tun_addr") {
-        config.tun_addr = Some(tun_addr.to_owned());
-    }
-
-    if let Some(tun_name) = matches.get_one::<String>("tun_name") {
-        config.tun_name = Some(tun_name.to_owned());
+    if let Some(interface_address) = matches.get_one::<String>("interface_address") {
+        config.interface_address = Some(interface_address.to_owned());
     }
 
-    if let Some(use_static_ip) = matches.get_one::<bool>("use_static_ip") {
-        config.use_static_ip = Some(use_static_ip.to_owned());
+    if let Some(interface_name) = matches.get_one::<String>("interface_name") {
+        config.interface_name = Some(interface_name.to_owned());
     }
 
-    if let Some(static_ip) = matches.get_one::<String>("static_ip") {
-        config.desired_addr = Some(static_ip.to_owned());
+    if let Some(use_static_address) = matches.get_one::<bool>("use_static_address") {
+        config.use_static_address = Some(use_static_address.to_owned());
+    }
+
+    if let Some(static_address) = matches.get_one::<String>("static_address") {
+        config.static_address = Some(static_address.to_owned());
     }
 
     if let Some(client_name) = matches.get_one::<String>("client_name") {
@@ -75,28 +82,28 @@ fn read_config() -> Result<ClientConfig, ConfigError> {
 
     // Check the config for any missing arguments
     // Default arguments will be filled out automatically
-    if config.server_name.is_none() {
-        return Err(ConfigError::MissingArgument("server_name".to_owned()));
+    if config.server_address.is_none() {
+        return Err(ConfigError::MissingArgument("server_address".to_owned()));
     }
 
-    if config.tun_addr.is_none() {
-        config.tun_addr = Some("10.9.0.2/24".to_owned());
+    if config.interface_address.is_none() {
+        config.interface_address = Some("10.9.0.2/24".to_owned());
     }
 
-    if config.tun_name.is_none() {
-        config.tun_name = Some("tunMC".to_owned());
+    if config.interface_name.is_none() {
+        config.interface_name = Some("tunMC".to_owned());
     }
 
-    if config.tun_gateway.is_none() {
-        config.tun_gateway = Some("10.9.0.1".to_owned());
+    if config.interface_gateway.is_none() {
+        config.interface_gateway = Some("10.9.0.1".to_owned());
     }
 
-    if config.use_static_ip.is_none() {
-        config.use_static_ip = Some(false);
+    if config.use_static_address.is_none() {
+        config.use_static_address = Some(false);
     }
 
-    if config.desired_addr.is_none() {
-        config.desired_addr = Some("0.0.0.0/32".to_owned());
+    if config.static_address.is_none() {
+        config.static_address = Some("0.0.0.0/32".to_owned());
     }
 
     if config.client_name.is_none() {
@@ -127,7 +134,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     };
 
-    println!("Starting connect-ip client with config: {}", conf);
+    println!("Starting connect-ip client with config: \n{}", conf);
     newclient.run(conf).await;
 
     Ok(())
