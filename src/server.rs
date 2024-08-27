@@ -55,11 +55,11 @@ pub type StaticClientMap = Arc<Mutex<HashMap<String, Ipv4Addr>>>;
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ServerConfig {
-    pub bind_addr: Option<String>,
-    pub tun_addr: Option<String>,
-    pub tun_name: Option<String>,
-    pub local_ip: Option<String>,
-    pub link_dev: Option<String>,
+    pub server_address: Option<String>,
+    pub interface_address: Option<String>,
+    pub interface_name: Option<String>,
+    pub local_uplink_device_ip: Option<String>,
+    pub local_uplink_device_name: Option<String>,
     pub client_config_path: Option<String>,
 }
 
@@ -67,13 +67,20 @@ impl std::fmt::Display for ServerConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(
             f,
-            "bind_addr = {:?}\n
-            tun_addr  = {:?}\n
-            tun_name  = {:?}\n
-            local_ip  = {:?}\n
-            link_dev  = {:?}\n
+            "\
+            server_address              = {:?}\n\
+            interface_address           = {:?}\n\
+            interface_name              = {:?}\n\
+            local_uplink_device_ip      = {:?}\n\
+            local_uplink_device_name    = {:?}\n\
+            client_config_path          = {:?}\n\
             ",
-            self.bind_addr, self.tun_addr, self.tun_name, self.local_ip, self.link_dev
+            self.server_address.as_ref().unwrap(),
+            self.interface_address.as_ref().unwrap(),
+            self.interface_name.as_ref().unwrap(),
+            self.local_uplink_device_ip.as_ref().unwrap(),
+            self.local_uplink_device_name.as_ref().unwrap(),
+            self.client_config_path.as_ref().unwrap(),
         )
     }
 }
@@ -106,16 +113,6 @@ impl std::fmt::Display for RunBeforeBindError {
     }
 }
 impl Error for RunBeforeBindError {}
-
-#[derive(Debug, Clone)]
-struct InvalidArgumentError;
-
-impl std::fmt::Display for InvalidArgumentError {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "The provided argument was not correct")
-    }
-}
-impl Error for InvalidArgumentError {}
 
 /**
  * Client for each QUIC connection
@@ -203,7 +200,13 @@ impl Server {
         let mut clients = ClientMap::new();
 
         // CONNECT-IP things
-        let (addr, _prefix) = split_ip_prefix(server_config.tun_addr.as_ref().unwrap().to_string());
+        let (addr, _prefix) = split_ip_prefix(
+            server_config
+                .interface_address
+                .as_ref()
+                .unwrap()
+                .to_string(),
+        );
         let ipaddr = Ipv4Addr::from_str(&addr).unwrap();
 
         let mut current_ip = match get_next_ipv4(ipaddr, 0xFFFF0000) {
@@ -1374,7 +1377,7 @@ fn set_ip_settings(server_config: ServerConfig) -> Result<(), Box<dyn Error>> {
             "link",
             "set",
             "dev",
-            (server_config.tun_name.as_ref().unwrap()),
+            (server_config.interface_name.as_ref().unwrap()),
             "up",
         ])
         .output()?;
@@ -1391,9 +1394,9 @@ fn set_ip_settings(server_config: ServerConfig) -> Result<(), Box<dyn Error>> {
         .args([
             "addr",
             "add",
-            (server_config.tun_addr.as_ref().unwrap()),
+            (server_config.interface_address.as_ref().unwrap()),
             "dev",
-            (server_config.tun_name.as_ref().unwrap()),
+            (server_config.interface_name.as_ref().unwrap()),
         ])
         .output()?;
 
@@ -1406,16 +1409,17 @@ fn set_ip_settings(server_config: ServerConfig) -> Result<(), Box<dyn Error>> {
     }
 
     // decode device address to get range
-    let prefix_index = &server_config.tun_addr.as_ref().unwrap().find("/");
+    let prefix_index = &server_config.interface_address.as_ref().unwrap().find("/");
     if prefix_index.is_none() {
         panic!(
             "Malformed device address: {}",
-            &server_config.tun_addr.as_ref().unwrap()
+            &server_config.interface_address.as_ref().unwrap()
         );
     }
-    let addr =
-        String::from_str(&server_config.tun_addr.as_ref().unwrap()[..(prefix_index.unwrap())])
-            .unwrap();
+    let addr = String::from_str(
+        &server_config.interface_address.as_ref().unwrap()[..(prefix_index.unwrap())],
+    )
+    .unwrap();
     let ipaddr = Ipv4Addr::from_str(&addr).unwrap();
     ipaddr.octets()[3] = 0;
     let mut ip_range = ipaddr.to_string();
@@ -1427,9 +1431,9 @@ fn set_ip_settings(server_config: ServerConfig) -> Result<(), Box<dyn Error>> {
             "add",
             &ip_range,
             "via",
-            (server_config.local_ip.as_ref().unwrap()),
+            (server_config.local_uplink_device_ip.as_ref().unwrap()),
             "dev",
-            (server_config.link_dev.as_ref().unwrap()),
+            (server_config.local_uplink_device_name.as_ref().unwrap()),
         ])
         .output()
         .expect("Failed to execute IP ROUTE command");
@@ -1448,7 +1452,7 @@ fn set_ip_settings(server_config: ServerConfig) -> Result<(), Box<dyn Error>> {
             "-A",
             "POSTROUTING",
             "-o",
-            (server_config.link_dev.as_ref().unwrap()),
+            (server_config.local_uplink_device_name.as_ref().unwrap()),
             "-j",
             "MASQUERADE",
         ])
@@ -1512,7 +1516,7 @@ async fn tun_socket_handler(
     });
 
     //config.destination("192.168.0.71");
-    config.tun_name(server_config.tun_name.as_ref().unwrap());
+    config.tun_name(server_config.interface_name.as_ref().unwrap());
 
     let dev = tun2::create_as_async(&config).unwrap();
     set_ip_settings(server_config).unwrap_or_else(|e| panic!("Error setting up TUN: {e}"));
