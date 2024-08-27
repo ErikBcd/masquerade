@@ -160,10 +160,7 @@ impl Server {
         Ok(())
     }
 
-    pub async fn run(
-        &self,
-        server_config: ServerConfig,
-    ) -> Result<(), Box<dyn Error>> {
+    pub async fn run(&self, server_config: ServerConfig) -> Result<(), Box<dyn Error>> {
         if self.socket.is_none() {
             return Err(Box::new(RunBeforeBindError));
         }
@@ -223,26 +220,28 @@ impl Server {
             }
         };
 
-        // Read statically assigned clients from config file if it exists 
-        let static_clients = match read_known_clients(
-            server_config.client_config_path.as_ref().unwrap()
-        ).await {
-            Ok(v) => v,
-            Err(e) => {
-                panic!("Could not read static clients: {e}");
-            }
-        };
+        // Read statically assigned clients from config file if it exists
+        let static_clients =
+            match read_known_clients(server_config.client_config_path.as_ref().unwrap()).await {
+                Ok(v) => v,
+                Err(e) => {
+                    panic!("Could not read static clients: {e}");
+                }
+            };
 
         let connect_ip_clients: ConnectIpClientList = Arc::new(Mutex::new(HashMap::new()));
-        // Add all static clients to connect_ip_clients 
+        // Add all static clients to connect_ip_clients
         for (id, ip) in static_clients.lock().await.iter() {
-            connect_ip_clients.lock().await.insert(*ip, 
-                ConnectIpClient { 
-                    assigned_addr: *ip, 
-                    id: id.to_string(), 
-                    static_addr: true, 
-                    sender: None, 
-                });
+            info!("Adding known client: {} at {}", id, ip);
+            connect_ip_clients.lock().await.insert(
+                *ip,
+                ConnectIpClient {
+                    assigned_addr: *ip,
+                    id: id.to_string(),
+                    static_addr: true,
+                    sender: None,
+                },
+            );
         }
 
         // Start the handler for new clients
@@ -250,16 +249,16 @@ impl Server {
         let connect_ip_clients_clone = connect_ip_clients.clone();
         let static_clients_clone = static_clients.clone();
         let client_conf_path = server_config.client_config_path.as_ref().unwrap().clone();
-        let _client_register_t = tokio::spawn( 
-            async move {
-                client_register_handler(
-                    client_register_recv, 
-                    connect_ip_clients_clone, 
-                    static_clients_clone,
-                    client_conf_path).await
-            }
-        );
-        
+        let _client_register_t = tokio::spawn(async move {
+            client_register_handler(
+                client_register_recv,
+                connect_ip_clients_clone,
+                static_clients_clone,
+                client_conf_path,
+            )
+            .await
+        });
+
         let (tun_sender, tun_receiver) =
             tokio::sync::mpsc::channel::<Vec<u8>>(MAX_CHANNEL_MESSAGES);
         // Create TUN handler (creates device automatically)
@@ -400,14 +399,17 @@ impl Server {
                 // FIrst reserve an address for the client
                 {
                     let mut clients_bind = connect_ip_clients.lock().await;
-                    if let Some(v) = 
-                        get_next_free_ip(current_ip, &clients_bind) {
+                    if let Some(v) = get_next_free_ip(current_ip, &clients_bind) {
                         current_ip = v;
-                        clients_bind.insert(current_ip, ConnectIpClient { 
-                            assigned_addr: current_ip, 
-                            id: "".to_string(), 
-                            static_addr: false, 
-                            sender: None });
+                        clients_bind.insert(
+                            current_ip,
+                            ConnectIpClient {
+                                assigned_addr: current_ip,
+                                id: "".to_string(),
+                                static_addr: false,
+                                sender: None,
+                            },
+                        );
                     }
                 }
                 tokio::spawn(async move {
@@ -455,28 +457,34 @@ impl Server {
 ///
 /// Reads the known-clients toml file from disk and parses it
 /// If the file doesn't exist we create it in the default location
-/// 
+///
 pub async fn read_known_clients(config_path: &String) -> Result<StaticClientMap, ConfigError> {
     // Check if the file exists
     if !Path::new(&config_path).exists() {
-        File::create_new(&config_path).await
-            .unwrap_or_else(|e| panic!("Could not create config file at \"{}\": {}",
-        config_path, e));
+        File::create_new(&config_path).await.unwrap_or_else(|e| {
+            panic!("Could not create config file at \"{}\": {}", config_path, e)
+        });
         return Ok(Arc::new(Mutex::new(HashMap::new())));
     }
 
     let mut file = match File::open(config_path.clone()).await {
         Ok(v) => v,
         Err(e) => {
-            return Err(ConfigError::ConfigFileError((e.to_string(), config_path.to_owned())));
-        },
+            return Err(ConfigError::ConfigFileError((
+                e.to_string(),
+                config_path.to_owned(),
+            )));
+        }
     };
     let mut config_contents = String::new();
     match file.read_to_string(&mut config_contents).await {
-        Ok(_) => {},
+        Ok(_) => {}
         Err(e) => {
-            return Err(ConfigError::ConfigFileError((e.to_string(), config_path.to_owned())));
-        },
+            return Err(ConfigError::ConfigFileError((
+                e.to_string(),
+                config_path.to_owned(),
+            )));
+        }
     }
     #[derive(Deserialize, Debug)]
     struct Client {
@@ -491,14 +499,19 @@ pub async fn read_known_clients(config_path: &String) -> Result<StaticClientMap,
     }
 
     let clients: Config = toml::from_str(&config_contents).unwrap();
-    let res: StaticClientMap =  Arc::new(Mutex::new(HashMap::new()));
+    let res: StaticClientMap = Arc::new(Mutex::new(HashMap::new()));
     for c in clients.clients {
-        res.lock().await.insert(c.id, Ipv4Addr::from_str(&c.ip).unwrap());
+        res.lock()
+            .await
+            .insert(c.id, Ipv4Addr::from_str(&c.ip).unwrap());
     }
     Ok(res)
 }
 
-fn get_next_free_ip(mut start_ip: Ipv4Addr, existing_clients: &MutexGuard<HashMap<Ipv4Addr, ConnectIpClient>>) -> Option<Ipv4Addr> {
+fn get_next_free_ip(
+    mut start_ip: Ipv4Addr,
+    existing_clients: &MutexGuard<HashMap<Ipv4Addr, ConnectIpClient>>,
+) -> Option<Ipv4Addr> {
     while let Ok(v) = get_next_ipv4(start_ip, STANDARD_NETMASK) {
         if existing_clients.contains_key(&v) {
             start_ip = v;
@@ -529,7 +542,7 @@ async fn handle_client(
     tun_sender: &tokio::sync::mpsc::Sender<Vec<u8>>,
     ip_connect_clients: ConnectIpClientList,
     static_clients: StaticClientMap,
-    register_handler: tokio::sync::mpsc::Sender<IpRegisterRequest>
+    register_handler: tokio::sync::mpsc::Sender<IpRegisterRequest>,
 ) {
     let mut http3_conn: Option<quiche::h3::Connection> = None;
     let (http3_sender, mut http3_receiver) = mpsc::unbounded_channel::<ToSend>();
@@ -960,9 +973,10 @@ async fn handle_http3_event(
                             assigned_addr: client_handler.client_ip,
                             id: "".to_string(),
                             static_addr: false,
-                            sender: Some(tun_sender_from)
+                            sender: Some(tun_sender_from),
                         };
-                        client_handler.connect_ip_clients
+                        client_handler
+                            .connect_ip_clients
                             .lock()
                             .await
                             .insert(client_handler.client_ip, conn_ip_client);
@@ -1124,7 +1138,8 @@ async fn handle_http3_event(
                     );
                 }
             }
-            if client_handler.connect_ip_clients
+            if client_handler
+                .connect_ip_clients
                 .lock()
                 .await
                 .contains_key(&client_handler.client_ip)
@@ -1135,7 +1150,8 @@ async fn handle_http3_event(
                     ip_session.handler_thread.as_ref().unwrap().abort();
                 }
                 client_handler.connect_ip_session.take();
-                client_handler.connect_ip_clients
+                client_handler
+                    .connect_ip_clients
                     .lock()
                     .await
                     .remove(&client_handler.client_ip);
@@ -1171,7 +1187,8 @@ async fn handle_http3_event(
                     );
                 }
             }
-            if client_handler.connect_ip_clients
+            if client_handler
+                .connect_ip_clients
                 .lock()
                 .await
                 .contains_key(&client_handler.client_ip)
@@ -1182,7 +1199,8 @@ async fn handle_http3_event(
                     ip_session.handler_thread.as_ref().unwrap().abort();
                 }
                 client_handler.connect_ip_session.take();
-                client_handler.connect_ip_clients
+                client_handler
+                    .connect_ip_clients
                     .lock()
                     .await
                     .remove(&client_handler.client_ip);
@@ -1513,20 +1531,29 @@ async fn tun_socket_handler(
             let pkt = &buf[..size];
             // parse packet to get destination ip
             // then send it to handler for dest ip
+            // TODO: remove Packet::new, we don't need that anymore
             if let Ok(ip_pkt) = Packet::new(&pkt[..size]) {
-                if let Some(ip_handler_) = ip_handlers_clone.lock().await.get(&ip_pkt.destination()) {
+                if let Some(ip_handler_) = ip_handlers_clone.lock().await.get(&ip_pkt.destination())
+                {
                     info!(
                         "Tun Handler received packet | Src: {} To: {}",
                         &ip_pkt.source(),
                         &ip_pkt.destination()
                     );
-                    ip_handler_
-                        .sender.as_ref().unwrap()
-                        .send(pkt.to_vec())
-                        .await
-                        .expect("Could not send a message to ip handler channel!");
+
+                    if ip_handler_.sender.is_some() {
+                        ip_handler_
+                            .sender
+                            .as_ref()
+                            .unwrap()
+                            .send(pkt.to_vec())
+                            .await
+                            .expect("Could not send a message to ip handler channel!");
+                    } else {
+                        error!("Could not find ip sender for ip: {}", &ip_pkt.destination());
+                    }
                 } else {
-                    debug!(
+                    info!(
                         "Got packet for unknown client | Src: {} To: {}",
                         &ip_pkt.source(),
                         &ip_pkt.destination()
@@ -1549,7 +1576,10 @@ async fn tun_socket_handler(
                     // check if we can directly forward the packet to one of the other clients
                     let dest = get_ipv4_pkt_dest(&pkt);
                     if let Some(client) = ip_handlers.lock().await.get(&dest) {
-                        client.sender.as_ref().unwrap()
+                        client
+                            .sender
+                            .as_ref()
+                            .unwrap()
                             .send(pkt)
                             .await
                             .expect("IP Channel sender error! Direct IP sending to client");
@@ -1691,13 +1721,14 @@ async fn connect_ip_handler(
                             CapsuleType::AddressRequest(c) => {
                                 // Ask the address handler if the address is free
                                 let mut ret_addr = Ipv4Addr::UNSPECIFIED;
-                                if let IpLength::V4(addr) = c.requested.first().unwrap().ip_address {
+                                if let IpLength::V4(addr) = c.requested.first().unwrap().ip_address
+                                {
                                     let addr = Ipv4Addr::from(addr);
                                     if addr == Ipv4Addr::UNSPECIFIED {
                                         ret_addr = assigned_ip;
                                     } else {
-                                        let (ip_addr_sender, mut ip_addr_receiver) 
-                                            = tokio::sync::mpsc::channel(1);
+                                        let (ip_addr_sender, mut ip_addr_receiver) =
+                                            tokio::sync::mpsc::channel(1);
                                         let req = IpRegisterRequest {
                                             callback: ip_addr_sender,
                                             requested_address: addr,
@@ -1719,10 +1750,9 @@ async fn connect_ip_handler(
                                     // TODO: Implement some proper closing of the connection
                                     return;
                                 }
-                                
 
-                                debug!("Got ADDRESS_REQUEST capsule, sending ADDRESS_ASSIGN...");
-                                let cap_buf = create_addr_assign(ret_addr, c.requested[0].request_id);
+                                let cap_buf =
+                                    create_addr_assign(ret_addr, c.requested[0].request_id);
                                 http3_sender_clone_2
                                     .send(ToSend {
                                         stream_id,
@@ -1743,11 +1773,13 @@ async fn connect_ip_handler(
                                 static_client = true;
                                 client_id = String::from_utf8(v.id)
                                     .expect("Client provided a invalid utf8 string");
-                                let mut cap_buf = Vec::new();
+                                info!("Received client hello from {}", client_id);
+                                let mut cap_buf;
                                 if let Some(ip_addr) = static_clients.lock().await.get(&client_id) {
                                     // We know this client already. Register it and send AddressAssign
                                     let mut ret_addr = Ipv4Addr::UNSPECIFIED;
-                                    let (ip_addr_sender, mut ip_addr_receiver) = tokio::sync::mpsc::channel(1);
+                                    let (ip_addr_sender, mut ip_addr_receiver) =
+                                        tokio::sync::mpsc::channel(1);
                                     let req = IpRegisterRequest {
                                         callback: ip_addr_sender,
                                         requested_address: *ip_addr,
@@ -1755,9 +1787,9 @@ async fn connect_ip_handler(
                                         former_ip: assigned_ip,
                                         static_addr: true,
                                     };
-                                    ip_register_handler.send(req)
-                                            .await
-                                            .expect("Could not send channel message to ip register handler!");
+                                    ip_register_handler.send(req).await.expect(
+                                        "Could not send channel message to ip register handler!",
+                                    );
                                     if let Some(ret) = ip_addr_receiver.recv().await {
                                         ret_addr = ret;
                                     }
@@ -1789,7 +1821,7 @@ async fn connect_ip_handler(
                                         finished: false,
                                     })
                                     .expect("Could not send to http3 channel..");
-                            },
+                            }
                         }
                     }
                     Content::Datagram { mut payload } => {
@@ -1828,7 +1860,6 @@ async fn connect_ip_handler(
                                     .send(payload[length..].to_vec())
                                     .await
                                     .expect("Wasn't able to send ip packet to tun handler");
-                                
                             }
                             6 => {
                                 continue;
@@ -1994,7 +2025,6 @@ async fn udp_connect_handler(
     };
 }
 
-
 ///
 /// Waits for new connecting clients.
 /// If the client doesn't wish to be registered with a static IP it gets the first free ip address
@@ -2045,7 +2075,7 @@ async fn client_register_handler(
                 } else {
                     let old_client = clients_binding.remove(&request.former_ip).unwrap();
                     let client = clients_binding.get_mut(&request.requested_address).unwrap();
-                    
+
                     if client.id == request.id {
                         // send reply with requested address to the client
                         request
@@ -2109,7 +2139,10 @@ async fn client_register_handler(
                     }
 
                     // save client to static_clients list as well
-                    static_clients.lock().await.insert(request.id, request.requested_address);
+                    static_clients
+                        .lock()
+                        .await
+                        .insert(request.id, request.requested_address);
                 }
             }
         }
