@@ -1709,7 +1709,9 @@ async fn connect_ip_handler(
                                             .await
                                             .expect("Could not send channel message to ip register handler!");
                                         if let Some(ret) = ip_addr_receiver.recv().await {
+                                            info!("Got address for client: {ret}");
                                             ret_addr = ret;
+                                            assigned_ip = ret;
                                         }
                                     }
                                 } else {
