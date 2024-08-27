@@ -4,3 +4,4 @@
 **/*.*qlog
 **/config/server_known_clients.toml
 **/config/server_config.toml
+**/config/client_config.toml
