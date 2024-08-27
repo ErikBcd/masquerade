@@ -1767,6 +1767,7 @@ async fn connect_ip_handler(
                                 } else {
                                     // Create a CLIENT_HELLO capsule to signal that we don't know
                                     // the client
+                                    info!("Sending hello to new static client!");
                                     let hell = ClientHello {
                                         length: 9,
                                         id_length: 6,
@@ -1776,6 +1777,7 @@ async fn connect_ip_handler(
                                         capsule_id: CLIENT_HELLO_ID,
                                         capsule_type: CapsuleType::ClientHello(hell),
                                     };
+                                    cap_buf = vec![0; 9];
                                     cap.serialize(&mut cap_buf);
                                 }
                                 http3_sender_clone_2
