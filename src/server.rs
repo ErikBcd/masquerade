@@ -1656,26 +1656,6 @@ async fn connect_ip_handler(
     let mut static_client = false;
     let mut client_id = String::new();
 
-    let create_addr_assign = |addr: Ipv4Addr, request_id: u64| -> Vec<u8> {
-        let addr = AssignedAddress {
-            request_id,
-            ip_version: 4,
-            ip_address: IpLength::V4(addr.into()),
-            ip_prefix_len: 0, // we only give out a single IP per client
-        };
-        let req_inner_cap = AddressAssign {
-            length: 9,
-            assigned_address: vec![addr],
-        };
-        let req_cap = Capsule {
-            capsule_id: ADDRESS_ASSIGN_ID,
-            capsule_type: CapsuleType::AddressAssign(req_inner_cap),
-        };
-        let mut cap_buf = vec![0; 9];
-        req_cap.serialize(&mut cap_buf);
-        cap_buf
-    };
-
     let read_task = tokio::spawn(async move {
         loop {
             // Check for packets in the tun receiver
@@ -1756,7 +1736,8 @@ async fn connect_ip_handler(
                                 }
 
                                 let cap_buf =
-                                    create_addr_assign(ret_addr, c.requested[0].request_id);
+                                    AddressAssign::create_sendable(ret_addr, None, Some(c.requested[0].request_id));
+                                   // create_addr_assign(ret_addr, c.requested[0].request_id);
                                 http3_sender_clone_2
                                     .send(ToSend {
                                         stream_id,
@@ -1778,7 +1759,7 @@ async fn connect_ip_handler(
                                 client_id = String::from_utf8(v.id)
                                     .expect("Client provided a invalid utf8 string");
                                 info!("Received client hello from {}", client_id);
-                                let mut cap_buf;
+                                let cap_buf;
                                 if let Some(ip_addr) = static_clients.lock().await.get(&client_id) {
                                     // We know this client already. Register it and send AddressAssign
                                     let mut ret_addr = Ipv4Addr::UNSPECIFIED;
@@ -1797,24 +1778,12 @@ async fn connect_ip_handler(
                                     if let Some(ret) = ip_addr_receiver.recv().await {
                                         ret_addr = ret;
                                     }
-                                    // TODO: if this didn't succeed we might wanna handle this somehow
-                                    //       for now we just send back an UNSPECIFIED message
-                                    cap_buf = create_addr_assign(ret_addr, 0);
+                                    cap_buf = 
+                                        AddressAssign::create_sendable(ret_addr, None, None);
                                 } else {
                                     // Create a CLIENT_HELLO capsule to signal that we don't know
                                     // the client
-                                    info!("Sending hello to new static client!");
-                                    let hell = ClientHello {
-                                        length: 9,
-                                        id_length: 6,
-                                        id: vec![b'S', b'E', b'R', b'V', b'E', b'R'],
-                                    };
-                                    let cap = Capsule {
-                                        capsule_id: CLIENT_HELLO_ID,
-                                        capsule_type: CapsuleType::ClientHello(hell),
-                                    };
-                                    cap_buf = vec![0; 9];
-                                    cap.serialize(&mut cap_buf);
+                                    cap_buf = ClientHello::create_sendable("SERVER".to_owned()).unwrap();
                                 }
                                 http3_sender_clone_2
                                     .send(ToSend {

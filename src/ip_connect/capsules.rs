@@ -242,16 +242,14 @@ impl AddressAssign {
     /// If prefix is None the requested prefix will be 32, 
     /// request_id defaults to 0
     /// 
-    pub fn create_new(addr: String, prefix: Option<u8>, request_id: Option<u64>) -> Capsule {
+    pub fn create_new(addr: Ipv4Addr, prefix: Option<u8>, request_id: Option<u64>) -> Capsule {
         let prefix = prefix.unwrap_or(32);
         let request_id = request_id.unwrap_or(0);
 
         let addr = AssignedAddress {
             request_id,
             ip_version: 4,
-            ip_address: IpLength::V4(
-                Ipv4Addr::from_str(&addr)
-                .expect("Couldn't parse given static address!").into()),
+            ip_address: IpLength::V4(addr.into()),
             ip_prefix_len: prefix, // we only give out a single IP per client
         };
         let req_inner_cap = AddressAssign {
@@ -269,7 +267,7 @@ impl AddressAssign {
     /// If prefix is None the requested prefix will be 32,
     /// request_id defaults to 0
     /// 
-    pub fn create_sendable(addr: String, prefix: Option<u8>, request_id: Option<u64>) -> Vec<u8> {
+    pub fn create_sendable(addr: Ipv4Addr, prefix: Option<u8>, request_id: Option<u64>) -> Vec<u8> {
         let cap = AddressAssign::create_new(addr, prefix, request_id);
         let mut buf = vec![0; 9];
         cap.serialize(&mut buf);
@@ -337,15 +335,14 @@ impl AddressRequest {
     /// Creates a new basic Capsule containing an ADDRESS_REQUEST.
     /// If prefix is None the requested prefix will be 32
     /// 
-    pub fn create_new(addr: String, prefix: Option<u8>) -> Capsule {
+    pub fn create_new(addr: Ipv4Addr, prefix: Option<u8>, request_id: Option<u64>) -> Capsule {
         let prefix = prefix.unwrap_or(32);
+        let request_id = request_id.unwrap_or(0);
 
         let addr_request = RequestedAddress {
-            request_id: 0,
+            request_id,
             ip_version: 4,
-            ip_address: IpLength::V4(
-                Ipv4Addr::from_str(&addr)
-                .expect("Couldn't parse given static address!").into()),
+            ip_address: IpLength::V4(addr.into()),
             ip_prefix_len: prefix,
         };
 
@@ -366,8 +363,8 @@ impl AddressRequest {
     /// Creates a new serialized capsule containing an ADDRESS_REQUEST
     /// If prefix is None the requested prefix will be 32
     /// 
-    pub fn create_sendable(addr: String, prefix: Option<u8>) -> Vec<u8> {
-        let cap = AddressRequest::create_new(addr, prefix);
+    pub fn create_sendable(addr: Ipv4Addr, prefix: Option<u8>, request_id: Option<u64>) -> Vec<u8> {
+        let cap = AddressRequest::create_new(addr, prefix, request_id);
         let mut buf = vec![0; 9];
         cap.serialize(&mut buf);
         buf
