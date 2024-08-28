@@ -2137,12 +2137,20 @@ async fn add_static_client_config(addr: Ipv4Addr, id: String, path: &str, static
         .insert(id, addr);
 
     let mut new_contents = String::new();
+    const CONFIG_DESCRIPTION: &str = 
+        "# This file holds masquerade clients that registered static ip addresses\n\
+         # You may add new clients here following this scheme: \n\
+         # [[clients]]\n\
+         # id = 'exampleID'\n\
+         # ip = '10.8.1.1'\n\n";
+
+    new_contents.push_str(CONFIG_DESCRIPTION);
     for c in static_clients.lock().await.iter() {
         new_contents.push_str(
             &format!(
-                "\n[[clients]]\n\
+                "[[clients]]\n\
                 id = \'{}\'\n\
-                ip = \'{}\'\n",
+                ip = \'{}\'\n\n",
                 c.0, c.1
             )
         );
