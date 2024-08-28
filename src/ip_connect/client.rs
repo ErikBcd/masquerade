@@ -575,6 +575,7 @@ async fn quic_conn_handler(
                                                         .unwrap_or_else(|e| {
                                                             error!("sending http3 data capsule failed: {:?}", e)
                                                         });
+                                                    continue;
                                                 }
                                                 // TODO: Check if this is the address we currently want
                                                 //       The server might still have an old address of ours
