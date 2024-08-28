@@ -32,6 +32,8 @@ pub async fn setup_http1_client() -> Result<(TcpStream, TcpStream), Box<dyn Erro
                 local_uplink_device_ip: Some("0.0.0.0".to_owned()),
                 local_uplink_device_name: Some("lo".to_owned()),
                 client_config_path: Some("./config/server_known_clients.toml".to_owned()),
+                create_qlog_file: Some(false),
+                qlog_file_path: Some("".to_string()),
         }).await.unwrap_or_else(|e| 
             println!("http1 test: failed tp run server: {:?}", e));
     });
@@ -117,6 +119,8 @@ pub async fn setup_socks5_tcp_client() -> Result<(TcpStream, TcpStream), Box<dyn
                 local_uplink_device_ip: Some("0.0.0.0".to_owned()),
                 local_uplink_device_name: Some("lo".to_owned()),
                 client_config_path: Some("./config/server_known_clients.toml".to_owned()),
+                create_qlog_file: Some(false),
+                qlog_file_path: Some("".to_string()),
         }).await.unwrap_or_else(|e| 
             println!("socks5 udp test: failed tp run server: {:?}", e));
     });
@@ -185,6 +189,8 @@ pub async fn setup_socks5_udp_client() -> Result<(UdpSocket, TcpStream), Box<dyn
                 local_uplink_device_ip: Some("0.0.0.0".to_owned()),
                 local_uplink_device_name: Some("lo".to_owned()),
                 client_config_path: Some("./config/server_known_clients.toml".to_owned()),
+                create_qlog_file: Some(false),
+                qlog_file_path: Some("".to_string()),
             }
         ).await.unwrap_or_else(|e| 
             println!("socks5 udp test: failed tp run server: {:?}", e));

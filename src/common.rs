@@ -57,6 +57,26 @@ pub struct ToSend {
     pub finished: bool,
 }
 
+/// Makes a buffered writer for a qlog.
+pub fn make_qlog_writer(
+    dir: &str,
+    role: &str,
+    id: &str,
+) -> std::io::BufWriter<std::fs::File> {
+    let mut path = std::path::PathBuf::from(dir);
+    let filename = format!("{role}-{id}.sqlog");
+    path.push(filename);
+
+    match std::fs::File::create(&path) {
+        Ok(f) => std::io::BufWriter::new(f),
+
+        Err(e) => panic!(
+            "Error creating qlog file attempted path was {:?}: {}",
+            path, e
+        ),
+    }
+}
+
 /// Gets the next IPv4 address
 /// If the next address isn't allowed by the netmask an error is returned.
 ///

@@ -61,6 +61,8 @@ pub struct ServerConfig {
     pub local_uplink_device_ip: Option<String>,
     pub local_uplink_device_name: Option<String>,
     pub client_config_path: Option<String>,
+    pub create_qlog_file: Option<bool>,
+    pub qlog_file_path: Option<String>,
 }
 
 impl std::fmt::Display for ServerConfig {
@@ -74,6 +76,8 @@ impl std::fmt::Display for ServerConfig {
             local_uplink_device_ip      = {:?}\n\
             local_uplink_device_name    = {:?}\n\
             client_config_path          = {:?}\n\
+            create_qlog_file            = {:?}\n\
+            qlog_file_path              = {:?}\n\
             ",
             self.server_address.as_ref().unwrap(),
             self.interface_address.as_ref().unwrap(),
@@ -81,6 +85,8 @@ impl std::fmt::Display for ServerConfig {
             self.local_uplink_device_ip.as_ref().unwrap(),
             self.local_uplink_device_name.as_ref().unwrap(),
             self.client_config_path.as_ref().unwrap(),
+            self.create_qlog_file.as_ref().unwrap(),
+            self.qlog_file_path.as_ref().unwrap(),
         )
     }
 }
@@ -266,8 +272,9 @@ impl Server {
             tokio::sync::mpsc::channel::<Vec<u8>>(MAX_CHANNEL_MESSAGES);
         // Create TUN handler (creates device automatically)
         let connect_ip_clients_clone = connect_ip_clients.clone();
+        let server_config_clone = server_config.clone();
         let _tun_thread = tokio::spawn(async move {
-            tun_socket_handler(connect_ip_clients_clone, tun_receiver, server_config).await;
+            tun_socket_handler(connect_ip_clients_clone, tun_receiver, server_config_clone).await;
         });
 
         let local_addr = socket.local_addr().unwrap();
@@ -388,11 +395,25 @@ impl Server {
 
                 let (tx, rx) = mpsc::unbounded_channel();
 
-                let client = Client {
+                let mut client = Client {
                     conn,
                     quic_receiver: rx,
                     socket: socket.clone(),
                 };
+
+                // If the user wanted it, create a qlog file
+                if server_config.create_qlog_file.unwrap() {
+                    if let Some(dir) = server_config.qlog_file_path.clone() {
+                        let id = format!("{:?}", &scid);
+                        let writer = make_qlog_writer(&dir, "server", &id);
+
+                        client.conn.set_qlog(
+                            std::boxed::Box::new(writer),
+                            "quiche-server qlog".to_string(),
+                            format!("{} id={}", "quiche-server qlog", id),
+                        );
+                    }
+                }
 
                 clients.insert(scid.clone(), tx);
                 let tun_sender_clone = tun_sender.clone();

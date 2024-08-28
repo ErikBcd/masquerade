@@ -19,3 +19,11 @@ local_uplink_device_ip = "0.0.0.0"
 # Configuration contains all clients that connected to the server and asked for a 
 # static address instead of a dynamically assigned one. Will be created and populated by the server.
 client_config = "./config/server_known_clients.toml"
+
+# qlog is a logging format for QUIC connections and can be used for examining different behaviour
+# in a connection such as latency, congestion, and more.
+# See here for more information: https://quicwg.org/qlog/draft-ietf-quic-qlog-quic-events.html
+
+# If you want qlog files to be created set this to true
+create_qlog_file = false
+qlog_file_path = "./qlog/"
