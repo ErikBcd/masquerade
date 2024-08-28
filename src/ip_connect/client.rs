@@ -31,6 +31,8 @@ pub struct ClientConfig {
     pub static_address: Option<String>,
     pub client_name: Option<String>,
     pub thread_channel_max: Option<usize>,
+    pub create_qlog_file: Option<bool>,
+    pub qlog_file_path: Option<String>,
 }
 
 impl std::fmt::Display for ClientConfig {
@@ -38,14 +40,16 @@ impl std::fmt::Display for ClientConfig {
         write!(
             f,
             "\
-            server_address    = {:?}\n\
-            interface_address = {:?}\n\
-            interface_name    = {:?}\n\
-            interface_gateway = {:?}\n\
-            use_static_ip     = {:?}\n\
-            static_address    = {:?}\n\
-            client_name       = {:?}\n\
-            thread_channel_max= {:?}\n\
+            server_address     = {:?}\n\
+            interface_address  = {:?}\n\
+            interface_name     = {:?}\n\
+            interface_gateway  = {:?}\n\
+            use_static_ip      = {:?}\n\
+            static_address     = {:?}\n\
+            client_name        = {:?}\n\
+            thread_channel_max = {:?}\n\
+            create_qlog_file   = {:?}\n\
+            qlog_file_path     = {:?}\n\
             ",
             self.server_address,
             self.interface_address,
@@ -55,6 +59,8 @@ impl std::fmt::Display for ClientConfig {
             self.static_address,
             self.client_name,
             self.thread_channel_max,
+            self.create_qlog_file.as_ref().unwrap(),
+            self.qlog_file_path.as_ref().unwrap(),
         )
     }
 }
@@ -1036,7 +1042,12 @@ impl ConnectIPClient {
         };
         debug!("Created UDP socket");
         let quic_conn = match self
-            .create_quic_conn(&mut socket, config.server_address.as_ref().unwrap())
+            .create_quic_conn(
+                &mut socket, 
+                config.server_address.as_ref().unwrap(),
+                config.create_qlog_file.unwrap(),
+                config.qlog_file_path.as_ref().unwrap()
+            )
             .await
         {
             Ok(v) => v,
@@ -1124,6 +1135,8 @@ impl ConnectIPClient {
         &self,
         udp_socket: &mut UdpSocket,
         server_addr: &String,
+        create_qlog: bool,
+        qlog_path: &str,
     ) -> Result<Connection, quiche::Error> {
         let mut http_start = "";
         if !server_addr.starts_with("https://") {
@@ -1171,6 +1184,18 @@ impl ConnectIPClient {
             udp_socket.local_addr().unwrap(),
             hex_dump(&scid)
         );
+
+        // If the user wanted it, create a qlog file
+        if create_qlog {
+            let id = format!("{:?}", &scid);
+            let writer = make_qlog_writer(qlog_path, "connect-ip-client", &id);
+
+            connection.set_qlog(
+                std::boxed::Box::new(writer),
+                "quiche-client qlog".to_string(),
+                format!("{} id={}", "quiche-client qlog", id),
+            );
+        }
 
         let mut out = [0; MAX_DATAGRAM_SIZE];
 

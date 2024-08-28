@@ -32,6 +32,10 @@ fn read_config() -> Result<ClientConfig, ConfigError> {
         .arg(arg!(--thread_channel_max <usize>).required(false)
             .help("The maximum amount of messages that each thread can buffer before dropping packets. [default: 200]")
             .value_parser(clap::value_parser!(usize)))   
+        .arg(arg!(--create_qlog_file <bool>).required(false)
+            .help("Create a qlog file for the connections the server receives. [default: false]"))
+        .arg(arg!(--qlog_file_path <PATH>).required(false)
+            .help("Directory in which the qlog files will be saved if created. [default: ./qlog/]"))
         .get_matches();
 
     let config_path = matches
@@ -87,6 +91,14 @@ fn read_config() -> Result<ClientConfig, ConfigError> {
         config.thread_channel_max = Some(thread_channel_max.to_owned());
     }
 
+    if let Some(create_qlog_file) = matches.get_one::<bool>("create_qlog_file") {
+        config.create_qlog_file = Some(create_qlog_file.to_owned());
+    }
+
+    if let Some(qlog_file_path) = matches.get_one::<String>("qlog_file_path") {
+        config.qlog_file_path = Some(qlog_file_path.to_owned());
+    }
+
     // Check the config for any missing arguments
     // Default arguments will be filled out automatically
     if config.server_address.is_none() {
@@ -119,6 +131,14 @@ fn read_config() -> Result<ClientConfig, ConfigError> {
 
     if config.thread_channel_max.is_none() {
         config.thread_channel_max = Some(200);
+    }
+
+    if config.create_qlog_file.is_none() {
+        config.create_qlog_file = Some(false);
+    }
+
+    if config.qlog_file_path.is_none() {
+        config.qlog_file_path = Some("./qlog/".to_owned());
     }
 
     // Sanity checks
