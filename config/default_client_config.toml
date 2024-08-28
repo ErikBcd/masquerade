@@ -18,3 +18,10 @@ use_static_address = false
 static_address = "0.0.0.0/32"
 # Needed so the server can identify the client and reserve the address for future use.
 client_name = ""
+
+# The client has multiple threads that read/write from network sockets and handle these messages
+# They communicate with each other by using message channels, which can contain a number of messages.
+# This option determines the maximum amount of messages in each channel. High numbers may lead
+# to instability of the program, while low numbers lead to high packet loss because 
+# messages might get dropped when a channel is full.
+thread_channel_max = 200

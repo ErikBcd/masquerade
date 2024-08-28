@@ -29,6 +29,8 @@ fn read_config() -> Result<ClientConfig, ConfigError> {
             .help("Set a static address within the VPN subnet for the client. [default: 0.0.0.0/32]"))
         .arg(arg!(--client_name <String>).required(false)
             .help("Identification of the client sent to the server. [default: \"\"/ Empty]"))
+        .arg(arg!(--thread_channel_max <u32>).required(false)
+            .help("The maximum amount of messages that each thread can buffer before dropping packets. [default: 200]"))   
         .get_matches();
 
     let config_path = matches
@@ -80,6 +82,10 @@ fn read_config() -> Result<ClientConfig, ConfigError> {
         config.client_name = Some(client_name.to_owned());
     }
 
+    if let Some(thread_channel_max) = matches.get_one::<usize>("thread_channel_max") {
+        config.thread_channel_max = Some(thread_channel_max.to_owned());
+    }
+
     // Check the config for any missing arguments
     // Default arguments will be filled out automatically
     if config.server_address.is_none() {
@@ -108,6 +114,10 @@ fn read_config() -> Result<ClientConfig, ConfigError> {
 
     if config.client_name.is_none() {
         config.client_name = Some("".to_owned());
+    }
+
+    if config.thread_channel_max.is_none() {
+        config.thread_channel_max = Some(200);
     }
 
     // Sanity checks

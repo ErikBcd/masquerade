@@ -7,7 +7,7 @@ use std::{
     net::{self, Ipv4Addr},
     str::FromStr,
 };
-pub const MAX_DATAGRAM_SIZE: usize = 4000;
+pub const MAX_DATAGRAM_SIZE: usize = 65535;
 
 #[derive(Debug)]
 pub enum ConfigError {

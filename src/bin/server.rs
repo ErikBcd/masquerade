@@ -1,5 +1,4 @@
 use clap::{arg, command};
-use log::info;
 use masquerade_proxy::common::ConfigError;
 use masquerade_proxy::server::{Server, ServerConfig};
 

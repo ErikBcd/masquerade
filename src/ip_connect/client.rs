@@ -32,6 +32,7 @@ pub struct ClientConfig {
     pub use_static_address: Option<bool>,
     pub static_address: Option<String>,
     pub client_name: Option<String>,
+    pub thread_channel_max: Option<usize>,
 }
 
 impl std::fmt::Display for ClientConfig {
@@ -45,6 +46,7 @@ impl std::fmt::Display for ClientConfig {
             use_static_ip     = {:?}\n\
             static_address    = {:?}\n\
             client_name       = {:?}\n\
+            thread_channel_max= {:?}\n\
             ",
             self.server_address,
             self.interface_address,
@@ -53,6 +55,7 @@ impl std::fmt::Display for ClientConfig {
             self.use_static_address,
             self.static_address,
             self.client_name,
+            self.thread_channel_max,
         )
     }
 }
@@ -1092,10 +1095,10 @@ impl ConnectIPClient {
         // 4) Create receivers/senders
 
         // ip_sender for ip_receiver_t, ip_recv for ip_handler_t
-        let (ip_sender, ip_recv) = tokio::sync::mpsc::channel(MAX_CHANNEL_MSG);
-        let (http3_dispatch, http3_dispatch_reader) = tokio::sync::mpsc::channel(MAX_CHANNEL_MSG);
-        let (ip_dispatch, ip_dispatch_reader) = tokio::sync::mpsc::channel(MAX_CHANNEL_MSG);
-        let (conn_info_sender, conn_info_recv) = tokio::sync::mpsc::channel(MAX_CHANNEL_MSG);
+        let (ip_sender, ip_recv) = tokio::sync::mpsc::channel(config.thread_channel_max.unwrap());
+        let (http3_dispatch, http3_dispatch_reader) = tokio::sync::mpsc::channel(config.thread_channel_max.unwrap());
+        let (ip_dispatch, ip_dispatch_reader) = tokio::sync::mpsc::channel(config.thread_channel_max.unwrap());
+        let (conn_info_sender, conn_info_recv) = tokio::sync::mpsc::channel(config.thread_channel_max.unwrap());
 
         // Copies of senders
         let ip_from_quic_sender = ip_sender.clone();
