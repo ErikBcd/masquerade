@@ -561,7 +561,7 @@ async fn quic_conn_handler(
                                                     config.static_address.as_ref().unwrap().clone()
                                                 );
                                                 let requested_addr = Ipv4Addr::from_str(&addr).unwrap();
-                                                if assigned_addr != requested_addr {
+                                                if assigned_addr != requested_addr && requested_addr != Ipv4Addr::UNSPECIFIED {
                                                     // send another address request
                                                     let buf = AddressRequest::create_sendable(
                                                         requested_addr, prefix, None);

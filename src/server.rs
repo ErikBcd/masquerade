@@ -1707,28 +1707,30 @@ async fn connect_ip_handler(
                                 let mut ret_addr = Ipv4Addr::UNSPECIFIED;
                                 if let IpLength::V4(addr) = c.requested.first().unwrap().ip_address
                                 {
-                                    let addr = Ipv4Addr::from(addr);
+                                    let mut addr = Ipv4Addr::from(addr);
+                                    // If the client only wants a static ip but doesn't care 
+                                    // which it is we just reserve our current ip
                                     if addr == Ipv4Addr::UNSPECIFIED {
-                                        ret_addr = assigned_ip;
-                                    } else {
-                                        let (ip_addr_sender, mut ip_addr_receiver) =
-                                            tokio::sync::mpsc::channel(1);
-                                        let req = IpRegisterRequest {
-                                            callback: ip_addr_sender,
-                                            requested_address: addr,
-                                            id: client_id.clone(),
-                                            former_ip: assigned_ip,
-                                            static_addr: static_client,
-                                        };
-                                        ip_register_handler.send(req)
-                                            .await
-                                            .expect("Could not send channel message to ip register handler!");
-                                        if let Some(ret) = ip_addr_receiver.recv().await {
-                                            info!("Got address for client: {ret}");
-                                            ret_addr = ret;
-                                            assigned_ip = ret;
-                                        }
+                                        addr = assigned_ip;
                                     }
+                                    let (ip_addr_sender, mut ip_addr_receiver) =
+                                        tokio::sync::mpsc::channel(1);
+                                    let req = IpRegisterRequest {
+                                        callback: ip_addr_sender,
+                                        requested_address: addr,
+                                        id: client_id.clone(),
+                                        former_ip: assigned_ip,
+                                        static_addr: static_client,
+                                    };
+                                    ip_register_handler.send(req)
+                                        .await
+                                        .expect("Could not send channel message to ip register handler!");
+                                    if let Some(ret) = ip_addr_receiver.recv().await {
+                                        info!("Got address for client: {ret}");
+                                        ret_addr = ret;
+                                        assigned_ip = ret;
+                                    }
+
                                 } else {
                                     error!("Client requested ipv6 address, not supported");
                                     // TODO: Implement some proper closing of the connection
