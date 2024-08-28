@@ -2049,8 +2049,25 @@ async fn client_register_handler(
 ) {
     loop {
         if let Some(request) = receiver.recv().await {
+            info!("Client is requesting address. Id: \"{}\" | Ip: {}", request.id, request.requested_address);
             // We have to make sure noone adds a client during this
             let mut clients_binding = connect_ip_clients.lock().await;
+            // if former ip == requested ip we only need to save the client as static if needed
+            if request.former_ip == request.requested_address {
+                let old_client = clients_binding.remove(&request.former_ip);
+                let mut new_client = old_client.unwrap();
+                new_client.static_addr = request.static_addr;
+                new_client.id = request.id.clone();
+                
+                if request.static_addr {
+                    add_static_client_config(request.requested_address, request.id.clone(), &config_path, &static_clients).await;
+                }
+                clients_binding.insert(request.requested_address, new_client);
+
+                request.callback.send(request.former_ip).await
+                    .expect("Couldn't send message to channel!");
+                continue;
+            }
             if clients_binding.contains_key(&request.requested_address) {
                 if !request.static_addr {
                     // Client does not want to get registered
@@ -2124,31 +2141,44 @@ async fn client_register_handler(
                     .expect("Couldn't send message to channel!");
 
                 if request.static_addr {
-                    // Write the client to our config file
-                    // We only need to write id + ip to file
-                    let toml_entry = format!(
-                        "\n[[clients]]\n\
-                        id = \'{}\'\n\
-                        ip = \'{}\'\n",
-                        request.id, request.requested_address
-                    );
-                    let mut file = OpenOptions::new()
-                        .write(true)
-                        .append(true)
-                        .open(config_path.clone())
-                        .await
-                        .unwrap();
-                    if let Err(e) = file.write_all(toml_entry.as_bytes()).await {
-                        error!("Couldn't write to static client list: {e}");
-                    }
-
-                    // save client to static_clients list as well
-                    static_clients
-                        .lock()
-                        .await
-                        .insert(request.id, request.requested_address);
+                    add_static_client_config(request.requested_address, request.id.clone(), &config_path, &static_clients).await;
                 }
             }
         }
     }
+}
+
+async fn add_static_client_config(addr: Ipv4Addr, id: String, path: &str, static_clients: &StaticClientMap) {
+    // Write the client to our config file
+    // We only need to write id + ip to file
+    let toml_entry = format!(
+        "\n[[clients]]\n\
+        id = \'{}\'\n\
+        ip = \'{}\'\n",
+        id, addr
+    );
+    let mut file = OpenOptions::new()
+        .write(true)
+        .append(true)
+        .mode(0o777)
+        .open(path)
+        .await
+        .unwrap();
+    if let Err(e) = file.write_all(toml_entry.as_bytes()).await {
+        error!("Couldn't write to static client list: {e}");
+    }
+
+    // If the static client is already known (for example when changing it's own address), we 
+    // should remove it first from the static clients
+    if static_clients.lock().await.contains_key(&id) {
+        static_clients.lock().await.remove(&id);
+        // TODO: Remove old client from config file!
+    } 
+
+    // save client to static_clients list as well
+    static_clients
+        .lock()
+        .await
+        .insert(id, addr);
+    // TODO: update the saved clients
 }
