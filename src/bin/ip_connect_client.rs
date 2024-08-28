@@ -29,8 +29,9 @@ fn read_config() -> Result<ClientConfig, ConfigError> {
             .help("Set a static address within the VPN subnet for the client. [default: 0.0.0.0/32]"))
         .arg(arg!(--client_name <String>).required(false)
             .help("Identification of the client sent to the server. [default: \"\"/ Empty]"))
-        .arg(arg!(--thread_channel_max <u32>).required(false)
-            .help("The maximum amount of messages that each thread can buffer before dropping packets. [default: 200]"))   
+        .arg(arg!(--thread_channel_max <usize>).required(false)
+            .help("The maximum amount of messages that each thread can buffer before dropping packets. [default: 200]")
+            .value_parser(clap::value_parser!(usize)))   
         .get_matches();
 
     let config_path = matches
