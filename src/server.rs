@@ -1777,6 +1777,7 @@ async fn connect_ip_handler(
                                     );
                                     if let Some(ret) = ip_addr_receiver.recv().await {
                                         ret_addr = ret;
+                                        assigned_ip = ret;
                                     }
                                     cap_buf = 
                                         AddressAssign::create_sendable(ret_addr, None, None);
@@ -2018,7 +2019,10 @@ async fn client_register_handler(
 ) {
     loop {
         if let Some(request) = receiver.recv().await {
-            info!("Client is requesting address. Id: \"{}\" | Ip: {}", request.id, request.requested_address);
+            info!("Client is requesting address. Id: \"{}\" | Ip: {} | Former ip: {}", 
+                request.id, 
+                request.requested_address,
+                request.former_ip);
             // We have to make sure noone adds a client during this
             let mut clients_binding = connect_ip_clients.lock().await;
             // if former ip == requested ip we only need to save the client as static if needed
@@ -2118,30 +2122,12 @@ async fn client_register_handler(
 }
 
 async fn add_static_client_config(addr: Ipv4Addr, id: String, path: &str, static_clients: &StaticClientMap) {
-    // Write the client to our config file
-    // We only need to write id + ip to file
-    let toml_entry = format!(
-        "\n[[clients]]\n\
-        id = \'{}\'\n\
-        ip = \'{}\'\n",
-        id, addr
-    );
-    let mut file = OpenOptions::new()
-        .write(true)
-        .append(true)
-        .mode(0o777)
-        .open(path)
-        .await
-        .unwrap();
-    if let Err(e) = file.write_all(toml_entry.as_bytes()).await {
-        error!("Couldn't write to static client list: {e}");
-    }
+    
 
     // If the static client is already known (for example when changing it's own address), we 
     // should remove it first from the static clients
     if static_clients.lock().await.contains_key(&id) {
         static_clients.lock().await.remove(&id);
-        // TODO: Remove old client from config file!
     } 
 
     // save client to static_clients list as well
@@ -2149,5 +2135,31 @@ async fn add_static_client_config(addr: Ipv4Addr, id: String, path: &str, static
         .lock()
         .await
         .insert(id, addr);
-    // TODO: update the saved clients
+
+    let mut new_contents = String::new();
+    for c in static_clients.lock().await.iter() {
+        new_contents.push_str(
+            &format!(
+                "\n[[clients]]\n\
+                id = \'{}\'\n\
+                ip = \'{}\'\n",
+                c.0, c.1
+            )
+        );
+        info!("Persisting client {}", c.0);
+    }
+
+    // Update the config file
+    // TODO: We should probably limit the times the config file is rewritten
+    //       This can be abused to spam IO, don't use in prod
+    let mut file = OpenOptions::new()
+        .write(true)
+        .mode(0o777)
+        .open(path)
+        .await
+        .unwrap();
+    if let Err(e) = file.write_all(new_contents.as_bytes()).await {
+        error!("Couldn't write to static client list: {e}");
+    }
+
 }
