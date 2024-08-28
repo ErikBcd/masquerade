@@ -450,17 +450,21 @@ async fn quic_conn_handler(
                                 continue;
                             }
                         }
-                        match ip_handler
-                            .send(IpMessage {
-                                message: buf[header_len..len].to_vec(),
-                                dir: Direction::ToClient,
-                            })
-                            .await
-                        {
-                            Ok(()) => {}
-                            Err(e) => {
-                                debug!("Couldn't send ip packet to ip sender: {}", e);
+                        if ip_handler.capacity() > 0 {
+                            match ip_handler
+                                .send(IpMessage {
+                                    message: buf[header_len..len].to_vec(),
+                                    dir: Direction::ToClient,
+                                })
+                                .await
+                            {
+                                Ok(()) => {}
+                                Err(e) => {
+                                    debug!("Couldn't send ip packet to ip sender: {}", e);
+                                }
                             }
+                        } else {
+                            error!("Dropping packet, ip_handler capacity at 0!");
                         }
                     }
                     6 => {
