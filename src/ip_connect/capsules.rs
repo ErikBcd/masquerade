@@ -443,11 +443,12 @@ impl ClientHello {
     /// Returns a `CapsuleParseError` if the id is longer than MAX_CLIENT_HELLO_ID_LEN
     /// 
     pub fn create_sendable(id: String) -> Result<Vec<u8>, CapsuleParseError> {
+        let id_len = id.len();
         let cap = match ClientHello::create_new(id) {
             Ok(v) => v,
             Err(e) => return Err(e),
         };
-        let mut buf = vec![0; 9];
+        let mut buf = vec![0; id_len + 3];
         cap.serialize(&mut buf);
         Ok(buf)
     }
