@@ -25,3 +25,11 @@ client_name = ""
 # to instability of the program, while low numbers lead to high packet loss because 
 # messages might get dropped when a channel is full.
 thread_channel_max = 200
+
+# qlog is a logging format for QUIC connections and can be used for examining different behaviour
+# in a connection such as latency, congestion, and more.
+# See here for more information: https://quicwg.org/qlog/draft-ietf-quic-qlog-quic-events.html
+
+# If you want qlog files to be created set this to true
+create_qlog_file = false
+qlog_file_path = "./qlog/"
