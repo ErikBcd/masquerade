@@ -26,8 +26,8 @@ use tokio::time::{self, Duration};
 use ring::rand::*;
 
 use crate::common::*;
-use crate::ip_connect::capsules::*;
-use crate::ip_connect::util::*;
+use crate::connect_ip::capsules::*;
+use crate::connect_ip::util::*;
 
 const MAX_CHANNEL_MESSAGES: usize = 50;
 const STANDARD_NETMASK: u32 = 0xFFFFFF00;

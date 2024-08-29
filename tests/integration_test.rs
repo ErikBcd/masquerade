@@ -1,5 +1,5 @@
 use log::error;
-use masquerade_proxy::{common::split_ip_prefix, ip_connect::{capsules::*, util::{check_ipv4_packet, recalculate_checksum, IPError}}, server::{read_known_clients, StaticClientMap}};
+use masquerade_proxy::{common::split_ip_prefix, connect_ip::{capsules::*, util::{check_ipv4_packet, recalculate_checksum, IPError}}, server::{read_known_clients, StaticClientMap}};
 use octets::OctetsMut;
 use tokio::{sync::Mutex, time::timeout};
 use std::{collections::HashMap, net::Ipv4Addr, path::Path, sync::Arc, time::Duration};
@@ -297,7 +297,7 @@ async fn recalculate_checksum_test() {
         0x61, 0x0a];            // Data
 
     // Assert that packet is wrong
-    assert_eq!(check_ipv4_packet(udp_payload_wrong.as_slice(), 30), Err(masquerade_proxy::ip_connect::util::Ipv4CheckError::WrongChecksumError));
+    assert_eq!(check_ipv4_packet(udp_payload_wrong.as_slice(), 30), Err(masquerade_proxy::connect_ip::util::Ipv4CheckError::WrongChecksumError));
 
     // Recalculate checksum of wrong packet
     recalculate_checksum(&mut udp_payload_wrong);

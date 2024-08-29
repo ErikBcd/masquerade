@@ -18,8 +18,8 @@ use tokio::time::{self};
 use tun2::AsyncDevice;
 
 use crate::common::*;
-use crate::ip_connect::capsules::*;
-use crate::ip_connect::util::*;
+use crate::connect_ip::capsules::*;
+use crate::connect_ip::util::*;
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ClientConfig {

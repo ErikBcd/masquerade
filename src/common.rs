@@ -2,7 +2,7 @@ use log::{error, info};
 use quiche::h3::NameValue;
 use tokio::sync::mpsc;
 
-use crate::ip_connect::util::*;
+use crate::connect_ip::util::*;
 use std::{
     net::{self, Ipv4Addr},
     str::FromStr,

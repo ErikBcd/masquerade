@@ -1,6 +1,6 @@
 use clap::{arg, command};
 use masquerade_proxy::common::ConfigError;
-use masquerade_proxy::ip_connect::client::{ClientConfig, ConnectIPClient};
+use masquerade_proxy::connect_ip::client::{ClientConfig, ConnectIPClient};
 
 use std::env;
 use std::error::Error;
