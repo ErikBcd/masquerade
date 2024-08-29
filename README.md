@@ -1,4 +1,8 @@
+# Masquerade - CONNECT-IP Fork
+
 Masquerade is an implementation of [MASQUE]([https://ietf-wg-masque.github.io/](https://datatracker.ietf.org/wg/masque/about/)). For UDP, it implements the `connect-udp` extended HTTP/3 CONNECT method as defined in [RFC 9298](https://www.rfc-editor.org/rfc/rfc9298.html) using HTTP datagrams defined in [RFC 9297](https://www.rfc-editor.org/rfc/rfc9297.html). For TCP, it implements the HTTP/3 CONNECT method as defined in [RFC 9114](https://www.rfc-editor.org/rfc/rfc9114.html#name-the-connect-method).
+
+For IP traffic the connect_ip_client implements the CONNECT-IP method defined in [RFC 9484](https://www.rfc-editor.org/rfc/rfc9484.html) with a specialised capsule protocol.
 
 For client, it exposes a HTTP/1.1 or SOCKS5 interface for easy connection.
 
@@ -8,49 +12,45 @@ Very early prototype with no thorough testing, missing a lot of features, poorly
 
 This fork aims to build up on the original masquerade implementation for the sake of improvement and evaluation.
 
-# Connect-IP branch
-
-This branch is for implementing the CONNECT-IP method as defined in [RFC 9484](https://datatracker.ietf.org/doc/rfc9484/).
-For now this is a very early, simple design.
-
 **Note**: This is being developed on a Linux machine, no special support for other operating systems.
-Also this is still in early development. Right now it's just loose code samples that don't do anything. We're getting there tho.
+Still a very early version that only has some base functionality.
 
 ## Basic inner workings
- * The user can connect to the masquerade server via the ip_connect_client (new binary)
- * The ip_connect_client creates a virtual Interface (TUN), and the user can route traffic to that TUN
- * Internally, the client will ask for an IP address from the server and change the source address of all outgoing packets to that address (and vice versa change the destination address from all incoming packets)
- * Client and server can work with all capsule types defined in RFC 9484
 
-## Limitations
- * Right now there can only be one user per client (this should be easy to change in the future)
- * The way packets are sent is very basic, no special congestion options or anything
+### Server
+
+The server creates a virtual network interface ([TUN](https://de.wikipedia.org/wiki/TUN/TAP)) and a QUIC server. It will then wait for clients to connect and choose a protocol.
+
+For CONNECT-IP the server will then assign an IP to the client and route all incoming traffic via that TUN interface. The data traffic is purely transmitted via datagrams.
+
+For CONNECT and CONNECT-UDP the server will create a TCP/UDP socket for each flow and route all traffic via that.
+
+### CONNECT-IP Client
+
+First, the client will attempt to connect to the server and get the basic connection going.
+Afterwards another virtual network interface is created, and the system is set up to route all traffic via that interface. If this succeeds the client will attempt to establish an HTTP/3 CONNECT-IP session and send all traffic on the TUN interface to the server via HTTP/3 datagrams, and all traffic received as datagrams from the server to the TUN interface.
 
 ## Running
 
-You might need to add rules in the ip table first to get the CONNECT-IP method to work.
-In the server you have to allow forwarding on your outgoing interface, for example eth0:
-```
-$ sudo iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
-```
+The server and the connect-ip client both have default configuration files prepared in `config/default_*_config.toml`. You can set all configuration in there and then save them as `client_config.toml` or `server_config.toml`, or provide the path to the config via `--client_config <path-to-file>`.
 
-And for the client you have to do that for the client TUN interface, for example tunMasqClient:
-```
-$ sudo iptables -t nat -A POSTROUTING -o tunMasqClient -j MASQUERADE
-```
+The default configuration files also have explanation for the parameters, you can also access hints via `--help` for the connect-ip client and server.
+
+Arguments given via the command line instead of the configuration file take precedence.
+
+This was tested and written on arch linux and should work on most other distributions as well. 
+The software does not work on Windows, and I can't test it on MacOS.
 
 ### Server
 ```
-# Start the server on host IP 0.0.0.0, port 4433
-# The TUN will be called tunMasqServer with the ip/range 10.8.0.1
-# local_ip and link_dev are the interface via which the traffic from the TUN will be routed.
-$ cargo build --release && sudo ./target/release/server --bind_addr 0.0.0.0:4433 --tun_addr 10.8.0.1/24 --tun_name tunMasqServer --local_ip 192.168.0.71 --link_dev eth0
+# Build & start the server with the options set in the config file, but overwrite the local_uplink_device_name
+$ cargo build --release && sudo ./target/release/server --local_uplink_device_name eth0
 ```
+
 ### CONNECT-IP Client
 ```
-# Start the client and connect it to the masquerade server located at 192.168.0.71:4433
-# TUN device will be called tunMasqClient at 10.9.0.1, address range 10.9.0.2/24 
-$ cargo build --release && sudo ./target/release/ip-connect-client --server_name 192.168.0.71:4433 --tun_addr 10.9.0.2/24 --tun_gateway 10.9.0.1 --tun_name tunMasqClient
+# Build & Start the client and connect it to the masquerade server located at 192.168.0.71:4433
+$ cargo build --release && sudo ./target/release/ip-connect-client --server_address 192.168.0.71:4433 
 ```
 
 ### TCP/UDP Client: 
@@ -62,3 +62,13 @@ $ cargo run --bin client -- 192.168.1.2:4433 127.0.0.1:8989 http
 $ cargo run --bin client -- 192.168.1.2:4433 127.0.0.1:8989 socks
 ```
 
+## State of the CONNECT-IP method
+
+Generally performs okay-ish. Speedtests (iperf3 between clients, regular speedtests via cloudflare) reach up to 350mbit/s on my systems. However, flooding the client with datagrams will result in very poor performance or crashes. Bidirectional UDP tests in iperf3 do this, so.. avoid these I guess. Will be tackled later.
+
+## TODOs
+
+ * Create a proper documentation
+ * Implement security features (authorization of clients, ..)
+ * Tackle stability problems under datagram flood situations in connect-ip client
+ * Benchmarks
