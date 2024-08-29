@@ -1,8 +1,18 @@
 # Masquerade - CONNECT-IP Fork
 
+## Why?
+
+This is part of a thesis I am writing on evaluating the usability and speed of MASQUE based proxies, specifically the CONNECT-IP protocol.
+It started out as a more general "let's take a look at available solutions and maybe enhance one" thing, but we later realized that the CONNECT-IP protocol would probably yield the best results, so I decided to implement this on top of an existing codebase.
+The original Masquerade implementation was already pretty stable, which is why this fork exists now.
+
+Since this is very different from the original project I will probably fully extract my code at some point and put it in it's own repository tho.
+
+## What?
+
 Masquerade is an implementation of [MASQUE]([https://ietf-wg-masque.github.io/](https://datatracker.ietf.org/wg/masque/about/)). For UDP, it implements the `connect-udp` extended HTTP/3 CONNECT method as defined in [RFC 9298](https://www.rfc-editor.org/rfc/rfc9298.html) using HTTP datagrams defined in [RFC 9297](https://www.rfc-editor.org/rfc/rfc9297.html). For TCP, it implements the HTTP/3 CONNECT method as defined in [RFC 9114](https://www.rfc-editor.org/rfc/rfc9114.html#name-the-connect-method).
 
-For IP traffic the connect_ip_client implements the CONNECT-IP method defined in [RFC 9484](https://www.rfc-editor.org/rfc/rfc9484.html) with a specialised capsule protocol.
+For IP traffic the connect_ip_client implements the `CONNECT-IP` method defined in [RFC 9484](https://www.rfc-editor.org/rfc/rfc9484.html) with a specialised capsule protocol.
 
 For client, it exposes a HTTP/1.1 or SOCKS5 interface for easy connection.
 
