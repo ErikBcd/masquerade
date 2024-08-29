@@ -2,8 +2,9 @@ use std::error::Error;
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
-use masquerade_proxy::client::{Http1Client, Socks5Client};
-use masquerade_proxy::server::Server;
+use masquerade_proxy::http::Http1Client;
+use masquerade_proxy::socks::Socks5Client;
+use masquerade_proxy::server::{Server, ServerConfig};
 
 use tokio::net::{TcpStream, TcpSocket, TcpListener, UdpSocket};
 use tokio::io::{AsyncWriteExt, AsyncReadExt};
@@ -14,8 +15,7 @@ pub const TIMEOUT_DURATION: Duration = Duration::from_secs(5);
 
 pub async fn setup_http1_client() -> Result<(TcpStream, TcpStream), Box<dyn Error>> {
     // set up a tunnel: first TCP socket <-> listen_addr <--masquerade--> server_addr <-> second TCP socket
-
-    let mut server = Server::new();
+    let mut server = Server::default();
     server.bind("127.0.0.1:0").await?;
     let server_addr = server.listen_addr().unwrap();
 
@@ -24,7 +24,17 @@ pub async fn setup_http1_client() -> Result<(TcpStream, TcpStream), Box<dyn Erro
     let listen_addr = client.listen_addr().unwrap();
 
     tokio::spawn(async move {
-        server.run().await.unwrap_or_else(|e| 
+        server.run(
+            ServerConfig {
+                server_address: Some("0.0.0.0:4433".to_owned()),
+                interface_address: Some("10.8.0.1/24".to_owned()),
+                interface_name: Some("tunMS".to_owned()),
+                local_uplink_device_ip: Some("0.0.0.0".to_owned()),
+                local_uplink_device_name: Some("lo".to_owned()),
+                client_config_path: Some("./config/server_known_clients.toml".to_owned()),
+                create_qlog_file: Some(false),
+                qlog_file_path: Some("".to_string()),
+        }).await.unwrap_or_else(|e| 
             println!("http1 test: failed tp run server: {:?}", e));
     });
     tokio::spawn(async move {
@@ -43,7 +53,7 @@ pub async fn setup_http1_client() -> Result<(TcpStream, TcpStream), Box<dyn Erro
     println!("sending request:");
     println!("{}", request);
 
-    client_stream.write(request.as_bytes()).await?;
+    client_stream.write_all(request.as_bytes()).await?;
 
     let (server_stream, _) = listener.accept().await?;
 
@@ -92,7 +102,7 @@ pub async fn setup_http1_client() -> Result<(TcpStream, TcpStream), Box<dyn Erro
  */
 pub async fn setup_socks5_tcp_client() -> Result<(TcpStream, TcpStream), Box<dyn Error>> {
     // set up a tunnel: first TCP socket <-> listen_addr <--masquerade--> server_addr <-> second TCP socket
-    let mut server = Server::new();
+    let mut server = Server::default();
     server.bind("127.0.0.1:0").await?;
     let server_addr = server.listen_addr().unwrap();
 
@@ -101,7 +111,17 @@ pub async fn setup_socks5_tcp_client() -> Result<(TcpStream, TcpStream), Box<dyn
     let listen_addr = client.listen_addr().unwrap();
 
     tokio::spawn(async move {
-        server.run().await.unwrap_or_else(|e| 
+        server.run(
+            ServerConfig {
+                server_address: Some("0.0.0.0:4433".to_owned()),
+                interface_address: Some("10.8.0.1/24".to_owned()),
+                interface_name: Some("tunMS".to_owned()),
+                local_uplink_device_ip: Some("0.0.0.0".to_owned()),
+                local_uplink_device_name: Some("lo".to_owned()),
+                client_config_path: Some("./config/server_known_clients.toml".to_owned()),
+                create_qlog_file: Some(false),
+                qlog_file_path: Some("".to_string()),
+        }).await.unwrap_or_else(|e| 
             println!("socks5 udp test: failed tp run server: {:?}", e));
     });
     tokio::spawn(async move {
@@ -129,7 +149,7 @@ pub async fn setup_socks5_tcp_client() -> Result<(TcpStream, TcpStream), Box<dyn
 
     println!("sending request:");
     println!("{:02x?}", request);
-    client_stream.write(&request).await?;
+    client_stream.write_all(&request).await?;
 
     let (server_stream, _) = listener.accept().await?;
     let mut buf = [0; 65535];
@@ -152,7 +172,7 @@ pub async fn setup_socks5_tcp_client() -> Result<(TcpStream, TcpStream), Box<dyn
 pub async fn setup_socks5_udp_client() -> Result<(UdpSocket, TcpStream), Box<dyn Error>> {
     // set up a tunnel: local UDP socket <-> bind_addr <--masquerade--> server_addr <-> remote UDP socket
     // note: SOCKS5 does not proxy UDP packets as it is. It requires a header attached to packets in/out the local socket
-    let mut server = Server::new();
+    let mut server = Server::default();
     server.bind("127.0.0.1:0").await?;
     let server_addr = server.listen_addr().unwrap();
 
@@ -161,7 +181,18 @@ pub async fn setup_socks5_udp_client() -> Result<(UdpSocket, TcpStream), Box<dyn
     let listen_addr = client.listen_addr().unwrap();
 
     tokio::spawn(async move {
-        server.run().await.unwrap_or_else(|e| 
+        server.run(
+            ServerConfig {
+                server_address: Some("0.0.0.0:4433".to_owned()),
+                interface_address: Some("10.8.0.1/24".to_owned()),
+                interface_name: Some("tunMS".to_owned()),
+                local_uplink_device_ip: Some("0.0.0.0".to_owned()),
+                local_uplink_device_name: Some("lo".to_owned()),
+                client_config_path: Some("./config/server_known_clients.toml".to_owned()),
+                create_qlog_file: Some(false),
+                qlog_file_path: Some("".to_string()),
+            }
+        ).await.unwrap_or_else(|e| 
             println!("socks5 udp test: failed tp run server: {:?}", e));
     });
     tokio::spawn(async move {
@@ -179,7 +210,7 @@ pub async fn setup_socks5_udp_client() -> Result<(UdpSocket, TcpStream), Box<dyn
 
     println!("sending request:");
     println!("{:02x?}", request);
-    client_stream.write(&request).await?;
+    client_stream.write_all(&request).await?;
 
     let mut buf = [0; 65535];
     let mut read = 0;
@@ -208,7 +239,7 @@ async fn socks5_handshake_no_auth(stream: &mut TcpStream) -> Result<(), Box<dyn 
     let handshake: Vec<u8> = vec![5, 1, 0]; // Ask only for no authentication method
     println!("sending socks5 handshake:");
     println!("{:02x?}", handshake);
-    stream.write(&handshake).await?;
+    stream.write_all(&handshake).await?;
 
     let mut read = 0;
     while read < 2 { // we are expecting a reply of two bytes

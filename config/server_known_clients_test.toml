@@ -1,0 +1,7 @@
+[[clients]]
+ip = "192.168.0.0"
+id = "client1"
+
+[[clients]]
+ip = "192.168.0.1"
+id = "client2"

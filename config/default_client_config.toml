@@ -1,0 +1,35 @@
+# Masquerade default client configuration file
+# Version 0.2.1, 2024/08/27
+
+# Address of the Masquerade server. Can also be an ipaddress with port
+# You need to set this one for the client to work.
+# server_address = "0.0.0.0:4433"
+
+# The client will create a virtual network interface (TUN) and redirect all network traffic via that device
+# Here you can change settings regarding that interface. You only really need to touch them if
+# they conflict with existing settings on your system.
+interface_address = "10.9.0.2/24"
+interface_name = "tunMC"
+interface_gateway = "10.9.0.1"
+
+# If you want the server to only assign a static IP address to your device you can define that
+# address here. 
+use_static_address = false
+static_address = "0.0.0.0/32"
+# Needed so the server can identify the client and reserve the address for future use.
+client_name = ""
+
+# The client has multiple threads that read/write from network sockets and handle these messages
+# They communicate with each other by using message channels, which can contain a number of messages.
+# This option determines the maximum amount of messages in each channel. High numbers may lead
+# to instability of the program, while low numbers lead to high packet loss because 
+# messages might get dropped when a channel is full.
+thread_channel_max = 200
+
+# qlog is a logging format for QUIC connections and can be used for examining different behaviour
+# in a connection such as latency, congestion, and more.
+# See here for more information: https://quicwg.org/qlog/draft-ietf-quic-qlog-quic-events.html
+
+# If you want qlog files to be created set this to true
+create_qlog_file = false
+qlog_file_path = "./qlog/"

@@ -1,0 +1,29 @@
+# Masquerade default server configuration file
+# Version 0.2.1, 2024/08/27
+
+# Local address the client will run on.
+server_address = "0.0.0.0:4433"
+
+# Configuration for the virtual network interface used by the server to send IP messages.
+# Only needs to be changed if the current settings conflict with local settings.
+interface_address = "10.8.0.1/8"
+interface_name = "tunMS"
+
+# Data of the main uplink device on the system.
+# The ip can be left as is on most systems, but the local_uplink_device_name has to be set to the correct
+# device.
+local_uplink_device_ip = "0.0.0.0"
+# local_uplink_device_name = "eth0"
+
+# Path to where the configuration for the client statics is stored.
+# Configuration contains all clients that connected to the server and asked for a 
+# static address instead of a dynamically assigned one. Will be created and populated by the server.
+client_config = "./config/server_known_clients.toml"
+
+# qlog is a logging format for QUIC connections and can be used for examining different behaviour
+# in a connection such as latency, congestion, and more.
+# See here for more information: https://quicwg.org/qlog/draft-ietf-quic-qlog-quic-events.html
+
+# If you want qlog files to be created set this to true
+create_qlog_file = false
+qlog_file_path = "./qlog/"
