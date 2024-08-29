@@ -12,6 +12,8 @@ Since this is very different from the original project I will probably fully ext
 
 Masquerade is an implementation of [MASQUE]([https://ietf-wg-masque.github.io/](https://datatracker.ietf.org/wg/masque/about/)). For UDP, it implements the `connect-udp` extended HTTP/3 CONNECT method as defined in [RFC 9298](https://www.rfc-editor.org/rfc/rfc9298.html) using HTTP datagrams defined in [RFC 9297](https://www.rfc-editor.org/rfc/rfc9297.html). For TCP, it implements the HTTP/3 CONNECT method as defined in [RFC 9114](https://www.rfc-editor.org/rfc/rfc9114.html#name-the-connect-method).
 
+The original repository that was used as a basic template for this lies at [https://github.com/jromwu/masquerade](https://github.com/jromwu/masquerade). 
+
 For IP traffic the connect_ip_client implements the `CONNECT-IP` method defined in [RFC 9484](https://www.rfc-editor.org/rfc/rfc9484.html) with a specialised capsule protocol.
 
 For client, it exposes a HTTP/1.1 or SOCKS5 interface for easy connection.
