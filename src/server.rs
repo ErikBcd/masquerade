@@ -1303,35 +1303,39 @@ async fn tun_socket_handler(
             let pkt = &buf[..size];
             // parse packet to get destination ip
             // then send it to handler for dest ip
-            // TODO: remove Packet::new, we don't need that anymore
-            if let Ok(ip_pkt) = Packet::new(&pkt[..size]) {
-                if let Some(ip_handler_) = ip_handlers_clone.lock().await.get(&ip_pkt.destination())
-                {
-                    info!(
-                        "Tun Handler received packet | Src: {} To: {}",
-                        &ip_pkt.source(),
-                        &ip_pkt.destination()
-                    );
-
-                    if ip_handler_.sender.is_some() {
-                        ip_handler_
-                            .sender
-                            .as_ref()
-                            .unwrap()
-                            .send(pkt.to_vec())
-                            .await
-                            .expect("Could not send a message to ip handler channel!");
-                    } else {
-                        error!("Could not find ip sender for ip: {}", &ip_pkt.destination());
-                    }
-                } else {
-                    info!(
-                        "Got packet for unknown client | Src: {} To: {}",
-                        &ip_pkt.source(),
-                        &ip_pkt.destination()
-                    );
-                }
+            if get_ip_version(pkt) == 6 {
+                debug!("Ignore ipv6 for now...");
+                continue;
             }
+
+            let dest = get_ipv4_pkt_dest(pkt);
+            if let Some(ip_handler_) = ip_handlers_clone.lock().await.get(&dest)
+            {
+                info!(
+                    "Tun Handler received packet | Src: {} To: {}",
+                    get_ipv4_pkt_source(pkt),
+                    &dest
+                );
+
+                if ip_handler_.sender.is_some() {
+                    ip_handler_
+                        .sender
+                        .as_ref()
+                        .unwrap()
+                        .send(pkt.to_vec())
+                        .await
+                        .expect("Could not send a message to ip handler channel!");
+                } else {
+                    error!("Could not find ip sender for ip: {}", &dest);
+                }
+            } else {
+                info!(
+                    "Got packet for unknown client | Src: {} To: {}",
+                    get_ipv4_pkt_source(pkt),
+                    &dest
+                );
+            }
+            
         }
     });
 
