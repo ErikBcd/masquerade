@@ -12,7 +12,7 @@ use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::net::UdpSocket;
-use tokio::sync::mpsc::{self, Receiver, Sender, UnboundedSender};
+use kanal::*;
 use tokio::sync::Mutex;
 use tokio::time::{self};
 use tun2::AsyncDevice;
@@ -81,7 +81,7 @@ pub enum Direction {
 /// Useful for holding some basic data for a HTTP3 Stream
 ///
 pub struct QuicStream {
-    pub stream_sender: Option<UnboundedSender<Content>>,
+    pub stream_sender: Option<kanal::AsyncSender<Content>>,
     pub stream_id: Option<u64>,
     pub flow_id: Option<u64>,
 }
@@ -209,7 +209,7 @@ fn set_client_ip_and_route(dev_addr: &String, tun_gateway: &String, tun_name: &S
 ///  * ip_handler: Channel that handles received ip messages
 ///  * reader: Receiver for raw ip messages
 ///
-async fn ip_receiver_t(ip_handler: Sender<IpMessage>, mut reader: ReadHalf<AsyncDevice>) {
+async fn ip_receiver_t(ip_handler: AsyncSender<IpMessage>, mut reader: ReadHalf<AsyncDevice>) {
     let mut buf = [0; 4096];
     loop {
         let size = reader
@@ -244,15 +244,15 @@ async fn ip_receiver_t(ip_handler: Sender<IpMessage>, mut reader: ReadHalf<Async
 /// Will then handle these packets accordingly and send messages to quic_dispatcher_t
 ///
 async fn ip_handler_t(
-    mut ip_recv: Receiver<IpMessage>, // Other side is ip_receiver_t
-    mut conn_info_recv: Receiver<ConnectIpInfo>, // Other side is quic_handler_t
-    http3_dispatch: Sender<ToSend>,   // other side is quic_dispatcher_t
-    ip_dispatch: Sender<Vec<u8>>,     // other side is ip_dispatcher_t
+    ip_recv: AsyncReceiver<IpMessage>, // Other side is ip_receiver_t
+    conn_info_recv: AsyncReceiver<ConnectIpInfo>, // Other side is quic_handler_t
+    http3_dispatch: AsyncSender<ToSend>,   // other side is quic_dispatcher_t
+    ip_dispatch: AsyncSender<Vec<u8>>,     // other side is ip_dispatcher_t
     device_addr: Ipv4Addr,
 ) {
     // Wait till the QUIC server sends us connection information
     let mut conn_info: Option<ConnectIpInfo> = None;
-    if let Some(info) = conn_info_recv.recv().await {
+    if let Ok(info) = conn_info_recv.recv().await {
         conn_info = Some(info);
     }
     let conn_info = conn_info.unwrap();
@@ -261,7 +261,8 @@ async fn ip_handler_t(
         conn_info.assigned_ip
     );
     loop {
-        if let Some(mut pkt) = ip_recv.recv().await {
+        if let Ok(mut pkt) = ip_recv.recv().await {
+            debug!("[ip_handler_t] Received packet. Capacity left: {}", ip_recv.capacity());
             match get_ip_version(&pkt.message) {
                 4 => {
                     match pkt.dir {
@@ -318,11 +319,12 @@ async fn ip_handler_t(
 /// to the TUN device.
 ///
 async fn ip_dispatcher_t(
-    mut ip_dispatch_reader: Receiver<Vec<u8>>,
+    ip_dispatch_reader: AsyncReceiver<Vec<u8>>,
     mut writer: WriteHalf<AsyncDevice>,
 ) {
     loop {
-        if let Some(pkt) = ip_dispatch_reader.recv().await {
+        if let Ok(pkt) = ip_dispatch_reader.recv().await {
+            debug!("[ip_dispatcher_t] Received packet, capacity left: {}", ip_dispatch_reader.capacity());
             writer
                 .write_all(&pkt)
                 .await
@@ -341,10 +343,10 @@ async fn ip_dispatcher_t(
  * Sends resulting messages to either ip_handler_t or quic_dispatch_t.
  */
 async fn quic_conn_handler(
-    ip_handler: Sender<IpMessage>,      // other side is ip_dispatcher_t
-    info_sender: Sender<ConnectIpInfo>, // other side is the ip_handler_t
-    http3_sender: Sender<ToSend>,
-    mut http3_receiver: Receiver<ToSend>,
+    ip_handler: AsyncSender<IpMessage>,      // other side is ip_dispatcher_t
+    info_sender: AsyncSender<ConnectIpInfo>, // other side is the ip_handler_t
+    http3_sender: AsyncSender<ToSend>,
+    http3_receiver: AsyncReceiver<ToSend>,
     mut conn: Connection,
     udp_socket: UdpSocket,
     config: ClientConfig,
@@ -365,7 +367,6 @@ async fn quic_conn_handler(
     let mut main_stream_id: Option<u64> = None;
     let mut flow_id: Option<u64> = None;
 
-    //let (http3_sender, mut http3_receiver) = mpsc::unbounded_channel::<ToSend>();
     let mut http3_retry_send: Option<ToSend> = None;
 
     let mut interval = time::interval(Duration::from_millis(20));
@@ -411,7 +412,7 @@ async fn quic_conn_handler(
                                     && stream.lock().await.stream_id.unwrap() == stream_id {
                                     let binding = stream.as_ref().lock().await;
                                     let sender = binding.stream_sender.as_ref().unwrap();
-                                    sender.send(Content::Headers { headers: list })
+                                    sender.send(Content::Headers { headers: list }).await
                                         .expect("Couldn't send headers through channel!");
                                 }
                             }
@@ -572,9 +573,6 @@ async fn quic_conn_handler(
             },
             // Send pending HTTP3 data in channel to HTTP3 connection on QUIC
             http3_to_send = http3_receiver.recv(), if http3_conn.is_some() && http3_retry_send.is_none() => {
-                if http3_to_send.is_none() {
-                    unreachable!()
-                }
                 let mut to_send = http3_to_send.unwrap();
                 let http3_conn = http3_conn.as_mut().unwrap();
                 loop {
@@ -656,7 +654,8 @@ async fn quic_conn_handler(
                         }
                     };
                     to_send = match http3_receiver.try_recv() {
-                        Ok(v) => v,
+                        Ok(Some(v)) => v,
+                        Ok(None) => break,
                         Err(_) => break,
                     };
                 }
@@ -830,7 +829,7 @@ async fn quic_conn_handler(
 /// Initiates the CONNECT-IP request.
 ///
 async fn handle_ip_connect_stream(
-    http3_sender: Sender<ToSend>,
+    http3_sender: AsyncSender<ToSend>,
     stream: Arc<Mutex<QuicStream>>,
     config: ClientConfig,
 ) {
@@ -845,8 +844,8 @@ async fn handle_ip_connect_stream(
         quiche::h3::Header::new(b":path", b"/.well-known/masque/ip/*/*/"),
         quiche::h3::Header::new(b"connect-ip-version", b"3"),
     ];
-    let (stream_id_sender, mut stream_id_receiver) = mpsc::channel(1);
-    let (response_sender, mut response_receiver) = mpsc::unbounded_channel::<Content>();
+    let (stream_id_sender, mut stream_id_receiver) = tokio::sync::mpsc::channel(1);
+    let (response_sender, response_receiver) = kanal::unbounded_async::<Content>();
 
     http3_sender
         .send(ToSend {
@@ -930,6 +929,7 @@ async fn handle_ip_connect_stream(
         // TODO: We should inform the quic thread about this
         todo!()
     }
+    info!("Established CONNECT-IP with server!")
 }
 
 pub struct ConnectIPClient;
@@ -987,13 +987,13 @@ impl ConnectIPClient {
         // 4) Create receivers/senders
 
         // ip_sender for ip_receiver_t, ip_recv for ip_handler_t
-        let (ip_sender, ip_recv) = tokio::sync::mpsc::channel(config.thread_channel_max.unwrap());
+        let (ip_sender, ip_recv) = kanal::bounded_async(config.thread_channel_max.unwrap());
         let (http3_dispatch, http3_dispatch_reader) =
-            tokio::sync::mpsc::channel(config.thread_channel_max.unwrap());
+            kanal::bounded_async(config.thread_channel_max.unwrap());
         let (ip_dispatch, ip_dispatch_reader) =
-            tokio::sync::mpsc::channel(config.thread_channel_max.unwrap());
+            kanal::bounded_async(config.thread_channel_max.unwrap());
         let (conn_info_sender, conn_info_recv) =
-            tokio::sync::mpsc::channel(config.thread_channel_max.unwrap());
+            kanal::bounded_async(config.thread_channel_max.unwrap());
 
         // Copies of senders
         let ip_from_quic_sender = ip_sender.clone();

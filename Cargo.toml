@@ -34,6 +34,7 @@ futures = "0.3.30"
 clap = {version = "4.5.16", features = ["cargo"] }
 toml = "0.8.19"
 serde = {version = "1", features = ["derive"]}
+kanal = {version = "0.1.0-pre8", features = ["async"]}
 
 [dev-dependencies]
 rand = "0.8"
