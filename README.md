@@ -2,8 +2,7 @@
 
 ## This project is heavily based on the original Masquerade implementation
 
-The original repository that was used as a basic template for this lies at [https://github.com/jromwu/masquerade](https://github.com/jromwu/masquerade). 
-The old code is mostly located in the UDP/TCP client, which will probably be removed at some point. 
+The original repository that was used as a basic template for this lies at [https://github.com/jromwu/masquerade](https://github.com/jromwu/masquerade).
 
 ## Why?
 
@@ -13,11 +12,9 @@ The original Masquerade implementation was already pretty stable, which is why t
 
 ## What?
 
-Masquerade is an implementation of [MASQUE]([https://ietf-wg-masque.github.io/](https://datatracker.ietf.org/wg/masque/about/)). For UDP, it implements the `connect-udp` extended HTTP/3 CONNECT method as defined in [RFC 9298](https://www.rfc-editor.org/rfc/rfc9298.html) using HTTP datagrams defined in [RFC 9297](https://www.rfc-editor.org/rfc/rfc9297.html). For TCP, it implements the HTTP/3 CONNECT method as defined in [RFC 9114](https://www.rfc-editor.org/rfc/rfc9114.html#name-the-connect-method).
+Masquerade is an implementation of [MASQUE]([https://ietf-wg-masque.github.io/](https://datatracker.ietf.org/wg/masque/about/)). For IP traffic the connect_ip_client implements the `CONNECT-IP` method defined in [RFC 9484](https://www.rfc-editor.org/rfc/rfc9484.html) with a specialised capsule protocol.
 
-For IP traffic the connect_ip_client implements the `CONNECT-IP` method defined in [RFC 9484](https://www.rfc-editor.org/rfc/rfc9484.html) with a specialised capsule protocol.
-
-For client, it exposes a HTTP/1.1 or SOCKS5 interface for easy connection.
+If you need an implementation for the CONNECT or CONNECT-UDP methods you can look into the original repository or into the `connect-udp-included` branch in this repository, this includes a few small fixes.
 
 It is built on HTTP/3 and QUIC provided by the library [quiche](https://github.com/cloudflare/quiche).
 
@@ -35,8 +32,6 @@ Still a very early version that only has some base functionality.
 The server creates a virtual network interface ([TUN](https://de.wikipedia.org/wiki/TUN/TAP)) and a QUIC server. It will then wait for clients to connect and choose a protocol.
 
 For CONNECT-IP the server will then assign an IP to the client and route all incoming traffic via that TUN interface. The data traffic is purely transmitted via datagrams.
-
-For CONNECT and CONNECT-UDP the server will create a TCP/UDP socket for each flow and route all traffic via that.
 
 ### CONNECT-IP Client
 
@@ -64,15 +59,6 @@ $ cargo build --release && sudo ./target/release/server --local_uplink_device_na
 ```
 # Build & Start the client and connect it to the masquerade server located at 192.168.0.71:4433
 $ cargo build --release && sudo ./target/release/ip-connect-client --server_address 192.168.0.71:4433 
-```
-
-### TCP/UDP Client: 
-```
-# connect to server at 192.168.1.2:4433 and host HTTP/1.1 server on localhost port 8989
-$ cargo run --bin client -- 192.168.1.2:4433 127.0.0.1:8989 http
-
-# or host a socks server
-$ cargo run --bin client -- 192.168.1.2:4433 127.0.0.1:8989 socks
 ```
 
 ## State of the CONNECT-IP method
