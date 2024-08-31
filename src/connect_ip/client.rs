@@ -220,6 +220,10 @@ async fn ip_receiver_t(ip_handler: Sender<IpMessage>, mut reader: ReadHalf<Async
         debug!("[ip_receiver_t] Read TUN message size {size}");
         let pkt = &buf[..size];
         use std::io::{Error, ErrorKind::Other};
+        if ip_handler.capacity() == 0 {
+            error!("[ip_receiver_t] ip_handler capacity 0, dropping packet!");
+            continue;
+        }
         match ip_handler
             .send(IpMessage {
                 message: pkt.to_vec(),
@@ -262,100 +266,56 @@ async fn ip_handler_t(
         conn_info.assigned_ip
     );
     loop {
-        debug!("[ip_handler_t] Waiting for new packet..");
-        debug!(
-            "[ip_handler_t] Currently {} packets in queue",
-            ip_recv.len()
-        );
-
-        if let Some(pkt) = ip_recv.recv().await {
-            debug!(
-                "[ip_handler_t] Received a packet in direction: {:?}",
-                pkt.dir
-            );
-            let http3_dispatch_clone = http3_dispatch.clone();
-            let ip_disp_clone = ip_dispatch.clone();
-            let ip_addr_clone = device_addr;
-            ip_message_handler(
-                pkt,
-                http3_dispatch_clone,
-                ip_disp_clone,
-                conn_info,
-                ip_addr_clone,
-            )
-            .await;
-        }
-        debug!("[ip_handler_t] Handled a packet!");
-    }
-}
-
-///
-/// Handles ip messages received by either the QUIC connection
-/// or the TUN device.
-///
-/// Arguments:
-///     - pkt: The IP Message
-///     - http3_dispatch: Channel that is connected to the quic connection handler
-///     - ip_dispatch: Channel that is connected to the ip dispatcher
-///     - conn_info: Information about the connection,
-///                  used for setting the ToServer IP and the flow ID for the h3 datagram
-///     - device_addr: The local device address, used for correcting the IP for ToClient packets
-async fn ip_message_handler(
-    mut pkt: IpMessage,
-    http3_dispatch: Sender<ToSend>,
-    ip_dispatch: Sender<Vec<u8>>,
-    conn_info: ConnectIpInfo,
-    device_addr: Ipv4Addr,
-) {
-    debug!(
-        "[ip_message_handler] got message! ip version={} | header len={}",
-        get_ip_version(&pkt.message),
-        get_ip_header_length(&pkt.message)
-    );
-    match get_ip_version(&pkt.message) {
-        4 => {
-            match pkt.dir {
-                Direction::ToServer => {
-                    set_ipv4_pkt_source(&mut pkt.message, &conn_info.assigned_ip);
-                    // Recalculate checksum after ipv4 change
-                    recalculate_checksum(&mut pkt.message);
-                    info!("[ip_handler_t] Sending ipv4 packet to server");
-                    match http3_dispatch
-                        .send(encapsulate_ipv4(pkt.message, &conn_info.flow_id, &0))
-                        .await
-                    {
-                        Ok(()) => {}
-                        Err(e) => {
-                            error!("[ip_handler_t] Error sending to quic dispatch: {}", e);
+        if let Some(mut pkt) = ip_recv.recv().await {
+            match get_ip_version(&pkt.message) {
+                4 => {
+                    match pkt.dir {
+                        Direction::ToServer => {
+                            set_ipv4_pkt_source(&mut pkt.message, &conn_info.assigned_ip);
+                            // Recalculate checksum after ipv4 change
+                            recalculate_checksum(&mut pkt.message);
+                            if http3_dispatch.capacity() > 0 {
+                                match http3_dispatch
+                                    .send(encapsulate_ipv4(pkt.message, &conn_info.flow_id, &0))
+                                    .await
+                                {
+                                    Ok(()) => {}
+                                    Err(e) => {
+                                        error!("[ip_handler_t] Error sending to quic dispatch: {}", e);
+                                    }
+                                };
+                            } else {
+                                error!("Http3 dispatcher capacity was full!");
+                            }
                         }
-                    };
-                }
-                Direction::ToClient => {
-                    // Send this to the ip dispatcher
-                    set_ipv4_pkt_destination(&mut pkt.message, &device_addr);
-                    // Recalculate checksum after ipv4 change
-                    recalculate_checksum(&mut pkt.message);
+                        Direction::ToClient => {
+                            // Send this to the ip dispatcher
+                            set_ipv4_pkt_destination(&mut pkt.message, &device_addr);
+                            // Recalculate checksum after ipv4 change
+                            recalculate_checksum(&mut pkt.message);
 
-                    debug!(
-                        "[ip_handler_t] Sending IPv4 packet towards client (tun): {:?}",
-                        pkt.message
-                    );
-                    match ip_dispatch.send(pkt.message).await {
-                        Ok(()) => {}
-                        Err(e) => {
-                            error!("[ip_handler_t] Error sending to ip dispatch: {}", e);
+                            if ip_dispatch.capacity() > 0 {
+                                match ip_dispatch.send(pkt.message).await {
+                                    Ok(()) => {}
+                                    Err(e) => {
+                                        error!("[ip_handler_t] Error sending to ip dispatch: {}", e);
+                                    }
+                                }
+                            } else {
+                                error!("Dropping packet, ip_dispatch is full!");
+                            }
                         }
                     }
                 }
-            }
+                6 => {
+                    debug!("[ip_handler_t] Received IPv6 messages at ip_handler_t, not supported!");
+                }
+                _ => {
+                    error!("[ip_handler_t] Received message with unknown IP protocol.");
+                }
+            };
         }
-        6 => {
-            debug!("[ip_handler_t] Received IPv6 messages at ip_handler_t, not supported!");
-        }
-        _ => {
-            error!("[ip_handler_t] Received message with unknown IP protocol.");
-        }
-    };
+    }
 }
 
 ///
@@ -421,66 +381,6 @@ async fn quic_conn_handler(
         if conn.is_closed() {
             info!("connection closed, {:?}", conn.stats());
             break;
-        }
-
-        // Process datagram related events
-        // We only expect datagrams that contain ip payloads
-        while let Ok(len) = conn.dgram_recv(&mut buf) {
-            let mut b = octets::Octets::with_slice(&buf);
-            if let Ok(flow_id) = b.get_varint() {
-                let context_id = match b.get_varint() {
-                    Ok(v) => v,
-                    Err(e) => {
-                        debug!("DATAGRAM without context ID: {}", e);
-                        continue;
-                    }
-                };
-                info!("Received datagram with context id={context_id}");
-                if context_id != 0 {
-                    continue;
-                }
-
-                let header_len = varint_len(flow_id) + varint_len(context_id);
-                match get_ip_version(&buf[header_len..len]) {
-                    4 => {
-                        // Check if packet is valid (checksum check)
-                        match check_ipv4_packet(&buf[header_len..len], (len - header_len) as u16) {
-                            Ok(_) => {}
-                            Err(Ipv4CheckError::WrongChecksumError) => {
-                                debug!("Received IPv4 packet with invalid checksum, discarding..");
-                                continue;
-                            }
-                            Err(Ipv4CheckError::WrongSizeError) => {
-                                debug!("Received IPv4 packet with invalid size, discarding...");
-                                continue;
-                            }
-                        }
-                        if ip_handler.capacity() > 0 {
-                            match ip_handler
-                                .send(IpMessage {
-                                    message: buf[header_len..len].to_vec(),
-                                    dir: Direction::ToClient,
-                                })
-                                .await
-                            {
-                                Ok(()) => {}
-                                Err(e) => {
-                                    debug!("Couldn't send ip packet to ip sender: {}", e);
-                                }
-                            }
-                        } else {
-                            error!("Dropping packet, ip_handler capacity at 0!");
-                        }
-                    }
-                    6 => {
-                        debug!("Received IPv6 packet via http3 (not implemented yet)");
-                        continue;
-                    }
-                    v => {
-                        error!("Received packet with invalid version: {v}");
-                    }
-                };
-            }
         }
 
         tokio::select! {
@@ -857,6 +757,64 @@ async fn quic_conn_handler(
                             .unwrap_or_else(|e| error!("stream shutdown write failed: {:?}", e));
                         error!("Connection ended! Stopping quic_conn_handler...");
                         return;
+                    }
+                };
+            }
+        }
+
+        // Process datagram related events
+        // We only expect datagrams that contain ip payloads
+        while let Ok(len) = conn.dgram_recv(&mut buf) {
+            let mut b = octets::Octets::with_slice(&buf);
+            if let Ok(flow_id) = b.get_varint() {
+                let context_id = match b.get_varint() {
+                    Ok(v) => v,
+                    Err(e) => {
+                        continue;
+                    }
+                };
+                if context_id != 0 {
+                    continue;
+                }
+
+                let header_len = varint_len(flow_id) + varint_len(context_id);
+                match get_ip_version(&buf[header_len..len]) {
+                    4 => {
+                        // Check if packet is valid (checksum check)
+                        match check_ipv4_packet(&buf[header_len..len], (len - header_len) as u16) {
+                            Ok(_) => {}
+                            Err(Ipv4CheckError::WrongChecksumError) => {
+                                debug!("Received IPv4 packet with invalid checksum, discarding..");
+                                continue;
+                            }
+                            Err(Ipv4CheckError::WrongSizeError) => {
+                                debug!("Received IPv4 packet with invalid size, discarding...");
+                                continue;
+                            }
+                        }
+                        if ip_handler.capacity() > 0 {
+                            match ip_handler
+                                .send(IpMessage {
+                                    message: buf[header_len..len].to_vec(),
+                                    dir: Direction::ToClient,
+                                })
+                                .await
+                            {
+                                Ok(()) => {}
+                                Err(e) => {
+                                    debug!("Couldn't send ip packet to ip sender: {}", e);
+                                }
+                            }
+                        } else {
+                            error!("Dropping packet, ip_handler capacity at 0!");
+                        }
+                    }
+                    6 => {
+                        debug!("Received IPv6 packet via http3 (not implemented yet)");
+                        continue;
+                    }
+                    v => {
+                        error!("Received packet with invalid version: {v}");
                     }
                 };
             }
