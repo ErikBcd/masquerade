@@ -1185,6 +1185,9 @@ async fn handle_http3_event(
                 stream_id,
                 &mut client.conn,
             );
+            if client_handler.connect_ip_session.is_some() {
+                client_handler.connect_ip_session.as_mut().unwrap().handler_thread.as_mut().unwrap().abort();
+            }
         }
 
         Ok((stream_id, quiche::h3::Event::Reset(e))) => {
@@ -1234,6 +1237,9 @@ async fn handle_http3_event(
                 stream_id,
                 &mut client.conn,
             );
+            if client_handler.connect_ip_session.is_some() {
+                client_handler.connect_ip_session.as_mut().unwrap().handler_thread.as_mut().unwrap().abort();
+            }
         }
         Ok((_prioritized_element_id, quiche::h3::Event::PriorityUpdate)) => unreachable!(),
 
