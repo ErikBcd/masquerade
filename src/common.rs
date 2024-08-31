@@ -147,7 +147,7 @@ pub fn send_h3_dgram(
     flow_id: u64,
     dgram_content: &[u8],
 ) -> quiche::Result<()> {
-    info!("sending HTTP/3 DATAGRAM on flow_id={}", flow_id);
+    //info!("sending HTTP/3 DATAGRAM on flow_id={}", flow_id);
 
     let len = octets::varint_len(flow_id) + dgram_content.len();
     let mut d = vec![0; len];
