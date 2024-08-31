@@ -1,4 +1,4 @@
-use std::{net::Ipv4Addr, str::FromStr};
+use std::net::Ipv4Addr;
 
 use octets::{Octets, OctetsMut};
 
