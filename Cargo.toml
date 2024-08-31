@@ -23,9 +23,6 @@ quiche = {version = "0.22.0", features = ["qlog"] }
 tokio = { version = "1", features = ["full"] }
 ring = "0.17.8"
 
-httparse = "1.9.4"
-socks5-proto = "0.3"
-
 octets = "0.3"
 
 mio = { version = "1", features = ["net", "os-poll"] }
