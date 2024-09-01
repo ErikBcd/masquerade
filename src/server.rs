@@ -1,6 +1,5 @@
 use log::*;
 use octets::varint_len;
-use packet::ip::v4::Packet;
 use quiche::h3::NameValue;
 use serde::{Deserialize, Serialize};
 use tokio::fs::{File, OpenOptions};
@@ -17,9 +16,11 @@ use std::process::Command;
 use std::str::FromStr;
 use std::sync::Arc;
 
+use kanal::*;
+
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UdpSocket;
-use tokio::sync::mpsc::{self, Receiver, Sender, UnboundedSender};
+//use tokio::sync::mpsc::{self, Receiver, Sender, UnboundedSender};
 use tokio::time::{self, Duration};
 
 use ring::rand::*;
@@ -28,13 +29,13 @@ use crate::common::*;
 use crate::connect_ip::capsules::*;
 use crate::connect_ip::util::*;
 
-const MAX_CHANNEL_MESSAGES: usize = 50;
+const MAX_CHANNEL_MESSAGES: usize = 400;
 const STANDARD_NETMASK: u32 = 0xFFFFFF00;
 
 struct IpRegisterRequest {
     requested_address: Ipv4Addr,
     id: String,
-    callback: Sender<Ipv4Addr>,
+    callback: AsyncSender<Ipv4Addr>,
     former_ip: Ipv4Addr,
     static_addr: bool,
 }
@@ -44,7 +45,23 @@ struct ConnectIpClient {
     assigned_addr: Ipv4Addr,
     id: String,
     static_addr: bool,
-    sender: Option<Sender<Vec<u8>>>,
+    sender: Option<AsyncSender<Vec<u8>>>,
+}
+
+struct ClientHandler {
+    connect_ip_session: Option<IpConnectSession>,
+    client_ip: Ipv4Addr,
+    http3_sender: AsyncSender<ToSend>,
+    connect_ip_clients: ConnectIpClientList,
+    static_clients: StaticClientMap,
+    register_handler: AsyncSender<IpRegisterRequest>,
+}
+
+struct IpConnectSession {
+    stream_id: u64,
+    flow_id: u64,
+    ip_h3_sender: AsyncSender<Content>,
+    handler_thread: Option<JoinHandle<()>>,
 }
 
 /// Map of known clients that operate via CONNECT-IP, identified by their assigned IPs
@@ -102,12 +119,6 @@ struct QuicReceived {
     data: Vec<u8>,
 }
 
-struct IpConnectSession {
-    stream_id: u64,
-    flow_id: u64,
-    ip_h3_sender: Sender<Content>,
-    handler_thread: Option<JoinHandle<()>>,
-}
 
 #[derive(Debug, Clone)]
 struct RunBeforeBindError;
@@ -124,11 +135,11 @@ impl Error for RunBeforeBindError {}
  */
 struct Client {
     conn: quiche::Connection,
-    quic_receiver: mpsc::UnboundedReceiver<QuicReceived>,
+    quic_receiver: AsyncReceiver<QuicReceived>,
     socket: Arc<UdpSocket>,
 }
 
-type ClientMap = HashMap<quiche::ConnectionId<'static>, mpsc::UnboundedSender<QuicReceived>>;
+type ClientMap = HashMap<quiche::ConnectionId<'static>, AsyncSender<QuicReceived>>;
 
 #[derive(Default)]
 pub struct Server {
@@ -253,7 +264,7 @@ impl Server {
         }
 
         // Start the handler for new clients
-        let (client_register_sender, client_register_recv) = tokio::sync::mpsc::channel(1);
+        let (client_register_sender, client_register_recv) = bounded_async(1);
         let connect_ip_clients_clone = connect_ip_clients.clone();
         let static_clients_clone = static_clients.clone();
         let client_conf_path = server_config.client_config_path.as_ref().unwrap().clone();
@@ -268,7 +279,7 @@ impl Server {
         });
 
         let (tun_sender, tun_receiver) =
-            tokio::sync::mpsc::channel::<Vec<u8>>(MAX_CHANNEL_MESSAGES);
+            bounded_async(MAX_CHANNEL_MESSAGES);
         // Create TUN handler (creates device automatically)
         let connect_ip_clients_clone = connect_ip_clients.clone();
         let server_config_clone = server_config.clone();
@@ -392,7 +403,7 @@ impl Server {
                 let conn =
                     quiche::accept(&scid, odcid.as_ref(), local_addr, from, &mut config).unwrap();
 
-                let (tx, rx) = mpsc::unbounded_channel();
+                let (tx, rx) = unbounded_async();
 
                 let mut client = Client {
                     conn,
@@ -464,7 +475,7 @@ impl Server {
             match tx.send(QuicReceived {
                 recv_info,
                 data: pkt_buf.to_vec(),
-            }) {
+            }).await {
                 Ok(_) => {}
                 _ => {
                     debug!("Error sending to {:?}", &hdr.dcid);
@@ -545,14 +556,7 @@ fn get_next_free_ip(
     None
 }
 
-struct ClientHandler {
-    connect_ip_session: Option<IpConnectSession>,
-    client_ip: Ipv4Addr,
-    http3_sender: mpsc::UnboundedSender<ToSend>,
-    connect_ip_clients: ConnectIpClientList,
-    static_clients: StaticClientMap,
-    register_handler: tokio::sync::mpsc::Sender<IpRegisterRequest>,
-}
+
 
 /**
  * Client handler that handles the connection for a single client
@@ -560,13 +564,13 @@ struct ClientHandler {
 async fn handle_client(
     mut client: Client,
     client_ip: Ipv4Addr,
-    tun_sender: &tokio::sync::mpsc::Sender<Vec<u8>>,
+    tun_sender: &AsyncSender<Vec<u8>>,
     ip_connect_clients: ConnectIpClientList,
     static_clients: StaticClientMap,
-    register_handler: tokio::sync::mpsc::Sender<IpRegisterRequest>,
+    register_handler: AsyncSender<IpRegisterRequest>,
 ) {
     let mut http3_conn: Option<quiche::h3::Connection> = None;
-    let (http3_sender, mut http3_receiver) = mpsc::unbounded_channel::<ToSend>();
+    let (http3_sender, http3_receiver) = unbounded_async::<ToSend>();
     let mut client_handler = ClientHandler {
         connect_ip_session: None,
         client_ip,
@@ -589,9 +593,6 @@ async fn handle_client(
             // Send pending HTTP3 data in channel to HTTP3 connection on QUIC
             http3_to_send = http3_receiver.recv(),
                             if http3_conn.is_some() && http3_retry_send.is_none() => {
-                if http3_to_send.is_none() {
-                    unreachable!()
-                }
                 let mut to_send = http3_to_send.unwrap();
                 let http3_conn = http3_conn.as_mut().unwrap();
                 loop {
@@ -653,7 +654,8 @@ async fn handle_client(
                         }
                     };
                     to_send = match http3_receiver.try_recv() {
-                        Ok(v) => v,
+                        Ok(Some(v)) => v,
+                        Ok(None) => break,
                         Err(_) => break,
                     };
                 }
@@ -662,7 +664,7 @@ async fn handle_client(
             // handle QUIC received data
             recvd = client.quic_receiver.recv() => {
                 match recvd {
-                    Some(mut quic_received) => {
+                    Ok(mut quic_received) => {
                         let read = match client.conn.recv(&mut quic_received.data, quic_received.recv_info) {
                             Ok(v) => v,
                             Err(e) => {
@@ -673,7 +675,7 @@ async fn handle_client(
                         debug!("{} processed {} bytes", client.conn.trace_id(), read);
 
                     },
-                    None => {
+                    Err(_) => {
                         break // channel closed on the other side. Should not happen?
                     },
                 }
@@ -873,7 +875,7 @@ async fn handle_http3_event(
     http3_conn: &mut quiche::h3::Connection,
     client: &mut Client,
     client_handler: &mut ClientHandler,
-    tun_sender: &tokio::sync::mpsc::Sender<Vec<u8>>,
+    tun_sender: &AsyncSender<Vec<u8>>,
 ) -> Result<(), ClientError> {
     let mut buf = [0; 65535];
     // Process datagram-related events.
@@ -953,7 +955,7 @@ async fn handle_http3_event(
 
                         // These are for receiving messages from the TUN device
                         let (tun_sender_from, from_tun_receiver) =
-                            mpsc::channel::<Vec<u8>>(MAX_CHANNEL_MESSAGES);
+                            bounded_async(MAX_CHANNEL_MESSAGES);
                         let conn_ip_client = ConnectIpClient {
                             assigned_addr: client_handler.client_ip,
                             id: "".to_string(),
@@ -968,7 +970,7 @@ async fn handle_http3_event(
 
                         // For sending received http3 messages to the ip connect handler
                         let (ip_http3_sender, ip_http3_receiver) =
-                            mpsc::channel::<Content>(MAX_CHANNEL_MESSAGES);
+                            bounded_async(MAX_CHANNEL_MESSAGES);
                         let flow_id = stream_id / 4;
 
                         if client_handler.connect_ip_session.is_some() {
@@ -1272,7 +1274,7 @@ fn destroy_tun_interface() {
  */
 async fn tun_socket_handler(
     ip_handlers: ConnectIpClientList,
-    mut tun_sender: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    tun_sender: AsyncReceiver<Vec<u8>>,
     server_config: ServerConfig,
 ) {
     // first create tun socket
@@ -1344,7 +1346,7 @@ async fn tun_socket_handler(
     // If we know the client this is directed to we should just forward the message to that client
     let write_t = tokio::spawn(async move {
         loop {
-            if let Some(pkt) = tun_sender.recv().await {
+            if let Ok(pkt) = tun_sender.recv().await {
                 // TODO: For now we make sure to only send ipv4 packets
                 // Get the version by looking at the first nibble
                 let version = pkt[0] >> 4;
@@ -1410,13 +1412,13 @@ async fn tun_socket_handler(
 async fn connect_ip_handler(
     stream_id: u64,
     flow_id: u64,
-    http3_sender: UnboundedSender<ToSend>,
-    mut tun_receiver: tokio::sync::mpsc::Receiver<Vec<u8>>,
-    tun_sender: tokio::sync::mpsc::Sender<Vec<u8>>,
-    mut http3_receiver: tokio::sync::mpsc::Receiver<Content>,
+    http3_sender: AsyncSender<ToSend>,
+    mut tun_receiver: AsyncReceiver<Vec<u8>>,
+    tun_sender: AsyncSender<Vec<u8>>,
+    mut http3_receiver: AsyncReceiver<Content>,
     mut assigned_ip: Ipv4Addr,
     static_clients: StaticClientMap,
-    ip_register_handler: Sender<IpRegisterRequest>,
+    ip_register_handler: AsyncSender<IpRegisterRequest>,
 ) {
     debug!("Creating new IP connect handler!");
 
@@ -1435,7 +1437,7 @@ async fn connect_ip_handler(
             // to the proxy client.
             // The packets are confirmed to be ipv4 packets so we don't need to worry about anything.
             // Just create the http3 datagram and send the packet.
-            if let Some(mut pkt) = tun_receiver.recv().await {
+            if let Ok(mut pkt) = tun_receiver.recv().await {
                 // Decrease ttl
                 pkt[8] -= 1;
                 recalculate_checksum(&mut pkt);
@@ -1444,6 +1446,7 @@ async fn connect_ip_handler(
                 debug!("Sending ip message to client: {}", assigned_ip);
                 http3_sender_clone_1
                     .send(to_send)
+                    .await
                     .expect("Could not send datagram to http3 sender!");
             }
         }
@@ -1454,7 +1457,7 @@ async fn connect_ip_handler(
             // Check for packets in the http3 receiver
             // This receiver gets datagram bodies (which are just ip packets) from the client proxy
             // and handles them (sends them to the TUN interface)
-            if let Some(pkt) = http3_receiver.recv().await {
+            if let Ok(pkt) = http3_receiver.recv().await {
                 match pkt {
                     Content::Request {
                         headers: _,
@@ -1485,8 +1488,8 @@ async fn connect_ip_handler(
                                     if addr == Ipv4Addr::UNSPECIFIED {
                                         addr = assigned_ip;
                                     }
-                                    let (ip_addr_sender, mut ip_addr_receiver) =
-                                        tokio::sync::mpsc::channel(1);
+                                    let (ip_addr_sender, ip_addr_receiver) =
+                                        bounded_async(1);
                                     let req = IpRegisterRequest {
                                         callback: ip_addr_sender,
                                         requested_address: addr,
@@ -1497,7 +1500,7 @@ async fn connect_ip_handler(
                                     ip_register_handler.send(req)
                                         .await
                                         .expect("Could not send channel message to ip register handler!");
-                                    if let Some(ret) = ip_addr_receiver.recv().await {
+                                    if let Ok(ret) = ip_addr_receiver.recv().await {
                                         info!("Got address for client: {ret}");
                                         ret_addr = ret;
                                         assigned_ip = ret;
@@ -1520,6 +1523,7 @@ async fn connect_ip_handler(
                                         },
                                         finished: false,
                                     })
+                                    .await
                                     .expect("Could not send to http3 channel..");
                             }
                             CapsuleType::RouteAdvertisement(_) => todo!(),
@@ -1537,8 +1541,8 @@ async fn connect_ip_handler(
                                 if let Some(ip_addr) = static_clients.lock().await.get(&client_id) {
                                     // We know this client already. Register it and send AddressAssign
                                     let mut ret_addr = Ipv4Addr::UNSPECIFIED;
-                                    let (ip_addr_sender, mut ip_addr_receiver) =
-                                        tokio::sync::mpsc::channel(1);
+                                    let (ip_addr_sender, ip_addr_receiver) =
+                                        bounded_async(1);
                                     let req = IpRegisterRequest {
                                         callback: ip_addr_sender,
                                         requested_address: *ip_addr,
@@ -1549,7 +1553,7 @@ async fn connect_ip_handler(
                                     ip_register_handler.send(req).await.expect(
                                         "Could not send channel message to ip register handler!",
                                     );
-                                    if let Some(ret) = ip_addr_receiver.recv().await {
+                                    if let Ok(ret) = ip_addr_receiver.recv().await {
                                         ret_addr = ret;
                                         assigned_ip = ret;
                                     }
@@ -1568,6 +1572,7 @@ async fn connect_ip_handler(
                                         },
                                         finished: false,
                                     })
+                                    .await
                                     .expect("Could not send to http3 channel..");
                             }
                         }
@@ -1631,6 +1636,7 @@ async fn connect_ip_handler(
             content: Content::Headers { headers },
             finished: false,
         })
+        .await
         .expect("channel send failed");
 
     println!("Registered a new client with IP: {}", assigned_ip);
@@ -1665,13 +1671,13 @@ async fn connect_ip_handler(
 ///         The client would have to be able to handle address changes
 /// //TODO: Currently we can't remove a client
 async fn client_register_handler(
-    mut receiver: Receiver<IpRegisterRequest>,
+    receiver: AsyncReceiver<IpRegisterRequest>,
     connect_ip_clients: ConnectIpClientList,
     static_clients: StaticClientMap,
     config_path: String,
 ) {
     loop {
-        if let Some(request) = receiver.recv().await {
+        if let Ok(request) = receiver.recv().await {
             info!("Client is requesting address. Id: \"{}\" | Ip: {} | Former ip: {}", 
                 request.id, 
                 request.requested_address,
@@ -1770,6 +1776,7 @@ async fn client_register_handler(
                     add_static_client_config(request.requested_address, request.id.clone(), &config_path, &static_clients).await;
                 }
             }
+            info!("Handled new registering client. Clients in lists: Static_clients={}, Clients total={}", static_clients.lock().await.len(), clients_binding.len());
         }
     }
 }
