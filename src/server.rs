@@ -1413,9 +1413,9 @@ async fn connect_ip_handler(
     stream_id: u64,
     flow_id: u64,
     http3_sender: AsyncSender<ToSend>,
-    mut tun_receiver: AsyncReceiver<Vec<u8>>,
+    tun_receiver: AsyncReceiver<Vec<u8>>,
     tun_sender: AsyncSender<Vec<u8>>,
-    mut http3_receiver: AsyncReceiver<Content>,
+    http3_receiver: AsyncReceiver<Content>,
     mut assigned_ip: Ipv4Addr,
     static_clients: StaticClientMap,
     ip_register_handler: AsyncSender<IpRegisterRequest>,
@@ -1442,7 +1442,7 @@ async fn connect_ip_handler(
                 pkt[8] -= 1;
                 recalculate_checksum(&mut pkt);
 
-                let to_send = encapsulate_ipv4(pkt, &flow_id, &0);
+                let to_send = encapsulate_ipv4(&pkt, &flow_id, &0);
                 debug!("Sending ip message to client: {}", assigned_ip);
                 http3_sender_clone_1
                     .send(to_send)
