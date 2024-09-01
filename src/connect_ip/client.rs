@@ -12,10 +12,11 @@ use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::net::UdpSocket;
-use kanal::*;
 use tokio::sync::Mutex;
 use tokio::time::{self};
 use tun2::AsyncDevice;
+
+use kanal::*;
 
 use crate::common::*;
 use crate::connect_ip::capsules::*;
@@ -97,12 +98,18 @@ pub struct ConnectIpInfo {
     pub assigned_ip: Ipv4Addr,
 }
 
-///
-/// Holds an ip packet and its direction
-///
-struct IpMessage {
-    message: Vec<u8>,
-    dir: Direction,
+impl std::fmt::Display for Direction {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Direction::ToServer => {
+                write!(f, "ToServer")
+            },
+            Direction::ToClient => {
+                write!(f, "ToClient")
+            },
+        }
+        
+    }
 }
 
 /// Generate a new pair of Source Connection ID and reset token.
@@ -209,47 +216,11 @@ fn set_client_ip_and_route(dev_addr: &String, tun_gateway: &String, tun_name: &S
 ///  * ip_handler: Channel that handles received ip messages
 ///  * reader: Receiver for raw ip messages
 ///
-async fn ip_receiver_t(ip_handler: AsyncSender<IpMessage>, mut reader: ReadHalf<AsyncDevice>) {
-    let mut buf = [0; 4096];
-    loop {
-        let size = reader
-            .read(&mut buf)
-            .await
-            .expect("[ip_receiver_t] Could not read from reader");
-        let pkt = &buf[..size];
-        use std::io::{Error, ErrorKind::Other};
-        if ip_handler.capacity() == 0 {
-            error!("[ip_receiver_t] ip_handler capacity 0, dropping packet!");
-            continue;
-        }
-        match ip_handler
-            .send(IpMessage {
-                message: pkt.to_vec(),
-                dir: Direction::ToServer,
-            })
-            .await
-            .map_err(|e| Error::new(Other, e))
-        {
-            Ok(()) => {
-            }
-            Err(e) => {
-                error!("[ip_receiver_t] tx send error: {}", e);
-            }
-        }
-    }
-}
-
-///
-/// Receives IP Packets from rx.
-/// Will then handle these packets accordingly and send messages to quic_dispatcher_t
-///
-async fn ip_handler_t(
-    ip_recv: AsyncReceiver<IpMessage>, // Other side is ip_receiver_t
+async fn ip_receiver_t(
+    mut reader: ReadHalf<AsyncDevice>,
     conn_info_recv: AsyncReceiver<ConnectIpInfo>, // Other side is quic_handler_t
     http3_dispatch: AsyncSender<ToSend>,   // other side is quic_dispatcher_t
-    ip_dispatch: AsyncSender<Vec<u8>>,     // other side is ip_dispatcher_t
-    device_addr: Ipv4Addr,
-) {
+    ) {
     // Wait till the QUIC server sends us connection information
     let mut conn_info: Option<ConnectIpInfo> = None;
     if let Ok(info) = conn_info_recv.recv().await {
@@ -260,49 +231,61 @@ async fn ip_handler_t(
         "Connected to server! Assigned IP: {}",
         conn_info.assigned_ip
     );
+
+    let mut buf = [0; 4096];
+    loop {
+        let size = reader
+            .read(&mut buf)
+            .await
+            .expect("[ip_receiver_t] Could not read from reader");
+        let pkt = &mut buf[..size];
+        if get_ip_version(pkt) != 4 {
+            continue;
+        }
+        set_ipv4_pkt_source(pkt, &conn_info.assigned_ip);
+        // Recalculate checksum after ipv4 change
+        recalculate_checksum(pkt);
+        if http3_dispatch.capacity() > 0 {
+            match http3_dispatch
+                .send(encapsulate_ipv4(pkt, &conn_info.flow_id, &0))
+                .await
+            {
+                Ok(()) => {}
+                Err(e) => {
+                    error!("[ip_handler_t] Error sending to quic dispatch: {}", e);
+                }
+            };
+        } else {
+            error!("Http3 dispatcher capacity was full!");
+        }
+    }
+}
+
+///
+/// Receives IP Packets from rx.
+/// Will then handle these packets accordingly and send messages to quic_dispatcher_t
+///
+async fn ip_handler_t(
+    ip_recv: AsyncReceiver<Vec<u8>>, // Other side is ip_receiver_t
+    device_addr: Ipv4Addr,
+    mut writer: WriteHalf<AsyncDevice>,
+) {
     loop {
         if let Ok(mut pkt) = ip_recv.recv().await {
             debug!("[ip_handler_t] Received packet. Capacity left: {}", ip_recv.capacity());
-            match get_ip_version(&pkt.message) {
+            match get_ip_version(&pkt) {
                 4 => {
-                    match pkt.dir {
-                        Direction::ToServer => {
-                            set_ipv4_pkt_source(&mut pkt.message, &conn_info.assigned_ip);
-                            // Recalculate checksum after ipv4 change
-                            recalculate_checksum(&mut pkt.message);
-                            if http3_dispatch.capacity() > 0 {
-                                match http3_dispatch
-                                    .send(encapsulate_ipv4(pkt.message, &conn_info.flow_id, &0))
-                                    .await
-                                {
-                                    Ok(()) => {}
-                                    Err(e) => {
-                                        error!("[ip_handler_t] Error sending to quic dispatch: {}", e);
-                                    }
-                                };
-                            } else {
-                                error!("Http3 dispatcher capacity was full!");
-                            }
-                        }
-                        Direction::ToClient => {
-                            // Send this to the ip dispatcher
-                            set_ipv4_pkt_destination(&mut pkt.message, &device_addr);
-                            // Recalculate checksum after ipv4 change
-                            recalculate_checksum(&mut pkt.message);
+                    // Send this to the ip dispatcher
+                    set_ipv4_pkt_destination(&mut pkt, &device_addr);
+                    // Recalculate checksum after ipv4 change
+                    recalculate_checksum(&mut pkt);
 
-                            if ip_dispatch.capacity() > 0 {
-                                match ip_dispatch.send(pkt.message).await {
-                                    Ok(()) => {}
-                                    Err(e) => {
-                                        error!("[ip_handler_t] Error sending to ip dispatch: {}", e);
-                                    }
-                                }
-                            } else {
-                                error!("Dropping packet, ip_dispatch is full!");
-                            }
-                        }
-                    }
-                }
+                    writer
+                        .write_all(&pkt)
+                        .await
+                        .expect("Could not write packet to TUN!");
+                    
+                },
                 6 => {
                     debug!("[ip_handler_t] Received IPv6 messages at ip_handler_t, not supported!");
                 }
@@ -310,25 +293,6 @@ async fn ip_handler_t(
                     error!("[ip_handler_t] Received message with unknown IP protocol.");
                 }
             };
-        }
-    }
-}
-
-///
-/// Receives ready-to-send ip packets and then sends them
-/// to the TUN device.
-///
-async fn ip_dispatcher_t(
-    ip_dispatch_reader: AsyncReceiver<Vec<u8>>,
-    mut writer: WriteHalf<AsyncDevice>,
-) {
-    loop {
-        if let Ok(pkt) = ip_dispatch_reader.recv().await {
-            debug!("[ip_dispatcher_t] Received packet, capacity left: {}", ip_dispatch_reader.capacity());
-            writer
-                .write_all(&pkt)
-                .await
-                .expect("Could not write packet to TUN!");
         }
     }
 }
@@ -343,7 +307,7 @@ async fn ip_dispatcher_t(
  * Sends resulting messages to either ip_handler_t or quic_dispatch_t.
  */
 async fn quic_conn_handler(
-    ip_handler: AsyncSender<IpMessage>,      // other side is ip_dispatcher_t
+    ip_handler: AsyncSender<Vec<u8>>,      // other side is ip_dispatcher_t
     info_sender: AsyncSender<ConnectIpInfo>, // other side is the ip_handler_t
     http3_sender: AsyncSender<ToSend>,
     http3_receiver: AsyncReceiver<ToSend>,
@@ -377,10 +341,12 @@ async fn quic_conn_handler(
             info!("connection closed, {:?}", conn.stats());
             break;
         }
-
+        debug!("tokio::select start!");
+        let t = std::time::SystemTime::now();
         tokio::select! {
             // handle QUIC received data
             recvd = udp_socket.recv_from(&mut buf) => {
+                debug!("recv");
                 let (read, from) = match recvd {
                     Ok(v) => v,
                     Err(e) => {
@@ -395,7 +361,7 @@ async fn quic_conn_handler(
                 };
 
                 // Process potentially coalesced packets.
-                let read = match conn.recv(&mut buf[..read], recv_info) {
+                let _read = match conn.recv(&mut buf[..read], recv_info) {
                     Ok(v) => v,
 
                     Err(e) => {
@@ -573,6 +539,7 @@ async fn quic_conn_handler(
             },
             // Send pending HTTP3 data in channel to HTTP3 connection on QUIC
             http3_to_send = http3_receiver.recv(), if http3_conn.is_some() && http3_retry_send.is_none() => {
+                debug!("http3_to_send");
                 let mut to_send = http3_to_send.unwrap();
                 let http3_conn = http3_conn.as_mut().unwrap();
                 loop {
@@ -662,6 +629,7 @@ async fn quic_conn_handler(
 
             },
             _ = interval.tick(), if http3_conn.is_some() && http3_retry_send.is_some() => {
+                debug!("_= interval");
                 let mut to_send = http3_retry_send.unwrap();
                 let http3_conn = http3_conn.as_mut().unwrap();
                 let result = match &to_send.content {
@@ -726,6 +694,7 @@ async fn quic_conn_handler(
             }
         }
 
+        debug!("Took {}ms for tokio select in quic_conn_handler!", t.elapsed().unwrap().as_millis());
         // Process datagram related events
         // We only expect datagrams that contain ip payloads
         while let Ok(len) = conn.dgram_recv(&mut buf) {
@@ -733,7 +702,7 @@ async fn quic_conn_handler(
             if let Ok(flow_id) = b.get_varint() {
                 let context_id = match b.get_varint() {
                     Ok(v) => v,
-                    Err(e) => {
+                    Err(_e) => {
                         continue;
                     }
                 };
@@ -758,10 +727,7 @@ async fn quic_conn_handler(
                         }
                         if ip_handler.capacity() > 0 {
                             match ip_handler
-                                .send(IpMessage {
-                                    message: buf[header_len..len].to_vec(),
-                                    dir: Direction::ToClient,
-                                })
+                                .send(buf[header_len..len].to_vec())
                                 .await
                             {
                                 Ok(()) => {}
@@ -990,8 +956,6 @@ impl ConnectIPClient {
         let (ip_sender, ip_recv) = kanal::bounded_async(config.thread_channel_max.unwrap());
         let (http3_dispatch, http3_dispatch_reader) =
             kanal::bounded_async(config.thread_channel_max.unwrap());
-        let (ip_dispatch, ip_dispatch_reader) =
-            kanal::bounded_async(config.thread_channel_max.unwrap());
         let (conn_info_sender, conn_info_recv) =
             kanal::bounded_async(config.thread_channel_max.unwrap());
 
@@ -1000,17 +964,13 @@ impl ConnectIPClient {
         let http3_dispatch_clone = http3_dispatch.clone();
 
         debug!("Starting threads!");
-        let ip_recv_t = tokio::task::spawn(ip_receiver_t(ip_sender, reader));
+        let ip_recv_t = tokio::task::spawn(ip_receiver_t(reader, conn_info_recv, http3_dispatch));
 
         let ip_h_t = tokio::task::spawn(ip_handler_t(
             ip_recv,
-            conn_info_recv,
-            http3_dispatch,
-            ip_dispatch,
             ipaddr,
+            writer
         ));
-
-        let ip_disp_t = tokio::task::spawn(ip_dispatcher_t(ip_dispatch_reader, writer));
 
         let quic_h_t = tokio::task::spawn(quic_conn_handler(
             ip_from_quic_sender,
@@ -1025,7 +985,6 @@ impl ConnectIPClient {
         tokio::select! {
             _ = ip_recv_t => { error!("ip_recv_t stopped!"); },
             _ = ip_h_t => { error!("ip_h_t stopped!"); },
-            _ = ip_disp_t => { error!("ip_disp_t stopped!"); },
             _ = quic_h_t => { error!("quic_h_t stopped!"); },
         };
         debug!("ConnectIPClient exiting..");
