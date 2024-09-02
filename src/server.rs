@@ -20,7 +20,6 @@ use kanal::*;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UdpSocket;
-//use tokio::sync::mpsc::{self, Receiver, Sender, UnboundedSender};
 use tokio::time::{self, Duration};
 
 use ring::rand::*;
@@ -118,7 +117,6 @@ struct QuicReceived {
     recv_info: quiche::RecvInfo,
     data: Vec<u8>,
 }
-
 
 #[derive(Debug, Clone)]
 struct RunBeforeBindError;
@@ -471,10 +469,16 @@ impl Server {
                 from,
             };
 
-            match tx.send(QuicReceived {
-                recv_info,
-                data: pkt_buf.to_vec(),
-            }).await {
+            if tx.capacity() == 0 {
+                warn!("tx capacity was empty!");
+            }
+            match tx
+                .send(QuicReceived {
+                    recv_info,
+                    data: pkt_buf.to_vec(),
+                })
+                .await
+            {
                 Ok(_) => {}
                 _ => {
                     debug!("Error sending to {:?}", &hdr.dcid);
@@ -555,8 +559,6 @@ fn get_next_free_ip(
     None
 }
 
-
-
 /**
  * Client handler that handles the connection for a single client
  */
@@ -589,8 +591,6 @@ async fn handle_client(
     let mut http3_retry_send: Option<ToSend> = None;
     let mut interval = time::interval(Duration::from_millis(20));
     loop {
-        
-
         tokio::select! {
             // Send pending HTTP3 data in channel to HTTP3 connection on QUIC
             http3_to_send = http3_receiver.recv(),
@@ -798,6 +798,8 @@ async fn handle_client(
                                 })
                                 .await
                                 .expect("Could not send datagram to ip handler.");
+                        } else {
+                            error!("Got datagram on unknown flowid: {}", flow_id);
                         }
                     }
                 } else {
@@ -805,7 +807,7 @@ async fn handle_client(
                 }
             }
         }
-        
+
         // Send pending QUIC packets
         loop {
             let (write, send_info) = match client.conn.send(&mut out) {
@@ -911,7 +913,7 @@ async fn handle_http3_event(
     tun_sender: &AsyncSender<Vec<u8>>,
 ) -> Result<(), ClientError> {
     let mut buf = [0; 65535];
-    
+
     match http3_conn.poll(&mut client.conn) {
         Ok((stream_id, quiche::h3::Event::Headers { list: headers, .. })) => {
             info!(
@@ -1094,7 +1096,14 @@ async fn handle_http3_event(
             }
             // TODO: Possibly kill IP Session?
             if client_handler.connect_ip_session.is_some() {
-                client_handler.connect_ip_session.as_mut().unwrap().handler_thread.as_mut().unwrap().abort();
+                client_handler
+                    .connect_ip_session
+                    .as_mut()
+                    .unwrap()
+                    .handler_thread
+                    .as_mut()
+                    .unwrap()
+                    .abort();
             }
         }
 
@@ -1127,7 +1136,14 @@ async fn handle_http3_event(
             }
             // TODO: Possibly kill IP Session?
             if client_handler.connect_ip_session.is_some() {
-                client_handler.connect_ip_session.as_mut().unwrap().handler_thread.as_mut().unwrap().abort();
+                client_handler
+                    .connect_ip_session
+                    .as_mut()
+                    .unwrap()
+                    .handler_thread
+                    .as_mut()
+                    .unwrap()
+                    .abort();
             }
         }
         Ok((_prioritized_element_id, quiche::h3::Event::PriorityUpdate)) => unreachable!(),
@@ -1143,38 +1159,6 @@ async fn handle_http3_event(
             return Err(ClientError::Other("HTTP/3 error".to_string()));
         }
     }
-
-    /* 
-    // Process datagram-related events.
-    while let Ok(len) = client.conn.dgram_recv(&mut buf) {
-        let mut b = octets::Octets::with_slice(&buf);
-        if let Ok(flow_id) = b.get_varint() {
-            info!("Received DATAGRAM flow_id={} len={}", flow_id, len,);
-
-            // TODO: Check if this is actually a good way to check for the
-            // length of the flow_id
-
-            let flow_id_len = varint_len(flow_id);
-            if client_handler.connect_ip_session.is_some() {
-                {
-                    let ip_session = client_handler.connect_ip_session.as_ref().unwrap();
-                    if ip_session.flow_id == flow_id {
-                        let data = &buf[flow_id_len..len];
-                        ip_session
-                            .ip_h3_sender
-                            .send(Content::Datagram {
-                                payload: data.to_vec(),
-                            })
-                            .await
-                            .expect("Could not send datagram to ip handler.");
-                    }
-                }
-            } else {
-                debug!("received datagram on unknown flow: {}", flow_id)
-            }
-        }
-    }*/
-
     Ok(())
 }
 
@@ -1492,13 +1476,12 @@ async fn connect_ip_handler(
                                 if let IpLength::V4(addr) = c.requested.first().unwrap().ip_address
                                 {
                                     let mut addr = Ipv4Addr::from(addr);
-                                    // If the client only wants a static ip but doesn't care 
+                                    // If the client only wants a static ip but doesn't care
                                     // which it is we just reserve our current ip
                                     if addr == Ipv4Addr::UNSPECIFIED {
                                         addr = assigned_ip;
                                     }
-                                    let (ip_addr_sender, ip_addr_receiver) =
-                                        bounded_async(1);
+                                    let (ip_addr_sender, ip_addr_receiver) = bounded_async(1);
                                     let req = IpRegisterRequest {
                                         callback: ip_addr_sender,
                                         requested_address: addr,
@@ -1506,24 +1489,26 @@ async fn connect_ip_handler(
                                         former_ip: assigned_ip,
                                         static_addr: static_client,
                                     };
-                                    ip_register_handler.send(req)
-                                        .await
-                                        .expect("Could not send channel message to ip register handler!");
+                                    ip_register_handler.send(req).await.expect(
+                                        "Could not send channel message to ip register handler!",
+                                    );
                                     if let Ok(ret) = ip_addr_receiver.recv().await {
                                         info!("Got address for client: {ret}");
                                         ret_addr = ret;
                                         assigned_ip = ret;
                                     }
-
                                 } else {
                                     error!("Client requested ipv6 address, not supported");
                                     // TODO: Implement some proper closing of the connection
                                     return;
                                 }
 
-                                let cap_buf =
-                                    AddressAssign::create_sendable(ret_addr, None, Some(c.requested[0].request_id));
-                                   // create_addr_assign(ret_addr, c.requested[0].request_id);
+                                let cap_buf = AddressAssign::create_sendable(
+                                    ret_addr,
+                                    None,
+                                    Some(c.requested[0].request_id),
+                                );
+                                // create_addr_assign(ret_addr, c.requested[0].request_id);
                                 http3_sender_clone_2
                                     .send(ToSend {
                                         stream_id,
@@ -1550,8 +1535,7 @@ async fn connect_ip_handler(
                                 if let Some(ip_addr) = static_clients.lock().await.get(&client_id) {
                                     // We know this client already. Register it and send AddressAssign
                                     let mut ret_addr = Ipv4Addr::UNSPECIFIED;
-                                    let (ip_addr_sender, ip_addr_receiver) =
-                                        bounded_async(1);
+                                    let (ip_addr_sender, ip_addr_receiver) = bounded_async(1);
                                     let req = IpRegisterRequest {
                                         callback: ip_addr_sender,
                                         requested_address: *ip_addr,
@@ -1566,12 +1550,12 @@ async fn connect_ip_handler(
                                         ret_addr = ret;
                                         assigned_ip = ret;
                                     }
-                                    cap_buf = 
-                                        AddressAssign::create_sendable(ret_addr, None, None);
+                                    cap_buf = AddressAssign::create_sendable(ret_addr, None, None);
                                 } else {
                                     // Create a CLIENT_HELLO capsule to signal that we don't know
                                     // the client
-                                    cap_buf = ClientHello::create_sendable("SERVER".to_owned()).unwrap();
+                                    cap_buf =
+                                        ClientHello::create_sendable("SERVER".to_owned()).unwrap();
                                 }
                                 http3_sender_clone_2
                                     .send(ToSend {
@@ -1687,10 +1671,10 @@ async fn client_register_handler(
 ) {
     loop {
         if let Ok(request) = receiver.recv().await {
-            info!("Client is requesting address. Id: \"{}\" | Ip: {} | Former ip: {}", 
-                request.id, 
-                request.requested_address,
-                request.former_ip);
+            info!(
+                "Client is requesting address. Id: \"{}\" | Ip: {} | Former ip: {}",
+                request.id, request.requested_address, request.former_ip
+            );
             // We have to make sure noone adds a client during this
             let mut clients_binding = connect_ip_clients.lock().await;
             // if former ip == requested ip we only need to save the client as static if needed
@@ -1699,13 +1683,22 @@ async fn client_register_handler(
                 let mut new_client = old_client.unwrap();
                 new_client.static_addr = request.static_addr;
                 new_client.id = request.id.clone();
-                
+
                 if request.static_addr {
-                    add_static_client_config(request.requested_address, request.id.clone(), &config_path, &static_clients).await;
+                    add_static_client_config(
+                        request.requested_address,
+                        request.id.clone(),
+                        &config_path,
+                        &static_clients,
+                    )
+                    .await;
                 }
                 clients_binding.insert(request.requested_address, new_client);
 
-                request.callback.send(request.former_ip).await
+                request
+                    .callback
+                    .send(request.former_ip)
+                    .await
                     .expect("Couldn't send message to channel!");
                 continue;
             }
@@ -1782,7 +1775,13 @@ async fn client_register_handler(
                     .expect("Couldn't send message to channel!");
 
                 if request.static_addr {
-                    add_static_client_config(request.requested_address, request.id.clone(), &config_path, &static_clients).await;
+                    add_static_client_config(
+                        request.requested_address,
+                        request.id.clone(),
+                        &config_path,
+                        &static_clients,
+                    )
+                    .await;
                 }
             }
             info!("Handled new registering client. Clients in lists: Static_clients={}, Clients total={}", static_clients.lock().await.len(), clients_binding.len());
@@ -1790,23 +1789,23 @@ async fn client_register_handler(
     }
 }
 
-async fn add_static_client_config(addr: Ipv4Addr, id: String, path: &str, static_clients: &StaticClientMap) {
-    
-
-    // If the static client is already known (for example when changing it's own address), we 
+async fn add_static_client_config(
+    addr: Ipv4Addr,
+    id: String,
+    path: &str,
+    static_clients: &StaticClientMap,
+) {
+    // If the static client is already known (for example when changing it's own address), we
     // should remove it first from the static clients
     if static_clients.lock().await.contains_key(&id) {
         static_clients.lock().await.remove(&id);
-    } 
+    }
 
     // save client to static_clients list as well
-    static_clients
-        .lock()
-        .await
-        .insert(id, addr);
+    static_clients.lock().await.insert(id, addr);
 
     let mut new_contents = String::new();
-    const CONFIG_DESCRIPTION: &str = 
+    const CONFIG_DESCRIPTION: &str =
         "# This file holds masquerade clients that registered static ip addresses\n\
          # You may add new clients here following this scheme: \n\
          # [[clients]]\n\
@@ -1815,14 +1814,12 @@ async fn add_static_client_config(addr: Ipv4Addr, id: String, path: &str, static
 
     new_contents.push_str(CONFIG_DESCRIPTION);
     for c in static_clients.lock().await.iter() {
-        new_contents.push_str(
-            &format!(
-                "[[clients]]\n\
+        new_contents.push_str(&format!(
+            "[[clients]]\n\
                 id = \'{}\'\n\
                 ip = \'{}\'\n\n",
-                c.0, c.1
-            )
-        );
+            c.0, c.1
+        ));
         info!("Persisting client {}", c.0);
     }
 
@@ -1838,5 +1835,4 @@ async fn add_static_client_config(addr: Ipv4Addr, id: String, path: &str, static
     if let Err(e) = file.write_all(new_contents.as_bytes()).await {
         error!("Couldn't write to static client list: {e}");
     }
-
 }

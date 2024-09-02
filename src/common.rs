@@ -1,4 +1,4 @@
-use log::{error, info};
+use log::error;
 use quiche::h3::NameValue;
 use tokio::sync::mpsc;
 
@@ -58,11 +58,7 @@ pub struct ToSend {
 }
 
 /// Makes a buffered writer for a qlog.
-pub fn make_qlog_writer(
-    dir: &str,
-    role: &str,
-    id: &str,
-) -> std::io::BufWriter<std::fs::File> {
+pub fn make_qlog_writer(dir: &str, role: &str, id: &str) -> std::io::BufWriter<std::fs::File> {
     let mut path = std::path::PathBuf::from(dir);
     let filename = format!("{role}-{id}.sqlog");
     path.push(filename);
