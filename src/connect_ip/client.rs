@@ -244,7 +244,7 @@ async fn ip_receiver_t(
         recalculate_checksum(pkt);
         if http3_dispatch.capacity() > 0 {
             match http3_dispatch
-                .send(encapsulate_ipv4(pkt, &conn_info.flow_id, &0))
+                .send(encapsulate_ipv4(pkt, &conn_info.flow_id, 0))
                 .await
             {
                 Ok(()) => {}

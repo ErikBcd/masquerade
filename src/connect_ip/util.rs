@@ -63,8 +63,8 @@ impl std::fmt::Display for QUICStreamError {
 ///
 /// Creates a ToSend struct for sending IPSend
 ///
-pub fn encapsulate_ipv4(pkt: &[u8], flow_id: &u64, context_id: &u64) -> ToSend {
-    let context_id_enc = encode_var_int(*context_id);
+pub fn encapsulate_ipv4(pkt: &[u8], flow_id: &u64, context_id: u64) -> ToSend {
+    let context_id_enc = encode_var_int(context_id);
     let payload = [&context_id_enc, pkt].concat();
     ToSend {
         stream_id: *flow_id,

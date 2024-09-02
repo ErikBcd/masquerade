@@ -1435,7 +1435,7 @@ async fn connect_ip_handler(
                 pkt[8] -= 1;
                 recalculate_checksum(&mut pkt);
 
-                let to_send = encapsulate_ipv4(&pkt, &flow_id, &0);
+                let to_send = encapsulate_ipv4(&pkt, &flow_id, 0);
                 debug!("Sending ip message to client: {}", assigned_ip);
                 http3_sender_clone_1
                     .send(to_send)
