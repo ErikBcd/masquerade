@@ -625,7 +625,8 @@ async fn handle_client(
                             debug!("sending http3 datagram of {} bytes to flow {}", payload.len(), to_send.stream_id);
                             //http3_conn.send_dgram(&mut client.conn, to_send.stream_id, &payload)
                             match send_h3_dgram(&mut client.conn, to_send.stream_id, payload) {
-                                        Ok(v) => Ok(v),
+                                        Ok(_) => Ok(()),
+                                        Err(quiche::Error::Done) => Ok(()),
                                         Err(e) => {
                                             error!("sending http3 datagram failed! {:?}", e);
                                             break;
