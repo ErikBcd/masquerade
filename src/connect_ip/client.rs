@@ -631,12 +631,14 @@ async fn quic_conn_handler(
                         },
                         Content::Datagram { payload } => {
                             match send_h3_dgram(&mut conn, to_send.stream_id, payload) {
-                                    Ok(v) => Ok(v),
-                                    Err(e) => {
-                                        error!("sending http3 datagram failed: {:?}", e);
-                                        break;
-                                    }
+                                Ok(_) => {},
+                                Err(quiche::Error::Done) => {},
+                                Err(e) => {
+                                    error!("sending http3 datagram failed: {:?}", e);
+                                    break;
                                 }
+                            };
+                            continue;
                         },
                         Content::Finished => {
                             if conn.stream_finished(to_send.stream_id) {
@@ -719,12 +721,13 @@ async fn quic_conn_handler(
                     },
                     Content::Datagram { payload } => {
                         match send_h3_dgram(&mut conn, to_send.stream_id, payload) {
-                                    Ok(v) => Ok(v),
-                                    Err(e) => {
-                                        error!("sending http3 datagram failed: {:?}", e);
-                                        break;
-                                    }
-                                }
+                            Ok(_) => break,
+                            Err(e) => {
+                                error!("sending http3 datagram failed: {:?}", e);
+                                break;
+                            }
+                        }
+
                     },
                     Content::Finished => unreachable!(),
                 };
