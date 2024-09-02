@@ -216,7 +216,7 @@ fn set_client_ip_and_route(dev_addr: &String, tun_gateway: &String, tun_name: &S
 async fn ip_receiver_t(
     mut reader: ReadHalf<AsyncDevice>,
     conn_info_recv: AsyncReceiver<ConnectIpInfo>, // Other side is quic_handler_t
-    http3_dispatch: AsyncSender<ToSend>,          // other side is quic_dispatcher_t
+    http3_dispatch: AsyncSender<Vec<u8>>,          // other side is quic_dispatcher_t
 ) {
     // Wait till the QUIC server sends us connection information
     let mut conn_info: Option<ConnectIpInfo> = None;
@@ -243,8 +243,10 @@ async fn ip_receiver_t(
         // Recalculate checksum after ipv4 change
         recalculate_checksum(pkt);
         if http3_dispatch.capacity() > 0 {
+            let context_id_enc = encode_var_int(0);
+            let payload = [context_id_enc, pkt.to_vec()].concat();
             match http3_dispatch
-                .send(encapsulate_ipv4(pkt, &conn_info.flow_id, 0))
+                .send(payload)
                 .await
             {
                 Ok(()) => {}
@@ -310,6 +312,7 @@ async fn quic_conn_handler(
     info_sender: AsyncSender<ConnectIpInfo>, // other side is the ip_handler_t
     http3_sender: AsyncSender<ToSend>,
     http3_receiver: AsyncReceiver<ToSend>,
+    dgram_receiver: AsyncReceiver<Vec<u8>>,
     mut conn: Connection,
     udp_socket: UdpSocket,
     config: ClientConfig,
@@ -590,6 +593,20 @@ async fn quic_conn_handler(
                     };
                 }
             },
+            dgram_to_send = dgram_receiver.recv(), if http3_conn.is_some() => {
+                let payload = match dgram_to_send {
+                    Ok(v) => v,
+                    Err(e) => { panic!("Error receiving a datagram in quic handler: {e}") },
+                };
+                match send_h3_dgram(&mut conn, flow_id.unwrap(), &payload) {
+                    Ok(_) => {},
+                    Err(quiche::Error::Done) => {},
+                    Err(e) => {
+                        error!("sending http3 datagram failed: {:?}", e);
+                        break;
+                    }
+                };
+            },
             // Send pending HTTP3 data in channel to HTTP3 connection on QUIC
             http3_to_send = http3_receiver.recv(), if http3_conn.is_some() && http3_retry_send.is_none() => {
                 let mut to_send = http3_to_send.unwrap();
@@ -629,16 +646,8 @@ async fn quic_conn_handler(
                                 }
                             }
                         },
-                        Content::Datagram { payload } => {
-                            match send_h3_dgram(&mut conn, to_send.stream_id, payload) {
-                                Ok(_) => {},
-                                Err(quiche::Error::Done) => {},
-                                Err(e) => {
-                                    error!("sending http3 datagram failed: {:?}", e);
-                                    break;
-                                }
-                            };
-                            continue;
+                        Content::Datagram { payload: _ } => {
+                            unreachable!()
                         },
                         Content::Finished => {
                             if conn.stream_finished(to_send.stream_id) {
@@ -719,15 +728,8 @@ async fn quic_conn_handler(
                             debug!("written http3 data {} of {} bytes", written, data.len());
                         }
                     },
-                    Content::Datagram { payload } => {
-                        match send_h3_dgram(&mut conn, to_send.stream_id, payload) {
-                            Ok(_) => break,
-                            Err(e) => {
-                                error!("sending http3 datagram failed: {:?}", e);
-                                break;
-                            }
-                        }
-
+                    Content::Datagram { payload: _ } => {
+                        unreachable!()
                     },
                     Content::Finished => unreachable!(),
                 };
@@ -975,12 +977,15 @@ impl ConnectIPClient {
         let (conn_info_sender, conn_info_recv) =
             kanal::bounded_async(config.thread_channel_max.unwrap());
 
+        let (dgram_sender, dgram_receiver) = 
+            kanal::bounded_async(config.thread_channel_max.unwrap());
+
         // Copies of senders
         let ip_from_quic_sender = ip_sender.clone();
         let http3_dispatch_clone = http3_dispatch.clone();
 
         debug!("Starting threads!");
-        let ip_recv_t = tokio::task::spawn(ip_receiver_t(reader, conn_info_recv, http3_dispatch));
+        let ip_recv_t = tokio::task::spawn(ip_receiver_t(reader, conn_info_recv, dgram_sender));
 
         let ip_h_t = tokio::task::spawn(ip_handler_t(ip_recv, ipaddr, writer));
 
@@ -989,6 +994,7 @@ impl ConnectIPClient {
             conn_info_sender,
             http3_dispatch_clone,
             http3_dispatch_reader,
+            dgram_receiver,
             quic_conn,
             socket,
             config,
