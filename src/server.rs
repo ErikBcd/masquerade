@@ -278,8 +278,7 @@ impl Server {
             .await
         });
 
-        let (tun_sender, tun_receiver) =
-            bounded_async(MAX_CHANNEL_MESSAGES);
+        let (tun_sender, tun_receiver) = bounded_async(MAX_CHANNEL_MESSAGES);
         // Create TUN handler (creates device automatically)
         let connect_ip_clients_clone = connect_ip_clients.clone();
         let server_config_clone = server_config.clone();
@@ -403,7 +402,7 @@ impl Server {
                 let conn =
                     quiche::accept(&scid, odcid.as_ref(), local_addr, from, &mut config).unwrap();
 
-                let (tx, rx) = unbounded_async();
+                let (tx, rx) = bounded_async(MAX_CHANNEL_MESSAGES);
 
                 let mut client = Client {
                     conn,
@@ -570,7 +569,7 @@ async fn handle_client(
     register_handler: AsyncSender<IpRegisterRequest>,
 ) {
     let mut http3_conn: Option<quiche::h3::Connection> = None;
-    let (http3_sender, http3_receiver) = unbounded_async::<ToSend>();
+    let (http3_sender, http3_receiver) = bounded_async::<ToSend>(MAX_CHANNEL_MESSAGES);
     let mut client_handler = ClientHandler {
         connect_ip_session: None,
         client_ip,
