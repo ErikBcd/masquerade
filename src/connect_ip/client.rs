@@ -345,62 +345,6 @@ async fn quic_conn_handler(
             info!("connection closed, {:?}", conn.stats());
             break;
         }
-
-        // Process datagram related events
-        // We only expect datagrams that contain ip payloads
-        while let Ok(len) = conn.dgram_recv(&mut buf) {
-            let mut b = octets::Octets::with_slice(&buf);
-            if let Ok(flow_id) = b.get_varint() {
-                let context_id = match b.get_varint() {
-                    Ok(v) => v,
-                    Err(_e) => {
-                        continue;
-                    }
-                };
-                if context_id != 0 {
-                    continue;
-                }
-
-                let header_len = varint_len(flow_id) + varint_len(context_id);
-                match get_ip_version(&buf[header_len..len]) {
-                    4 => {
-                        // Check if packet is valid (checksum check)
-                        match check_ipv4_packet(&buf[header_len..len], (len - header_len) as u16) {
-                            Ok(_) => {}
-                            Err(Ipv4CheckError::WrongChecksumError) => {
-                                debug!("Received IPv4 packet with invalid checksum, discarding..");
-                                continue;
-                            }
-                            Err(Ipv4CheckError::WrongSizeError) => {
-                                debug!("Received IPv4 packet with invalid size, discarding...");
-                                continue;
-                            }
-                        }
-                        if ip_handler.capacity() > 0 {
-                            match ip_handler.send(buf[header_len..len].to_vec()).await {
-                                Ok(()) => {}
-                                Err(e) => {
-                                    debug!("Couldn't send ip packet to ip sender: {}", e);
-                                }
-                            }
-                        } else {
-                            error!("Dropping packet, ip_handler capacity at 0!");
-                        }
-                    }
-                    6 => {
-                        debug!("Received IPv6 packet via http3 (not implemented yet)");
-                        continue;
-                    }
-                    v => {
-                        error!("Received packet with invalid version: {v}");
-                    }
-                };
-            }
-        }
-
-        // Send pending QUIC packets
-        quic_send(&mut conn, &udp_socket, &mut out).await;
-
         tokio::select! {
             // handle QUIC received data
             recvd = udp_socket.recv_from(&mut buf) => {
@@ -753,6 +697,58 @@ async fn quic_conn_handler(
             }
         }
 
+        // Process datagram related events
+        // We only expect datagrams that contain ip payloads
+        while let Ok(len) = conn.dgram_recv(&mut buf) {
+            let mut b = octets::Octets::with_slice(&buf);
+            if let Ok(flow_id) = b.get_varint() {
+                let context_id = match b.get_varint() {
+                    Ok(v) => v,
+                    Err(_e) => {
+                        continue;
+                    }
+                };
+                if context_id != 0 {
+                    continue;
+                }
+
+                let header_len = varint_len(flow_id) + varint_len(context_id);
+                match get_ip_version(&buf[header_len..len]) {
+                    4 => {
+                        // Check if packet is valid (checksum check)
+                        match check_ipv4_packet(&buf[header_len..len], (len - header_len) as u16) {
+                            Ok(_) => {}
+                            Err(Ipv4CheckError::WrongChecksumError) => {
+                                debug!("Received IPv4 packet with invalid checksum, discarding..");
+                                continue;
+                            }
+                            Err(Ipv4CheckError::WrongSizeError) => {
+                                debug!("Received IPv4 packet with invalid size, discarding...");
+                                continue;
+                            }
+                        }
+                        if ip_handler.capacity() > 0 {
+                            match ip_handler.send(buf[header_len..len].to_vec()).await {
+                                Ok(()) => {}
+                                Err(e) => {
+                                    debug!("Couldn't send ip packet to ip sender: {}", e);
+                                }
+                            }
+                        } else {
+                            error!("Dropping packet, ip_handler capacity at 0!");
+                        }
+                    }
+                    6 => {
+                        debug!("Received IPv6 packet via http3 (not implemented yet)");
+                        continue;
+                    }
+                    v => {
+                        error!("Received packet with invalid version: {v}");
+                    }
+                };
+            }
+        }
+
         // Create a new HTTP/3 connection once the QUIC connection is established.
         if conn.is_established() && http3_conn.is_none() {
             let h3_config = quiche::h3::Config::new().unwrap();
@@ -783,33 +779,25 @@ async fn quic_conn_handler(
         }
 
         // Send pending QUIC packets
-        quic_send(&mut conn, &udp_socket, &mut out).await;
-    }
-}
+        loop {
+            let (write, send_info) = match conn.send(&mut out) {
+                Ok(v) => v,
 
-///
-/// Sends all packets in the QUIC send queue to the udp socket.
-/// 
-async fn quic_send(conn: &mut Connection, udp_socket: &UdpSocket, out: &mut [u8]) {
-    // Send pending QUIC packets
-    loop {
-        let (write, send_info) = match conn.send(out) {
-            Ok(v) => v,
+                Err(quiche::Error::Done) => {
+                    break;
+                }
 
-            Err(quiche::Error::Done) => {
-                break;
+                Err(e) => {
+                    error!("QUIC connection {} send failed: {:?}", conn.trace_id(), e);
+
+                    conn.close(false, 0x1, b"fail").ok();
+                    break;
+                }
+            };
+            match udp_socket.send_to(&out[..write], send_info.to).await {
+                Ok(_) => {}
+                Err(e) => panic!("UDP socket send_to() failed: {:?}", e),
             }
-
-            Err(e) => {
-                error!("QUIC connection {} send failed: {:?}", conn.trace_id(), e);
-
-                conn.close(false, 0x1, b"fail").ok();
-                break;
-            }
-        };
-        match udp_socket.send_to(&out[..write], send_info.to).await {
-            Ok(_) => {}
-            Err(e) => panic!("UDP socket send_to() failed: {:?}", e),
         }
     }
 }
@@ -1047,7 +1035,7 @@ impl ConnectIPClient {
         config.set_initial_max_streams_bidi(1000);
         config.set_initial_max_streams_uni(1000);
         config.set_disable_active_migration(true);
-        config.enable_dgram(true, 10000, 10000);
+        config.enable_dgram(true, 1000, 1000);
 
         let mut scid = [0; quiche::MAX_CONN_ID_LEN];
         let rng = SystemRandom::new();

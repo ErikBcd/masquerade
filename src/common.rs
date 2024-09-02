@@ -154,9 +154,7 @@ pub fn send_h3_dgram(
         .map_err(|_| quiche::Error::BufferTooShort)?;
     b.put_bytes(dgram_content)
         .map_err(|_| quiche::Error::BufferTooShort)?;
-    if conn.is_dgram_send_queue_full() {
-        error!("Dgram queue is full!");
-    }
+
     conn.dgram_send(&d)
 }
 
