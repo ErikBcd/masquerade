@@ -581,6 +581,7 @@ async fn handle_client(
     };
 
     let mut out = [0; MAX_DATAGRAM_SIZE];
+    let mut buf = [0; MAX_DATAGRAM_SIZE];
 
     let timeout = 5000; // milliseconds
     let sleep = tokio::time::sleep(Duration::from_millis(timeout));
@@ -589,6 +590,8 @@ async fn handle_client(
     let mut http3_retry_send: Option<ToSend> = None;
     let mut interval = time::interval(Duration::from_millis(20));
     loop {
+        
+
         tokio::select! {
             // Send pending HTTP3 data in channel to HTTP3 connection on QUIC
             http3_to_send = http3_receiver.recv(),
@@ -773,6 +776,37 @@ async fn handle_client(
             },
             else => break,
         }
+
+        // Process datagram-related events.
+        while let Ok(len) = client.conn.dgram_recv(&mut buf) {
+            let mut b = octets::Octets::with_slice(&buf);
+            if let Ok(flow_id) = b.get_varint() {
+                info!("Received DATAGRAM flow_id={} len={}", flow_id, len,);
+
+                // TODO: Check if this is actually a good way to check for the
+                // length of the flow_id
+
+                let flow_id_len = varint_len(flow_id);
+                if client_handler.connect_ip_session.is_some() {
+                    {
+                        let ip_session = client_handler.connect_ip_session.as_ref().unwrap();
+                        if ip_session.flow_id == flow_id {
+                            let data = &buf[flow_id_len..len];
+                            ip_session
+                                .ip_h3_sender
+                                .send(Content::Datagram {
+                                    payload: data.to_vec(),
+                                })
+                                .await
+                                .expect("Could not send datagram to ip handler.");
+                        }
+                    }
+                } else {
+                    debug!("received datagram on unknown flow: {}", flow_id)
+                }
+            }
+        }
+        
         // Send pending QUIC packets
         loop {
             let (write, send_info) = match client.conn.send(&mut out) {
@@ -878,35 +912,7 @@ async fn handle_http3_event(
     tun_sender: &AsyncSender<Vec<u8>>,
 ) -> Result<(), ClientError> {
     let mut buf = [0; 65535];
-    // Process datagram-related events.
-    while let Ok(len) = client.conn.dgram_recv(&mut buf) {
-        let mut b = octets::Octets::with_slice(&buf);
-        if let Ok(flow_id) = b.get_varint() {
-            info!("Received DATAGRAM flow_id={} len={}", flow_id, len,);
-
-            // TODO: Check if this is actually a good way to check for the
-            // length of the flow_id
-
-            let flow_id_len = varint_len(flow_id);
-            if client_handler.connect_ip_session.is_some() {
-                {
-                    let ip_session = client_handler.connect_ip_session.as_ref().unwrap();
-                    if ip_session.flow_id == flow_id {
-                        let data = &buf[flow_id_len..len];
-                        ip_session
-                            .ip_h3_sender
-                            .send(Content::Datagram {
-                                payload: data.to_vec(),
-                            })
-                            .await
-                            .expect("Could not send datagram to ip handler.");
-                    }
-                }
-            } else {
-                debug!("received datagram on unknown flow: {}", flow_id)
-            }
-        }
-    }
+    
     match http3_conn.poll(&mut client.conn) {
         Ok((stream_id, quiche::h3::Event::Headers { list: headers, .. })) => {
             info!(
@@ -1138,6 +1144,38 @@ async fn handle_http3_event(
             return Err(ClientError::Other("HTTP/3 error".to_string()));
         }
     }
+
+    /* 
+    // Process datagram-related events.
+    while let Ok(len) = client.conn.dgram_recv(&mut buf) {
+        let mut b = octets::Octets::with_slice(&buf);
+        if let Ok(flow_id) = b.get_varint() {
+            info!("Received DATAGRAM flow_id={} len={}", flow_id, len,);
+
+            // TODO: Check if this is actually a good way to check for the
+            // length of the flow_id
+
+            let flow_id_len = varint_len(flow_id);
+            if client_handler.connect_ip_session.is_some() {
+                {
+                    let ip_session = client_handler.connect_ip_session.as_ref().unwrap();
+                    if ip_session.flow_id == flow_id {
+                        let data = &buf[flow_id_len..len];
+                        ip_session
+                            .ip_h3_sender
+                            .send(Content::Datagram {
+                                payload: data.to_vec(),
+                            })
+                            .await
+                            .expect("Could not send datagram to ip handler.");
+                    }
+                }
+            } else {
+                debug!("received datagram on unknown flow: {}", flow_id)
+            }
+        }
+    }*/
+
     Ok(())
 }
 
