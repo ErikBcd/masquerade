@@ -1330,7 +1330,6 @@ async fn tun_socket_handler(
     set_ip_settings(server_config).unwrap_or_else(|e| panic!("Error setting up TUN: {e}"));
 
     let (mut reader, mut writer) = tokio::io::split(dev);
-    let ip_handlers_clone = ip_handlers.clone();
     // create reader thread
     // Reads from the TUN device and sends messages to connect_ip handler(s)
     let read_t = tokio::spawn(async move {
@@ -1349,8 +1348,7 @@ async fn tun_socket_handler(
             }
 
             let dest = get_ipv4_pkt_dest(pkt);
-            if let Some(ip_handler_) = ip_handlers_clone.lock().await.get(&dest)
-            {
+            if let Some(ip_handler_) = ip_handlers.lock().await.get(&dest) {
                 info!(
                     "Tun Handler received packet | Src: {} To: {}",
                     get_ipv4_pkt_source(pkt),
@@ -1375,7 +1373,6 @@ async fn tun_socket_handler(
                     &dest
                 );
             }
-            
         }
     });
 
@@ -1389,35 +1386,10 @@ async fn tun_socket_handler(
                 // Get the version by looking at the first nibble
                 let version = pkt[0] >> 4;
                 if version == 4 {
-                    // check if we can directly forward the packet to one of the other clients
-                    let dest = get_ipv4_pkt_dest(&pkt);
-                    if let Some(client) = ip_handlers.lock().await.get(&dest) {
-                        client
-                            .sender
-                            .as_ref()
-                            .unwrap()
-                            .send(pkt)
-                            .await
-                            .expect("IP Channel sender error! Direct IP sending to client");
-                    } else {
-                        // All is okay, send the packet to the TUN interface
-                        // call write as long as needed to send the entire packet
-                        let mut pos = 0;
-                        while pos < pkt.len() {
-                            let written = match writer.write(&pkt[pos..]).await {
-                                Ok(n) => n,
-                                Err(e) => {
-                                    if e.kind() == ErrorKind::Interrupted {
-                                        0
-                                    } else {
-                                        panic!("Could not write to TUN device: {e}");
-                                    }
-                                }
-                            };
-                            pos += written;
-                        }
-                        debug!("TUN wrote {pos} bytes to device!");
-                    }
+                    // All is okay, send the packet to the TUN interface
+                    writer.write_all(&pkt)
+                        .await
+                        .expect("Could not write to TUN!");
                 } else if version == 6 {
                     debug!("TUN Writer Received ipv6 packet, ignoring for now...");
                 } else {
