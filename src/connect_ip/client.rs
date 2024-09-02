@@ -1,7 +1,6 @@
 use std::net::{Ipv4Addr, ToSocketAddrs};
 use std::process::Command;
 use std::str::FromStr;
-use std::sync::Arc;
 use std::time::Duration;
 
 use log::*;
@@ -12,7 +11,6 @@ use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::net::UdpSocket;
-use tokio::sync::Mutex;
 use tokio::time::{self};
 use tun2::AsyncDevice;
 
@@ -103,12 +101,11 @@ impl std::fmt::Display for Direction {
         match self {
             Direction::ToServer => {
                 write!(f, "ToServer")
-            },
+            }
             Direction::ToClient => {
                 write!(f, "ToClient")
-            },
+            }
         }
-        
     }
 }
 
@@ -219,8 +216,8 @@ fn set_client_ip_and_route(dev_addr: &String, tun_gateway: &String, tun_name: &S
 async fn ip_receiver_t(
     mut reader: ReadHalf<AsyncDevice>,
     conn_info_recv: AsyncReceiver<ConnectIpInfo>, // Other side is quic_handler_t
-    http3_dispatch: AsyncSender<ToSend>,   // other side is quic_dispatcher_t
-    ) {
+    http3_dispatch: AsyncSender<ToSend>,          // other side is quic_dispatcher_t
+) {
     // Wait till the QUIC server sends us connection information
     let mut conn_info: Option<ConnectIpInfo> = None;
     if let Ok(info) = conn_info_recv.recv().await {
@@ -272,7 +269,10 @@ async fn ip_handler_t(
 ) {
     loop {
         if let Ok(mut pkt) = ip_recv.recv().await {
-            debug!("[ip_handler_t] Received packet. Capacity left: {}", ip_recv.capacity());
+            debug!(
+                "[ip_handler_t] Received packet. Capacity left: {}",
+                ip_recv.capacity()
+            );
             match get_ip_version(&pkt) {
                 4 => {
                     // Send this to the ip dispatcher
@@ -284,8 +284,7 @@ async fn ip_handler_t(
                         .write_all(&pkt)
                         .await
                         .expect("Could not write packet to TUN!");
-                    
-                },
+                }
                 6 => {
                     debug!("[ip_handler_t] Received IPv6 messages at ip_handler_t, not supported!");
                 }
@@ -307,7 +306,7 @@ async fn ip_handler_t(
  * Sends resulting messages to either ip_handler_t or quic_dispatch_t.
  */
 async fn quic_conn_handler(
-    ip_handler: AsyncSender<Vec<u8>>,      // other side is ip_dispatcher_t
+    ip_handler: AsyncSender<Vec<u8>>, // other side is ip_dispatcher_t
     info_sender: AsyncSender<ConnectIpInfo>, // other side is the ip_handler_t
     http3_sender: AsyncSender<ToSend>,
     http3_receiver: AsyncReceiver<ToSend>,
@@ -320,12 +319,6 @@ async fn quic_conn_handler(
 
     let mut http3_conn: Option<quiche::h3::Connection> = None;
 
-    let stream: Arc<Mutex<QuicStream>> = Arc::new(Mutex::new(QuicStream {
-        stream_sender: None,
-        stream_id: None,
-        flow_id: None,
-    }));
-
     let mut got_ip_addr = false;
 
     let mut main_stream_id: Option<u64> = None;
@@ -336,17 +329,22 @@ async fn quic_conn_handler(
     let mut interval = time::interval(Duration::from_millis(20));
     interval.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
 
+    let mut stream: QuicStream = QuicStream {
+        stream_sender: None,
+        stream_id: None,
+        flow_id: None,
+    };
+
+    let mut established_connect_ip = false;
+
     loop {
         if conn.is_closed() {
             info!("connection closed, {:?}", conn.stats());
             break;
         }
-        debug!("tokio::select start!");
-        let t = std::time::SystemTime::now();
         tokio::select! {
             // handle QUIC received data
             recvd = udp_socket.recv_from(&mut buf) => {
-                debug!("recv");
                 let (read, from) = match recvd {
                     Ok(v) => v,
                     Err(e) => {
@@ -369,16 +367,15 @@ async fn quic_conn_handler(
                         continue;
                     }
                 };
-                
+
                 if let Some(http3_conn) = &mut http3_conn {
                     loop {
                         match http3_conn.poll(&mut conn) {
                             Ok((stream_id, quiche::h3::Event::Headers { list, .. })) => {
-                                if stream.lock().await.stream_id.is_some()
-                                    && stream.lock().await.stream_id.unwrap() == stream_id {
-                                    let binding = stream.as_ref().lock().await;
-                                    let sender = binding.stream_sender.as_ref().unwrap();
-                                    sender.send(Content::Headers { headers: list }).await
+                                if stream.stream_id.is_some()
+                                    && stream.stream_id.unwrap() == stream_id {
+                                    debug!("Received headers!");
+                                    stream.stream_sender.as_ref().unwrap().send(Content::Headers { headers: list }).await
                                         .expect("Couldn't send headers through channel!");
                                 }
                             }
@@ -423,7 +420,7 @@ async fn quic_conn_handler(
                                                         requested_addr, prefix, None);
                                                     http3_sender
                                                         .send(ToSend {
-                                                            stream_id: stream.lock().await.stream_id.unwrap(),
+                                                            stream_id: stream.stream_id.unwrap(),
                                                             content: Content::Data { data: buf.to_vec() },
                                                             finished: false,
                                                         })
@@ -473,7 +470,7 @@ async fn quic_conn_handler(
 
                                             http3_sender
                                                 .send(ToSend {
-                                                    stream_id: stream.lock().await.stream_id.unwrap(),
+                                                    stream_id: stream.stream_id.unwrap(),
                                                     content: Content::Data { data: buf.to_vec() },
                                                     finished: false,
                                                 })
@@ -539,7 +536,6 @@ async fn quic_conn_handler(
             },
             // Send pending HTTP3 data in channel to HTTP3 connection on QUIC
             http3_to_send = http3_receiver.recv(), if http3_conn.is_some() && http3_retry_send.is_none() => {
-                debug!("http3_to_send");
                 let mut to_send = http3_to_send.unwrap();
                 let http3_conn = http3_conn.as_mut().unwrap();
                 loop {
@@ -552,6 +548,7 @@ async fn quic_conn_handler(
                                         .await
                                         .unwrap_or_else(|e| error!("http3 request send stream_id failed: {:?}", e));
                                     main_stream_id = Some(stream_id);
+                                    stream.stream_id = Some(stream_id);
                                     flow_id = Some(stream_id / 4);
                                     Ok(())
                                 },
@@ -629,7 +626,6 @@ async fn quic_conn_handler(
 
             },
             _ = interval.tick(), if http3_conn.is_some() && http3_retry_send.is_some() => {
-                debug!("_= interval");
                 let mut to_send = http3_retry_send.unwrap();
                 let http3_conn = http3_conn.as_mut().unwrap();
                 let result = match &to_send.content {
@@ -637,6 +633,8 @@ async fn quic_conn_handler(
                     Content::Request { headers, stream_id_sender } => {
                         match http3_conn.send_request(&mut conn, headers, to_send.finished) {
                             Ok(stream_id) => {
+                                // TODO: Set the stream_id here as well!
+                                stream.stream_id = Some(stream_id);
                                 stream_id_sender.send(stream_id).await
                                     .unwrap_or_else(|e| error!("http3 request send stream_id failed: {:?}", e));
                                 Ok(())
@@ -694,7 +692,6 @@ async fn quic_conn_handler(
             }
         }
 
-        debug!("Took {}ms for tokio select in quic_conn_handler!", t.elapsed().unwrap().as_millis());
         // Process datagram related events
         // We only expect datagrams that contain ip payloads
         while let Ok(len) = conn.dgram_recv(&mut buf) {
@@ -726,10 +723,7 @@ async fn quic_conn_handler(
                             }
                         }
                         if ip_handler.capacity() > 0 {
-                            match ip_handler
-                                .send(buf[header_len..len].to_vec())
-                                .await
-                            {
+                            match ip_handler.send(buf[header_len..len].to_vec()).await {
                                 Ok(()) => {}
                                 Err(e) => {
                                     debug!("Couldn't send ip packet to ip sender: {}", e);
@@ -759,12 +753,24 @@ async fn quic_conn_handler(
             );
 
             // now we can create the ip connect stream
-            let stream_clone = stream.clone();
             let http3_sender_clone = http3_sender.clone();
             let config_clone = config.clone();
-            let _ip_connect_thread = tokio::spawn(async move {
-                handle_ip_connect_stream(http3_sender_clone, stream_clone, config_clone).await;
-            });
+            // We go unsafe here. We know that this will only be called exactly once
+            if !established_connect_ip {
+                info!("Establishing CONNECT-IP!");
+                let (response_sender, response_receiver) =
+                    bounded_async(config.thread_channel_max.unwrap());
+                stream.stream_sender = Some(response_sender);
+
+                let _ip_connect_thread = tokio::spawn(async move {
+                    handle_ip_connect_stream(http3_sender_clone, response_receiver, config_clone)
+                        .await;
+                });
+
+                established_connect_ip = true;
+            } else {
+                panic!("Tried to establish CONNECT-IP twice!");
+            }
         }
 
         // Send pending QUIC packets
@@ -784,7 +790,7 @@ async fn quic_conn_handler(
                 }
             };
             match udp_socket.send_to(&out[..write], send_info.to).await {
-                Ok(_) => {},
+                Ok(_) => {}
                 Err(e) => panic!("UDP socket send_to() failed: {:?}", e),
             }
         }
@@ -796,7 +802,7 @@ async fn quic_conn_handler(
 ///
 async fn handle_ip_connect_stream(
     http3_sender: AsyncSender<ToSend>,
-    stream: Arc<Mutex<QuicStream>>,
+    response_receiver: AsyncReceiver<Content>,
     config: ClientConfig,
 ) {
     // We only need to establish the connect-ip thing first
@@ -811,7 +817,7 @@ async fn handle_ip_connect_stream(
         quiche::h3::Header::new(b"connect-ip-version", b"3"),
     ];
     let (stream_id_sender, mut stream_id_receiver) = tokio::sync::mpsc::channel(1);
-    let (response_sender, response_receiver) = kanal::unbounded_async::<Content>();
+    // let (response_sender, response_receiver) = kanal::unbounded_async::<Content>();
 
     http3_sender
         .send(ToSend {
@@ -827,16 +833,13 @@ async fn handle_ip_connect_stream(
             error!("Could not send http3 request to http3_receiver in QUIC handler: {e}")
         });
 
+    debug!("Waiting for stream id!");
     let stream_id = stream_id_receiver
         .recv()
         .await
         .expect("Stream id receiver failed us all.");
-    {
-        let mut stream = stream.lock().await;
-        stream.stream_id = Some(stream_id);
-        stream.flow_id = Some(stream_id / 4);
-        stream.stream_sender = Some(response_sender);
-    }
+
+    debug!("Got stream ID: {stream_id}");
 
     // Now wait for response
 
@@ -844,6 +847,8 @@ async fn handle_ip_connect_stream(
         .recv()
         .await
         .expect("http3 response receiver error");
+
+    debug!("Got response!");
     let mut succeeded = false;
     if let Content::Headers { headers } = response {
         let mut status = None;
@@ -864,16 +869,12 @@ async fn handle_ip_connect_stream(
                                     panic!("Could not create client_hello: {:?}", e)
                                 })
                         } else {
-                            AddressRequest::create_sendable(
-                                Ipv4Addr::new(0, 0, 0, 0),
-                                None,
-                                None,
-                            )
+                            AddressRequest::create_sendable(Ipv4Addr::new(0, 0, 0, 0), None, None)
                         };
 
                         http3_sender
                             .send(ToSend {
-                                stream_id: stream.lock().await.stream_id.unwrap(),
+                                stream_id,
                                 content: Content::Data { data: buf.to_vec() },
                                 finished: false,
                             })
@@ -913,10 +914,10 @@ impl ConnectIPClient {
         debug!("Created UDP socket");
         let quic_conn = match self
             .create_quic_conn(
-                &mut socket, 
+                &mut socket,
                 config.server_address.as_ref().unwrap(),
                 config.create_qlog_file.unwrap(),
-                config.qlog_file_path.as_ref().unwrap()
+                config.qlog_file_path.as_ref().unwrap(),
             )
             .await
         {
@@ -966,11 +967,7 @@ impl ConnectIPClient {
         debug!("Starting threads!");
         let ip_recv_t = tokio::task::spawn(ip_receiver_t(reader, conn_info_recv, http3_dispatch));
 
-        let ip_h_t = tokio::task::spawn(ip_handler_t(
-            ip_recv,
-            ipaddr,
-            writer
-        ));
+        let ip_h_t = tokio::task::spawn(ip_handler_t(ip_recv, ipaddr, writer));
 
         let quic_h_t = tokio::task::spawn(quic_conn_handler(
             ip_from_quic_sender,
