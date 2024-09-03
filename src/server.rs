@@ -1,6 +1,5 @@
 use log::*;
 use octets::varint_len;
-use packet::ip::v4::Packet;
 use quiche::h3::NameValue;
 use serde::{Deserialize, Serialize};
 use tokio::fs::{File, OpenOptions};
@@ -28,7 +27,7 @@ use crate::common::*;
 use crate::connect_ip::capsules::*;
 use crate::connect_ip::util::*;
 
-const MAX_CHANNEL_MESSAGES: usize = 50;
+const MAX_CHANNEL_MESSAGES: usize = 400;
 const STANDARD_NETMASK: u32 = 0xFFFFFF00;
 
 struct IpRegisterRequest {
