@@ -1,7 +1,6 @@
 use std::net::{Ipv4Addr, ToSocketAddrs};
 use std::process::Command;
 use std::str::FromStr;
-use std::sync::Arc;
 use std::time::Duration;
 
 use log::*;
@@ -12,8 +11,7 @@ use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::net::UdpSocket;
-use tokio::sync::mpsc::{self, channel, Receiver, Sender, UnboundedSender};
-use tokio::sync::Mutex;
+use tokio::sync::mpsc::{self, channel, Receiver, Sender};
 use tokio::time::{self};
 use tun2::AsyncDevice;
 
@@ -356,7 +354,6 @@ async fn quic_conn_handler(
 
     let mut got_ip_addr = false;
 
-    let mut main_stream_id: Option<u64> = None;
     let mut flow_id: Option<u64> = None;
 
     //let (http3_sender, mut http3_receiver) = mpsc::unbounded_channel::<ToSend>();
@@ -394,7 +391,7 @@ async fn quic_conn_handler(
                 };
 
                 // Process potentially coalesced packets.
-                let read = match conn.recv(&mut buf[..read], recv_info) {
+                let _ = match conn.recv(&mut buf[..read], recv_info) {
                     Ok(v) => v,
 
                     Err(e) => {
@@ -585,7 +582,6 @@ async fn quic_conn_handler(
                                     stream_id_sender.send(stream_id)
                                         .await
                                         .unwrap_or_else(|e| error!("http3 request send stream_id failed: {:?}", e));
-                                    main_stream_id = Some(stream_id);
                                     stream.stream_id = Some(stream_id);
                                     flow_id = Some(stream_id / 4);
                                     Ok(())
@@ -734,7 +730,7 @@ async fn quic_conn_handler(
             if let Ok(flow_id) = b.get_varint() {
                 let context_id = match b.get_varint() {
                     Ok(v) => v,
-                    Err(e) => {
+                    Err(_) => {
                         continue;
                     }
                 };
