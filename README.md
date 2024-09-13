@@ -58,7 +58,7 @@ $ cargo build --release && sudo ./target/release/server --local_uplink_device_na
 ### CONNECT-IP Client
 ```
 # Build & Start the client and connect it to the masquerade server located at 192.168.0.71:4433
-$ cargo build --release && sudo ./target/release/ip-connect-client --server_address 192.168.0.71:4433 
+$ cargo build --release && sudo ./target/release/connect_ip_client  --server_address 192.168.0.71:4433 
 ```
 
 ## State of the CONNECT-IP method
