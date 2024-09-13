@@ -1,4 +1,4 @@
-use log::{error, info};
+use log::error;
 use quiche::h3::NameValue;
 use tokio::sync::mpsc;
 
