@@ -12,6 +12,10 @@ interface_address = "10.9.0.2/24"
 interface_name = "tunMC"
 interface_gateway = "10.9.0.1"
 
+# Traffic for these IPs will be tunneled via Masquerade
+# If you want to tunnel all traffic of this device keep this at "0.0.0.0/0"
+allowed_ips = "0.0.0.0/0"
+
 # If you want the server to only assign a static IP address to your device you can define that
 # address here. 
 use_static_address = false

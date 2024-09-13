@@ -25,6 +25,7 @@ pub struct ClientConfig {
     pub interface_address: Option<String>,
     pub interface_name: Option<String>,
     pub interface_gateway: Option<String>,
+    pub allowed_ips: Option<String>,
     pub use_static_address: Option<bool>,
     pub static_address: Option<String>,
     pub client_name: Option<String>,
@@ -118,7 +119,7 @@ pub fn generate_cid_and_reset_token<T: SecureRandom>(
 
 /// Basic commands for setting up the TUN interface
 /// Should in the end take all traffic on the device and tunnel it.
-fn set_client_ip_and_route(dev_addr: &String, tun_gateway: &String, tun_name: &String) {
+fn set_client_ip_and_route(dev_addr: &String, tun_gateway: &String, tun_name: &String, allowed_ips: &String) {
     let ip_output = Command::new("ip")
         .args(["addr", "add", dev_addr, "dev", tun_name])
         .output()
@@ -149,7 +150,7 @@ fn set_client_ip_and_route(dev_addr: &String, tun_gateway: &String, tun_name: &S
         .args([
             "route",
             "add",
-            "0.0.0.0/0",
+            allowed_ips,
             "via",
             tun_gateway,
             "dev",
@@ -964,6 +965,7 @@ impl ConnectIPClient {
             config.interface_address.as_ref().unwrap(),
             config.interface_gateway.as_ref().unwrap(),
             config.interface_name.as_ref().unwrap(),
+            config.allowed_ips.as_ref().unwrap(),
         ) {
             Ok(v) => v,
             Err(e) => {
@@ -1164,6 +1166,7 @@ impl ConnectIPClient {
         dev_addr: &String,
         tun_gateway: &String,
         tun_name: &String,
+        allowed_ips: &String
     ) -> Result<AsyncDevice, tun2::Error> {
         let mut config = tun2::Configuration::default();
 
@@ -1173,7 +1176,7 @@ impl ConnectIPClient {
         });
         config.tun_name(tun_name);
         let dev = tun2::create_as_async(&config);
-        set_client_ip_and_route(dev_addr, tun_gateway, tun_name);
+        set_client_ip_and_route(dev_addr, tun_gateway, tun_name, allowed_ips);
         dev
     }
 

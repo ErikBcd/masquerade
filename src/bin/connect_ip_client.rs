@@ -17,7 +17,9 @@ fn read_config() -> Result<ClientConfig, ConfigError> {
         .arg(arg!(-g --interface_gateway <IPv4Address>).required(false)
             .help("Standard gateway the TUN device uses, should be within the addressspace defined in --interface_address. [default: 10.9.0.1]"))
         .arg(arg!(-n --interface_name <String>).required(false)
-            .help("Name of the created TUN device. [default: tunMC]"))        
+            .help("Name of the created TUN device. [default: tunMC]"))    
+        .arg(arg!(--allowed_ips <bool>).required(false)
+            .help("Send all traffic for these IPs via Masquerade [default: 0.0.0.0/0]"))    
         .arg(
             arg!(-c --config <Path>)
                 .default_value("./config/client_config.toml")
@@ -75,6 +77,10 @@ fn read_config() -> Result<ClientConfig, ConfigError> {
         config.interface_name = Some(interface_name.to_owned());
     }
 
+    if let Some(allowed_ips) = matches.get_one::<String>("allowed_ips") {
+        config.allowed_ips = Some(allowed_ips.to_owned());
+    }
+
     if let Some(use_static_address) = matches.get_one::<bool>("use_static_address") {
         config.use_static_address = Some(use_static_address.to_owned());
     }
@@ -115,6 +121,10 @@ fn read_config() -> Result<ClientConfig, ConfigError> {
 
     if config.interface_gateway.is_none() {
         config.interface_gateway = Some("10.9.0.1".to_owned());
+    }
+
+    if config.allowed_ips.is_none() {
+        config.allowed_ips = Some("0.0.0.0/0".to_owned());
     }
 
     if config.use_static_address.is_none() {
