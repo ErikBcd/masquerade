@@ -397,7 +397,7 @@ async fn quic_conn_handler(
 
                     Err(e) => {
                         error!("QUIC recv failed: {:?}", e);
-                        continue;
+                        break;
                     }
                 };
                 
