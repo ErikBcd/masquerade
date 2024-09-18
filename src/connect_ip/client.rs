@@ -32,6 +32,7 @@ pub struct ClientConfig {
     pub thread_channel_max: Option<usize>,
     pub create_qlog_file: Option<bool>,
     pub qlog_file_path: Option<String>,
+    pub mtu: Option<u32>,
 }
 
 impl std::fmt::Display for ClientConfig {
@@ -49,6 +50,7 @@ impl std::fmt::Display for ClientConfig {
             thread_channel_max = {:?}\n\
             create_qlog_file   = {:?}\n\
             qlog_file_path     = {:?}\n\
+            mtu                = {:?}\n\
             ",
             self.server_address,
             self.interface_address,
@@ -60,6 +62,7 @@ impl std::fmt::Display for ClientConfig {
             self.thread_channel_max,
             self.create_qlog_file.as_ref().unwrap(),
             self.qlog_file_path.as_ref().unwrap(),
+            self.mtu
         )
     }
 }
@@ -119,7 +122,7 @@ pub fn generate_cid_and_reset_token<T: SecureRandom>(
 
 /// Basic commands for setting up the TUN interface
 /// Should in the end take all traffic on the device and tunnel it.
-fn set_client_ip_and_route(dev_addr: &String, tun_gateway: &String, tun_name: &String, allowed_ips: &String) {
+fn set_client_ip_and_route(dev_addr: &String, tun_gateway: &String, tun_name: &String, allowed_ips: &String, mtu: u32) {
     let ip_output = Command::new("ip")
         .args(["addr", "add", dev_addr, "dev", tun_name])
         .output()
@@ -163,6 +166,26 @@ fn set_client_ip_and_route(dev_addr: &String, tun_gateway: &String, tun_name: &S
         eprintln!(
             "Failed to set route 0.0.0.0 to tun device: {}",
             String::from_utf8_lossy(&route_output.stderr)
+        );
+    }
+
+    // ip link set dev eth0 mtu 1400
+    let mtu_output = Command::new("ip")
+        .args([
+            "link",
+            "set",
+            "dev",
+            tun_name,
+            "mtu",
+            &mtu.to_string(),
+        ])
+        .output()
+        .expect("Failed to execute MTU size command");
+
+    if !mtu_output.status.success() {
+        eprintln!(
+            "Failed to set MTU to tun device: {}",
+            String::from_utf8_lossy(&mtu_output.stderr)
         );
     }
 
@@ -966,6 +989,7 @@ impl ConnectIPClient {
             config.interface_gateway.as_ref().unwrap(),
             config.interface_name.as_ref().unwrap(),
             config.allowed_ips.as_ref().unwrap(),
+            config.mtu.unwrap(),
         ) {
             Ok(v) => v,
             Err(e) => {
@@ -1166,7 +1190,8 @@ impl ConnectIPClient {
         dev_addr: &String,
         tun_gateway: &String,
         tun_name: &String,
-        allowed_ips: &String
+        allowed_ips: &String,
+        mtu: u32,
     ) -> Result<AsyncDevice, tun2::Error> {
         let mut config = tun2::Configuration::default();
 
@@ -1176,7 +1201,7 @@ impl ConnectIPClient {
         });
         config.tun_name(tun_name);
         let dev = tun2::create_as_async(&config);
-        set_client_ip_and_route(dev_addr, tun_gateway, tun_name, allowed_ips);
+        set_client_ip_and_route(dev_addr, tun_gateway, tun_name, allowed_ips, mtu);
         dev
     }
 

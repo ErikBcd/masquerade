@@ -38,6 +38,8 @@ fn read_config() -> Result<ClientConfig, ConfigError> {
             .help("Create a qlog file for the connections the server receives. [default: false]"))
         .arg(arg!(--qlog_file_path <PATH>).required(false)
             .help("Directory in which the qlog files will be saved if created. [default: ./qlog/]"))
+        .arg(arg!(--qlog_file_path <u32>).required(false)
+            .help("MTU for the connection (should be same as server) [default: 1200]"))
         .get_matches();
 
     let config_path = matches
@@ -105,6 +107,10 @@ fn read_config() -> Result<ClientConfig, ConfigError> {
         config.qlog_file_path = Some(qlog_file_path.to_owned());
     }
 
+    if let Some(mtu) = matches.get_one::<u32>("MTU") {
+        config.mtu = Some(mtu.to_owned());
+    }
+
     // Check the config for any missing arguments
     // Default arguments will be filled out automatically
     if config.server_address.is_none() {
@@ -149,6 +155,10 @@ fn read_config() -> Result<ClientConfig, ConfigError> {
 
     if config.qlog_file_path.is_none() {
         config.qlog_file_path = Some("./qlog/".to_owned());
+    }
+
+    if config.mtu.is_none() {
+        config.mtu = Some(1200);
     }
 
     // Sanity checks

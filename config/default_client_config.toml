@@ -37,3 +37,7 @@ thread_channel_max = 200
 # If you want qlog files to be created set this to true
 create_qlog_file = false
 qlog_file_path = "./qlog/"
+
+# The Maximum Transfer Unit for the device interface
+# Setting this too high may cause packet fragmentation
+mtu = 1200
