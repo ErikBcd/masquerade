@@ -107,7 +107,7 @@ fn read_config() -> Result<ClientConfig, ConfigError> {
         config.qlog_file_path = Some(qlog_file_path.to_owned());
     }
 
-    if let Some(mtu) = matches.get_one::<u32>("mtu") {
+    if let Some(mtu) = matches.get_one::<String>("mtu") {
         config.mtu = Some(mtu.to_owned());
     }
 
@@ -158,7 +158,7 @@ fn read_config() -> Result<ClientConfig, ConfigError> {
     }
 
     if config.mtu.is_none() {
-        config.mtu = Some(1200);
+        config.mtu = Some("1200".to_owned());
     }
 
     // Sanity checks

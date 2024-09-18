@@ -61,7 +61,7 @@ pub struct ServerConfig {
     pub client_config_path: Option<String>,
     pub create_qlog_file: Option<bool>,
     pub qlog_file_path: Option<String>,
-    pub mtu: Option<u32>,
+    pub mtu: Option<String>,
 }
 
 impl std::fmt::Display for ServerConfig {
@@ -1223,7 +1223,7 @@ fn set_ip_settings(server_config: ServerConfig) -> Result<(), Box<dyn Error>> {
             "dev",
             server_config.local_uplink_device_name.as_ref().unwrap(),
             "mtu",
-            &server_config.mtu.unwrap().to_string(),
+            server_config.mtu.as_ref().unwrap(),
         ])
         .output()
         .expect("Failed to execute MTU size command");

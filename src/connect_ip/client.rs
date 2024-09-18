@@ -32,7 +32,7 @@ pub struct ClientConfig {
     pub thread_channel_max: Option<usize>,
     pub create_qlog_file: Option<bool>,
     pub qlog_file_path: Option<String>,
-    pub mtu: Option<u32>,
+    pub mtu: Option<String>,
 }
 
 impl std::fmt::Display for ClientConfig {
@@ -122,7 +122,12 @@ pub fn generate_cid_and_reset_token<T: SecureRandom>(
 
 /// Basic commands for setting up the TUN interface
 /// Should in the end take all traffic on the device and tunnel it.
-fn set_client_ip_and_route(dev_addr: &String, tun_gateway: &String, tun_name: &String, allowed_ips: &String, mtu: u32) {
+fn set_client_ip_and_route(
+    dev_addr: &String, 
+    tun_gateway: &String, 
+    tun_name: &String, 
+    allowed_ips: &String, 
+    mtu: &String) {
     let ip_output = Command::new("ip")
         .args(["addr", "add", dev_addr, "dev", tun_name])
         .output()
@@ -177,7 +182,7 @@ fn set_client_ip_and_route(dev_addr: &String, tun_gateway: &String, tun_name: &S
             "dev",
             tun_name,
             "mtu",
-            &mtu.to_string(),
+            mtu,
         ])
         .output()
         .expect("Failed to execute MTU size command");
@@ -989,7 +994,7 @@ impl ConnectIPClient {
             config.interface_gateway.as_ref().unwrap(),
             config.interface_name.as_ref().unwrap(),
             config.allowed_ips.as_ref().unwrap(),
-            config.mtu.unwrap(),
+            config.mtu.as_ref().unwrap(),
         ) {
             Ok(v) => v,
             Err(e) => {
@@ -1191,7 +1196,7 @@ impl ConnectIPClient {
         tun_gateway: &String,
         tun_name: &String,
         allowed_ips: &String,
-        mtu: u32,
+        mtu: &String,
     ) -> Result<AsyncDevice, tun2::Error> {
         let mut config = tun2::Configuration::default();
 
