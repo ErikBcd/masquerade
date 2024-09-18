@@ -1221,7 +1221,7 @@ fn set_ip_settings(server_config: ServerConfig) -> Result<(), Box<dyn Error>> {
             "link",
             "set",
             "dev",
-            server_config.local_uplink_device_name.as_ref().unwrap(),
+            server_config.interface_name.as_ref().unwrap(),
             "mtu",
             server_config.mtu.as_ref().unwrap(),
         ])
