@@ -189,7 +189,7 @@ fn read_config() -> Result<ClientConfig, ConfigError> {
     }
 
     if config.mtu.is_none() {
-        config.mtu = Some("1200".to_owned());
+        config.mtu = Some("1360".to_owned());
     }
 
     if config.congestion_algorithm.is_none() {
