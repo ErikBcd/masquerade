@@ -61,6 +61,7 @@ pub struct ServerConfig {
     pub client_config_path: Option<String>,
     pub create_qlog_file: Option<bool>,
     pub qlog_file_path: Option<String>,
+    pub mtu: Option<u32>,
 }
 
 impl std::fmt::Display for ServerConfig {
@@ -76,6 +77,7 @@ impl std::fmt::Display for ServerConfig {
             client_config_path          = {:?}\n\
             create_qlog_file            = {:?}\n\
             qlog_file_path              = {:?}\n\
+            mtu                         = {:?}\n\
             ",
             self.server_address.as_ref().unwrap(),
             self.interface_address.as_ref().unwrap(),
@@ -85,6 +87,7 @@ impl std::fmt::Display for ServerConfig {
             self.client_config_path.as_ref().unwrap(),
             self.create_qlog_file.as_ref().unwrap(),
             self.qlog_file_path.as_ref().unwrap(),
+            self.mtu
         )
     }
 }
@@ -1211,6 +1214,27 @@ fn set_ip_settings(server_config: ServerConfig) -> Result<(), Box<dyn Error>> {
             String::from_utf8_lossy(&route_output.stderr)
         );
     }
+
+    // ip link set dev eth0 mtu 1400
+    let mtu_output = Command::new("ip")
+        .args([
+            "link",
+            "set",
+            "dev",
+            server_config.local_uplink_device_name.as_ref().unwrap(),
+            "mtu",
+            &server_config.mtu.unwrap().to_string(),
+        ])
+        .output()
+        .expect("Failed to execute MTU size command");
+
+    if !mtu_output.status.success() {
+        eprintln!(
+            "Failed to set MTU to tun device: {}",
+            String::from_utf8_lossy(&mtu_output.stderr)
+        );
+    }
+
     // sudo iptables -t nat -A POSTROUTING -o enp39s0 -j MASQUERADE
     let iptables = Command::new("iptables")
         .args([
