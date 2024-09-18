@@ -1095,6 +1095,7 @@ impl ConnectIPClient {
         config.set_initial_max_streams_uni(1000);
         config.set_disable_active_migration(true);
         config.enable_dgram(true, 1000, 1000);
+        config.set_cc_algorithm(quiche::CongestionControlAlgorithm::BBR2);
 
         let mut scid = [0; quiche::MAX_CONN_ID_LEN];
         let rng = SystemRandom::new();
