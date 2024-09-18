@@ -31,7 +31,7 @@ qlog_file_path = "./qlog/"
 # The Maximum Transfer Unit for the device interface
 # Setting this too high may cause packet fragmentation
 # Clients should use the same size
-mtu = "1350"
+mtu = "1360"
 
 ####################################################
 #               QUIC Specific Options              #
