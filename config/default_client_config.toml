@@ -41,4 +41,32 @@ qlog_file_path = "./qlog/"
 # The Maximum Transfer Unit for the device interface
 # Setting this too high may cause packet fragmentation
 # Should be the same as the servers config!
-mtu = "1200"
+mtu = "1350"
+
+####################################################
+#               QUIC Specific Options              #
+####################################################
+
+## Different options regarding QUIC
+## If you play with these you should know what you are doing
+
+# Congestion algorithm for QUIC to use.
+# One of "cubic", "bbr2", "bbr", "reno"
+
+congestion_algorithm = "cubic"
+
+# Max rate for pacing. Set 0 for no limit
+
+max_pacing_rate = 0
+
+# Default = false
+
+disable_active_migration = false
+
+# Enables hystart++ for slowstart
+
+enable_hystart = false
+
+# Turn on the PMTU
+
+discover_pmtu = false

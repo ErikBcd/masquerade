@@ -62,6 +62,11 @@ pub struct ServerConfig {
     pub create_qlog_file: Option<bool>,
     pub qlog_file_path: Option<String>,
     pub mtu: Option<String>,
+    pub congestion_algorithm: Option<String>,
+    pub max_pacing_rate: Option<u64>,
+    pub disable_active_migration: Option<bool>,
+    pub enable_hystart: Option<bool>,
+    pub discover_pmtu: Option<bool>,
 }
 
 impl std::fmt::Display for ServerConfig {
@@ -78,6 +83,11 @@ impl std::fmt::Display for ServerConfig {
             create_qlog_file            = {:?}\n\
             qlog_file_path              = {:?}\n\
             mtu                         = {:?}\n\
+            congestion_algorithm        = {:?}\n\
+            max_pacing_rate             = {:?}\n\
+            disable_active_migration    = {:?}\n\
+            enable_hystart              = {:?}\n\
+            discover_pmtu               = {:?}\n\
             ",
             self.server_address.as_ref().unwrap(),
             self.interface_address.as_ref().unwrap(),
@@ -87,7 +97,12 @@ impl std::fmt::Display for ServerConfig {
             self.client_config_path.as_ref().unwrap(),
             self.create_qlog_file.as_ref().unwrap(),
             self.qlog_file_path.as_ref().unwrap(),
-            self.mtu
+            self.mtu,
+            self.congestion_algorithm,
+            self.max_pacing_rate,
+            self.disable_active_migration,
+            self.enable_hystart,
+            self.discover_pmtu,
         )
     }
 }
@@ -197,7 +212,28 @@ impl Server {
         config.set_initial_max_stream_data_uni(1_000_000);
         config.set_initial_max_streams_bidi(1000);
         config.set_initial_max_streams_uni(1000);
-        config.set_disable_active_migration(true);
+        config.set_disable_active_migration(server_config.disable_active_migration.unwrap());
+        config.enable_pacing(true);
+        config.set_max_pacing_rate(server_config.max_pacing_rate.unwrap());
+        match server_config.congestion_algorithm.as_ref().unwrap().as_str() {
+            "bbr2" => {
+                config.set_cc_algorithm(quiche::CongestionControlAlgorithm::BBR2);
+            },
+            "bbr" => {
+                config.set_cc_algorithm(quiche::CongestionControlAlgorithm::BBR);
+            },
+            "reno" => {
+                config.set_cc_algorithm(quiche::CongestionControlAlgorithm::Reno);
+            },
+            "cubic" => {
+                config.set_cc_algorithm(quiche::CongestionControlAlgorithm::CUBIC);
+            },
+            v => {
+                error!("Congestion algorithm {:?} not available", v);
+            }
+        }
+        config.enable_hystart(server_config.enable_hystart.unwrap());
+        config.discover_pmtu(server_config.discover_pmtu.unwrap());
         config.enable_dgram(true, 1000, 1000);
         config.enable_early_data();
 

@@ -33,6 +33,11 @@ pub struct ClientConfig {
     pub create_qlog_file: Option<bool>,
     pub qlog_file_path: Option<String>,
     pub mtu: Option<String>,
+    pub congestion_algorithm: Option<String>,
+    pub max_pacing_rate: Option<u64>,
+    pub disable_active_migration: Option<bool>,
+    pub enable_hystart: Option<bool>,
+    pub discover_pmtu: Option<bool>,
 }
 
 impl std::fmt::Display for ClientConfig {
@@ -40,17 +45,22 @@ impl std::fmt::Display for ClientConfig {
         write!(
             f,
             "\
-            server_address     = {:?}\n\
-            interface_address  = {:?}\n\
-            interface_name     = {:?}\n\
-            interface_gateway  = {:?}\n\
-            use_static_ip      = {:?}\n\
-            static_address     = {:?}\n\
-            client_name        = {:?}\n\
-            thread_channel_max = {:?}\n\
-            create_qlog_file   = {:?}\n\
-            qlog_file_path     = {:?}\n\
-            mtu                = {:?}\n\
+            server_address           = {:?}\n\
+            interface_address        = {:?}\n\
+            interface_name           = {:?}\n\
+            interface_gateway        = {:?}\n\
+            use_static_ip            = {:?}\n\
+            static_address           = {:?}\n\
+            client_name              = {:?}\n\
+            thread_channel_max       = {:?}\n\
+            create_qlog_file         = {:?}\n\
+            qlog_file_path           = {:?}\n\
+            mtu                      = {:?}\n\
+            congestion_algorithm     = {:?}\n\
+            max_pacing_rate          = {:?}\n\
+            disable_active_migration = {:?}\n\
+            enable_hystart           = {:?}\n\
+            discover_pmtu            = {:?}\n\
             ",
             self.server_address,
             self.interface_address,
@@ -62,7 +72,12 @@ impl std::fmt::Display for ClientConfig {
             self.thread_channel_max,
             self.create_qlog_file.as_ref().unwrap(),
             self.qlog_file_path.as_ref().unwrap(),
-            self.mtu
+            self.mtu,
+            self.congestion_algorithm,
+            self.max_pacing_rate,
+            self.disable_active_migration,
+            self.enable_hystart,
+            self.discover_pmtu,
         )
     }
 }
@@ -969,10 +984,8 @@ impl ConnectIPClient {
         debug!("Created UDP socket");
         let quic_conn = match self
             .create_quic_conn(
-                &mut socket, 
-                config.server_address.as_ref().unwrap(),
-                config.create_qlog_file.unwrap(),
-                config.qlog_file_path.as_ref().unwrap()
+                &mut socket,
+                &config,
             )
             .await
         {
@@ -1062,15 +1075,13 @@ impl ConnectIPClient {
     async fn create_quic_conn(
         &self,
         udp_socket: &mut UdpSocket,
-        server_addr: &String,
-        create_qlog: bool,
-        qlog_path: &str,
+        client_config: &ClientConfig,
     ) -> Result<Connection, quiche::Error> {
         let mut http_start = "";
-        if !server_addr.starts_with("https://") {
+        if !client_config.server_address.as_ref().unwrap().starts_with("https://") {
             http_start = "https://";
         }
-        let server_name = format!("{}{}", http_start, server_addr);
+        let server_name = format!("{}{}", http_start, client_config.server_address.as_ref().unwrap());
 
         // Resolve server address.
         let url = url::Url::parse(&server_name).unwrap();
@@ -1093,9 +1104,29 @@ impl ConnectIPClient {
         config.set_initial_max_stream_data_uni(1_000_000);
         config.set_initial_max_streams_bidi(1000);
         config.set_initial_max_streams_uni(1000);
-        config.set_disable_active_migration(true);
         config.enable_dgram(true, 1000, 1000);
-        config.set_cc_algorithm(quiche::CongestionControlAlgorithm::BBR2);
+        config.set_disable_active_migration(client_config.disable_active_migration.unwrap());
+        config.enable_pacing(true);
+        config.set_max_pacing_rate(client_config.max_pacing_rate.unwrap());
+        match client_config.congestion_algorithm.as_ref().unwrap().as_str() {
+            "bbr2" => {
+                config.set_cc_algorithm(quiche::CongestionControlAlgorithm::BBR2);
+            },
+            "bbr" => {
+                config.set_cc_algorithm(quiche::CongestionControlAlgorithm::BBR);
+            },
+            "reno" => {
+                config.set_cc_algorithm(quiche::CongestionControlAlgorithm::Reno);
+            },
+            "cubic" => {
+                config.set_cc_algorithm(quiche::CongestionControlAlgorithm::CUBIC);
+            },
+            v => {
+                error!("Congestion algorithm {:?} not available", v);
+            }
+        }
+        config.enable_hystart(client_config.enable_hystart.unwrap());
+        config.discover_pmtu(client_config.discover_pmtu.unwrap());
 
         let mut scid = [0; quiche::MAX_CONN_ID_LEN];
         let rng = SystemRandom::new();
@@ -1115,9 +1146,9 @@ impl ConnectIPClient {
         );
 
         // If the user wanted it, create a qlog file
-        if create_qlog {
+        if client_config.create_qlog_file.unwrap() {
             let id = format!("{:?}", &scid);
-            let writer = make_qlog_writer(qlog_path, "connect-ip-client", &id);
+            let writer = make_qlog_writer(client_config.qlog_file_path.as_ref().unwrap(), "connect-ip-client", &id);
 
             connection.set_qlog(
                 std::boxed::Box::new(writer),

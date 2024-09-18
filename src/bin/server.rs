@@ -31,6 +31,17 @@ fn read_config() -> Result<ServerConfig, ConfigError> {
             .help("Directory in which the qlog files will be saved if created. [default: ./qlog/]"))
         .arg(arg!(--mtu <u32>).required(false)
             .help("MTU for the connection (should be same as server) [default: 1200]"))
+        .arg(arg!(--congestion_algorithm <String>).required(false)
+            .help("Congestion algorithm for QUIC to use. One of \"cubic\", \"bbr2\", \"bbr\", \"reno\" [default: cubic]"))
+        .arg(arg!(--max_pacing_rate <u64>).required(false)
+            .help("Maximum pacing rate for QUIC. 0 for no limit [default: 0]")
+            .value_parser(clap::value_parser!(u64)))   
+        .arg(arg!(--disable_active_migration <bool>).required(false)
+            .help("Disable active migration for QUIC [default: false]"))
+        .arg(arg!(--enable_hystart <bool>).required(false)
+            .help("Enables hystart for QUIC [default: false]"))
+        .arg(arg!(--discover_pmtu <bool>).required(false)
+            .help("Enable Path MTU discovery for QUIC [default: false]"))
         .get_matches();
 
     let config_path = matches
@@ -94,6 +105,26 @@ fn read_config() -> Result<ServerConfig, ConfigError> {
         config.mtu = Some(mtu.to_owned());
     }
 
+    if let Some(congestion_algorithm) = matches.get_one::<String>("congestion_algorithm") {
+        config.congestion_algorithm = Some(congestion_algorithm.to_owned());
+    }
+
+    if let Some(max_pacing_rate) = matches.get_one::<u64>("max_pacing_rate") {
+        config.max_pacing_rate = Some(max_pacing_rate.to_owned());
+    }
+
+    if let Some(disable_active_migration) = matches.get_one::<bool>("disable_active_migration") {
+        config.disable_active_migration = Some(disable_active_migration.to_owned());
+    }
+
+    if let Some(enable_hystart) = matches.get_one::<bool>("enable_hystart") {
+        config.enable_hystart = Some(enable_hystart.to_owned());
+    }
+
+    if let Some(discover_pmtu) = matches.get_one::<bool>("discover_pmtu") {
+        config.discover_pmtu = Some(discover_pmtu.to_owned());
+    }
+
     // Check the config for any missing arguments
     // Default arguments will be filled out automatically
     if config.server_address.is_none() {
@@ -126,6 +157,26 @@ fn read_config() -> Result<ServerConfig, ConfigError> {
 
     if config.mtu.is_none() {
         config.mtu = Some("1200".to_owned());
+    }
+
+    if config.congestion_algorithm.is_none() {
+        config.congestion_algorithm = Some("cubic".to_owned());
+    }
+
+    if config.max_pacing_rate.is_none() {
+        config.max_pacing_rate = Some(0);
+    }
+
+    if config.disable_active_migration.is_none() {
+        config.disable_active_migration = Some(false);
+    }
+
+    if config.enable_hystart.is_none() {
+        config.enable_hystart = Some(false);
+    }
+
+    if config.discover_pmtu.is_none() {
+        config.discover_pmtu = Some(false);
     }
 
     if config.local_uplink_device_name.is_none() {
