@@ -38,6 +38,9 @@ pub struct ClientConfig {
     pub disable_active_migration: Option<bool>,
     pub enable_hystart: Option<bool>,
     pub discover_pmtu: Option<bool>,
+    pub ack_delay_exponent: Option<u64>,
+    pub max_ack_delay: Option<u64>,    
+    pub max_idle_timeout: Option<u64>,
 }
 
 impl std::fmt::Display for ClientConfig {
@@ -61,6 +64,9 @@ impl std::fmt::Display for ClientConfig {
             disable_active_migration = {:?}\n\
             enable_hystart           = {:?}\n\
             discover_pmtu            = {:?}\n\
+            ack_delay_exponent       = {:?}\n\
+            max_ack_delay            = {:?}\n\
+            max_idle_timeout         = {:?}\n\
             ",
             self.server_address,
             self.interface_address,
@@ -78,6 +84,9 @@ impl std::fmt::Display for ClientConfig {
             self.disable_active_migration,
             self.enable_hystart,
             self.discover_pmtu,
+            self.ack_delay_exponent,
+            self.max_ack_delay,
+            self.max_idle_timeout,
         )
     }
 }
@@ -1095,7 +1104,11 @@ impl ConnectIPClient {
             .set_application_protos(quiche::h3::APPLICATION_PROTOCOL)
             .unwrap();
 
-        config.set_max_idle_timeout(1000);
+        // Only set a maximum timeout if the value is something 
+        // Will be none if user specified timeout of 0
+        if client_config.max_idle_timeout.is_some() {
+            config.set_max_idle_timeout(client_config.max_idle_timeout.unwrap());
+        }
         config.set_max_recv_udp_payload_size(MAX_DATAGRAM_SIZE);
         config.set_max_send_udp_payload_size(MAX_DATAGRAM_SIZE);
         config.set_initial_max_data(10_000_000);
@@ -1108,6 +1121,8 @@ impl ConnectIPClient {
         config.set_disable_active_migration(client_config.disable_active_migration.unwrap());
         config.enable_pacing(true);
         config.set_max_pacing_rate(client_config.max_pacing_rate.unwrap());
+        config.set_ack_delay_exponent(client_config.ack_delay_exponent.unwrap());
+        config.set_max_ack_delay(client_config.max_ack_delay.unwrap());
         match client_config.congestion_algorithm.as_ref().unwrap().as_str() {
             "bbr2" => {
                 config.set_cc_algorithm(quiche::CongestionControlAlgorithm::BBR2);

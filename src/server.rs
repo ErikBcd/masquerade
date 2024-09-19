@@ -67,6 +67,9 @@ pub struct ServerConfig {
     pub disable_active_migration: Option<bool>,
     pub enable_hystart: Option<bool>,
     pub discover_pmtu: Option<bool>,
+    pub ack_delay_exponent: Option<u64>,
+    pub max_ack_delay: Option<u64>,
+    pub max_idle_timeout: Option<u64>,
 }
 
 impl std::fmt::Display for ServerConfig {
@@ -88,6 +91,9 @@ impl std::fmt::Display for ServerConfig {
             disable_active_migration    = {:?}\n\
             enable_hystart              = {:?}\n\
             discover_pmtu               = {:?}\n\
+            ack_delay_exponent          = {:?}\n\
+            max_ack_delay               = {:?}\n\
+            max_idle_timeout            = {:?}\n\
             ",
             self.server_address.as_ref().unwrap(),
             self.interface_address.as_ref().unwrap(),
@@ -103,6 +109,9 @@ impl std::fmt::Display for ServerConfig {
             self.disable_active_migration,
             self.enable_hystart,
             self.discover_pmtu,
+            self.ack_delay_exponent,
+            self.max_ack_delay,
+            self.max_idle_timeout,
         )
     }
 }
@@ -201,9 +210,12 @@ impl Server {
         config
             .set_application_protos(quiche::h3::APPLICATION_PROTOCOL)
             .unwrap();
-
-        // TODO: allow custom configuration of the following parameters and also consider the defaults more carefully
-        config.set_max_idle_timeout(1000);
+        
+        // Only set a maximum timeout if the value is something 
+        // Will be none if user specified timeout of 0
+        if server_config.max_idle_timeout.is_some() {
+            config.set_max_idle_timeout(server_config.max_idle_timeout.unwrap());
+        }
         config.set_max_recv_udp_payload_size(MAX_DATAGRAM_SIZE);
         config.set_max_send_udp_payload_size(MAX_DATAGRAM_SIZE);
         config.set_initial_max_data(10_000_000);
@@ -234,6 +246,8 @@ impl Server {
         }
         config.enable_hystart(server_config.enable_hystart.unwrap());
         config.discover_pmtu(server_config.discover_pmtu.unwrap());
+        config.set_ack_delay_exponent(server_config.ack_delay_exponent.unwrap());
+        config.set_max_ack_delay(server_config.max_ack_delay.unwrap());
         config.enable_dgram(true, 1000, 1000);
         config.enable_early_data();
 

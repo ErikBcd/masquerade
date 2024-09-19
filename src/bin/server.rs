@@ -42,6 +42,15 @@ fn read_config() -> Result<ServerConfig, ConfigError> {
             .help("Enables hystart for QUIC [default: false]"))
         .arg(arg!(--discover_pmtu <bool>).required(false)
             .help("Enable Path MTU discovery for QUIC [default: false]"))
+        .arg(arg!(--ack_delay_exponent <u64>).required(false)
+            .help("Set the delay exponent for QUIC ACK [default: 3]")
+            .value_parser(clap::value_parser!(u64)))   
+        .arg(arg!(--max_ack_delay <u64>).required(false)
+            .help("Set the maximum delay of QUIC ACK [default: 24]")
+            .value_parser(clap::value_parser!(u64)))   
+        .arg(arg!(--max_idle_timeout <u64>).required(false)
+            .help("Set the maximum timeout for client connections [default: 1000]")
+            .value_parser(clap::value_parser!(u64)))
         .get_matches();
 
     let config_path = matches
@@ -125,6 +134,18 @@ fn read_config() -> Result<ServerConfig, ConfigError> {
         config.discover_pmtu = Some(discover_pmtu.to_owned());
     }
 
+    if let Some(ack_delay_exponent) = matches.get_one::<u64>("ack_delay_exponent") {
+        config.ack_delay_exponent = Some(ack_delay_exponent.to_owned());
+    }
+
+    if let Some(max_ack_delay) = matches.get_one::<u64>("max_ack_delay") {
+        config.max_ack_delay = Some(max_ack_delay.to_owned());
+    }
+
+    if let Some(max_idle_timeout) = matches.get_one::<u64>("max_idle_timeout") {
+        config.max_idle_timeout = Some(max_idle_timeout.to_owned());
+    }
+
     // Check the config for any missing arguments
     // Default arguments will be filled out automatically
     if config.server_address.is_none() {
@@ -177,6 +198,19 @@ fn read_config() -> Result<ServerConfig, ConfigError> {
 
     if config.discover_pmtu.is_none() {
         config.discover_pmtu = Some(false);
+    }
+
+    if config.ack_delay_exponent.is_none() {
+        config.ack_delay_exponent = Some(3);
+    }
+
+    if config.max_ack_delay.is_none() {
+        config.max_ack_delay = Some(25);
+    }
+
+    // If timeout is 0 treat it as no timeout
+    if let Some(to) = config.max_idle_timeout {
+        if to == 0 { config.max_idle_timeout = None; }
     }
 
     if config.local_uplink_device_name.is_none() {

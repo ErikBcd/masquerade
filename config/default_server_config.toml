@@ -42,21 +42,25 @@ mtu = "1360"
 
 # Congestion algorithm for QUIC to use.
 # One of "cubic", "bbr2", "bbr", "reno"
-
 congestion_algorithm = "cubic"
 
 # Max rate for pacing. Set 0 for no limit
-
 max_pacing_rate = 0
 
 # Default = false
-
 disable_active_migration = false
 
 # Enables hystart++ for slowstart
-
 enable_hystart = false
 
 # Turn on the PMTU
-
 discover_pmtu = false
+
+# Delay exponent of QUIC ACKs from the server
+ack_delay_exponent = 3
+
+# Maximum delay of QUIC ACKs from the server
+max_ack_delay = 25
+
+# Maximum idle before the connection gets cut
+max_idle_timeout = 1000
