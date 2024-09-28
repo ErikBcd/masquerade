@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["ADDRESS_ASSIGN_ID","ADDRESS_REQUEST_ID","CLIENT_HELLO_ID","MAX_CLIENT_HELLO_ID_LEN","ROUTE_ADVERTISEMENT_ID"],"enum":["CapsuleParseError","CapsuleType","IpLength"],"fn":["read_ip"],"struct":["AddressAssign","AddressRange","AddressRequest","AssignedAddress","Capsule","ClientHello","RequestedAddress","RouteAdvertisement"],"trait":["OctetsExt"]};
