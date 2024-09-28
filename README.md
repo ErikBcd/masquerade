@@ -61,13 +61,7 @@ $ cargo build --release && sudo ./target/release/server --local_uplink_device_na
 $ cargo build --release && sudo ./target/release/connect_ip_client  --server_address 192.168.0.71:4433 
 ```
 
-## State of the CONNECT-IP method
+## Performance
 
-Generally performs okay-ish. Speedtests (iperf3 between clients, regular speedtests via cloudflare) reach up to 350mbit/s on my systems. However, flooding the client with datagrams will result in very poor performance or crashes. Bidirectional UDP tests in iperf3 do this, so.. avoid these I guess. Will be tackled later.
-
-## TODOs
-
- * Create a proper documentation
- * Implement security features (authorization of clients, ..)
- * Tackle stability problems under datagram flood situations in connect-ip client
- * Benchmarks
+Certainly not production ready. However, reaches high speeds under good network conditions. Uses lots of CPU.
+When the connection between client and server has high packet loss the connection can cut off.
