@@ -141,10 +141,10 @@ impl Capsule {
         })
     }
 
-    /**
-     * Serializes this capsule
-     * Can be sent in a HTTP/3 DATA message as the payload.
-     */
+    /// 
+    /// Serializes this capsule
+    /// Can be sent in a HTTP/3 DATA message as the payload.
+    /// 
     pub fn serialize(&self, buf: &mut [u8]) -> Vec<u8> {
         let mut oct = OctetsMut::with_slice(buf);
 
@@ -168,6 +168,9 @@ impl Capsule {
         oct.to_vec()
     }
 
+    ///
+    /// Unwrap this as an ADDRESS_ASSIGN capsule
+    /// 
     pub fn as_address_assign(&self) -> Option<&AddressAssign> {
         if let CapsuleType::AddressAssign(ref address_assign) = self.capsule_type {
             Some(address_assign)
@@ -176,6 +179,9 @@ impl Capsule {
         }
     }
 
+    ///
+    /// Unwrap this as an ADDRESS_REQUEST capsule
+    /// 
     pub fn as_address_request(&self) -> Option<&AddressRequest> {
         if let CapsuleType::AddressRequest(ref address_request) = self.capsule_type {
             Some(address_request)
@@ -184,6 +190,9 @@ impl Capsule {
         }
     }
 
+    ///
+    /// Unwrap this as an ADDRESS_ADVERTISEMENT capsule
+    /// 
     pub fn as_route_advertisement(&self) -> Option<&RouteAdvertisement> {
         if let CapsuleType::RouteAdvertisement(ref route_advertisement) = self.capsule_type {
             Some(route_advertisement)
@@ -192,6 +201,9 @@ impl Capsule {
         }
     }
 
+    ///
+    /// Unwrap this as an CLIENT_HELLO capsule
+    /// 
     pub fn as_client_hello(&self) -> Option<&ClientHello> {
         if let CapsuleType::ClientHello(ref client_hello) = self.capsule_type {
             Some(client_hello)
@@ -202,6 +214,9 @@ impl Capsule {
 }
 
 impl AddressAssign {
+    ///
+    /// Parse an ADDRESS_ASSIGN capsule from a datagram payload
+    /// 
     pub fn new(oct: &mut Octets) -> Result<AddressAssign, CapsuleParseError> {
         // First read the request id, which is of variable length
         // ADDRESS_ASSIGN
@@ -274,10 +289,10 @@ impl AddressAssign {
         buf
     }
 
-    /**
-     * Serializes this capsule
-     * Can be sent in a HTTP/3 DATA message as the payload.
-     */
+    /// 
+    /// Serializes this capsule
+    /// Can be sent in a HTTP/3 DATA message as the payload.
+    /// 
     pub fn serialize(&self, buf: &mut OctetsMut) {
         buf.put_varint(self.length).unwrap();
 
@@ -298,6 +313,9 @@ impl AddressAssign {
 }
 
 impl AddressRequest {
+    ///
+    /// Parse an ADDRESS_REQUEST capsule from a datagram payload
+    /// 
     pub fn new(oct: &mut Octets) -> Result<AddressRequest, CapsuleParseError> {
         let length = oct
             .get_varint()
@@ -370,10 +388,10 @@ impl AddressRequest {
         buf
     }
 
-    /**
-     * Serializes this capsule
-     * Can be sent in a HTTP/3 DATA message as the payload.
-     */
+    /// 
+    /// Serializes this capsule
+    /// Can be sent in a HTTP/3 DATA message as the payload.
+    /// 
     pub fn serialize(&self, buf: &mut OctetsMut) {
         buf.put_varint(self.length).unwrap();
 
@@ -394,6 +412,9 @@ impl AddressRequest {
 }
 
 impl ClientHello {
+    ///
+    /// Parse a CLIENT_HELLO capsule from a datagram payload
+    /// 
     pub fn new(oct: &mut Octets) -> Result<ClientHello, CapsuleParseError> {
         let length = oct
             .get_varint()
@@ -453,6 +474,9 @@ impl ClientHello {
         Ok(buf)
     }
 
+    ///
+    /// Serializes the capsule, putting it into buf
+    /// 
     pub fn serialize(&self, buf: &mut OctetsMut) {
         buf.put_varint(self.length).unwrap();
         buf.put_u8(self.id_length).unwrap();
@@ -464,6 +488,9 @@ impl ClientHello {
 }
 
 impl RouteAdvertisement {
+    ///
+    /// Parse a ROUTE_ADVERTISEMENT capsule from a datagram payload
+    /// 
     pub fn new(oct: &mut Octets) -> Result<RouteAdvertisement, CapsuleParseError> {
         let length = oct
             .get_varint()
@@ -499,10 +526,10 @@ impl RouteAdvertisement {
         })
     }
 
-    /**
-     * Serializes this capsule
-     * Can be sent in a HTTP/3 DATA message as the payload.
-     */
+    /// 
+    /// Serializes this capsule
+    /// Can be sent in a HTTP/3 DATA message as the payload.
+    /// 
     pub fn serialize(&self, buf: &mut OctetsMut) {
         buf.put_varint(self.length).unwrap();
 
@@ -530,9 +557,10 @@ impl RouteAdvertisement {
     }
 }
 
-/**
- * Reads an ip from the current position of the given octet.
- */
+/// 
+/// Reads an ip from the current position of the given octet.
+/// Advances the octed buffer pointer.
+/// 
 fn read_ip(oct: &mut Octets, ip_ver: &u8) -> Result<IpLength, CapsuleParseError> {
     let addr = match ip_ver {
         4 => IpLength::V4(
