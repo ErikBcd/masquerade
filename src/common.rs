@@ -32,6 +32,7 @@ impl std::fmt::Display for ConfigError {
     }
 }
 
+/// HTTP/3 message types.
 #[derive(Debug)]
 pub enum Content {
     Request {
@@ -50,6 +51,7 @@ pub enum Content {
     Finished,
 }
 
+/// QUIC packet
 #[derive(Debug)]
 pub struct ToSend {
     pub stream_id: u64, // or flow_id for DATAGRAM
@@ -147,8 +149,6 @@ pub fn send_h3_dgram(
     flow_id: u64,
     dgram_content: &[u8],
 ) -> quiche::Result<()> {
-    //info!("sending HTTP/3 DATAGRAM on flow_id={}", flow_id);
-
     let len = octets::varint_len(flow_id) + dgram_content.len();
     let mut d = vec![0; len];
     // Creates a OctetsMut in the d vector
@@ -254,11 +254,6 @@ pub fn encode_var_int(v: u64) -> Vec<u8> {
     let prefix: u8 = prefix << 6;
     encoded[0] |= prefix;
     encoded
-}
-
-pub fn wrap_udp_connect_payload(context_id: u64, payload: &[u8]) -> Vec<u8> {
-    let context_id = encode_var_int(context_id);
-    [&context_id, payload].concat()
 }
 
 /// Generate a stateless retry token.
