@@ -19,6 +19,8 @@ use crate::common::*;
 use crate::connect_ip::capsules::*;
 use crate::connect_ip::util::*;
 
+/// Used for reading and applying user defined configurations.
+/// Should be read in at start of client.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ClientConfig {
     pub server_address: Option<String>,
@@ -145,7 +147,7 @@ pub fn generate_cid_and_reset_token<T: SecureRandom>(
 }
 
 /// Basic commands for setting up the TUN interface
-/// Should in the end take all traffic on the device and tunnel it.
+/// Will also route the traffic according to the allowedIp's parameter.
 fn set_client_ip_and_route(
     dev_addr: &String, 
     tun_gateway: &String, 
@@ -165,6 +167,7 @@ fn set_client_ip_and_route(
         return;
     }
 
+    // Turn TUN device on
     let link_output = Command::new("ip")
         .args(["link", "set", "up", "dev", tun_name])
         .output()
@@ -178,6 +181,7 @@ fn set_client_ip_and_route(
         return;
     }
 
+    // ip route add <allowedIp> via <gateway> dev <tun device>
     let route_output = Command::new("ip")
         .args([
             "route",
@@ -198,7 +202,7 @@ fn set_client_ip_and_route(
         );
     }
 
-    // ip link set dev eth0 mtu 1400
+    // ip link set dev <outward device> mtu <mtu>
     let mtu_output = Command::new("ip")
         .args([
             "link",
@@ -258,7 +262,7 @@ fn set_client_ip_and_route(
 /// Will send received messages to the ip_handler_t
 /// Arguments:
 ///  * ip_handler: Channel that handles received ip messages
-///  * reader: Receiver for raw ip messages
+///  * reader: Receiver for TUN device
 ///
 async fn ip_receiver_t(ip_handler: Sender<IpMessage>, mut reader: ReadHalf<AsyncDevice>) {
     let mut buf = [0; 4096];
@@ -293,12 +297,18 @@ async fn ip_receiver_t(ip_handler: Sender<IpMessage>, mut reader: ReadHalf<Async
 ///
 /// Receives IP Packets from rx.
 /// Will then handle these packets accordingly and send messages to quic_dispatcher_t
-///
+/// Arguments:
+///     * ip_recv: Received IPMessage objects from the QUIC side or the TUN receiver
+///     * conn_info_recv: Channel used for sending the connection config from QUIC side
+///     * http3_dispatch: For sending encapsuled IP packets to the QUIC side
+///     * ip_dispatch: For sending IP messages from the QUIC side to the TUN device
+///     * device_addr: Address injected into packets directed to the system
+/// 
 async fn ip_handler_t(
-    mut ip_recv: Receiver<IpMessage>, // Other side is ip_receiver_t
-    mut conn_info_recv: Receiver<ConnectIpInfo>, // Other side is quic_handler_t
-    http3_dispatch: Sender<ToSend>,   // other side is quic_dispatcher_t
-    ip_dispatch: Sender<Vec<u8>>,     // other side is ip_dispatcher_t
+    mut ip_recv: Receiver<IpMessage>, 
+    mut conn_info_recv: Receiver<ConnectIpInfo>,
+    http3_dispatch: Sender<ToSend>,
+    ip_dispatch: Sender<Vec<u8>>,
     device_addr: Ipv4Addr,
 ) {
     // Wait till the QUIC server sends us connection information
@@ -317,8 +327,8 @@ async fn ip_handler_t(
                 4 => {
                     match pkt.dir {
                         Direction::ToServer => {
+                            // Change source IP to assigned subnet IP
                             set_ipv4_pkt_source(&mut pkt.message, &conn_info.assigned_ip);
-                            // Recalculate checksum after ipv4 change
                             recalculate_checksum(&mut pkt.message);
                             if http3_dispatch.capacity() > 0 {
                                 match http3_dispatch
@@ -335,9 +345,8 @@ async fn ip_handler_t(
                             }
                         }
                         Direction::ToClient => {
-                            // Send this to the ip dispatcher
+                            // Change destination IP to local device IP
                             set_ipv4_pkt_destination(&mut pkt.message, &device_addr);
-                            // Recalculate checksum after ipv4 change
                             recalculate_checksum(&mut pkt.message);
 
                             if ip_dispatch.capacity() > 0 {
@@ -367,6 +376,9 @@ async fn ip_handler_t(
 ///
 /// Receives ready-to-send ip packets and then sends them
 /// to the TUN device.
+/// Arguments:
+///     * ip_dispatch_reader: Waits for messages from ip handler thread
+///     * writer: Writes messages to the TUN device
 ///
 async fn ip_dispatcher_t(
     mut ip_dispatch_reader: Receiver<Vec<u8>>,
@@ -382,18 +394,26 @@ async fn ip_dispatcher_t(
     }
 }
 
-/**
- * A general handler of a quic connection.
- * Will set up the connection and the connect_ip HTTP/3 connection.
- * Then receives ip address and route advertisement. Sends these infos to quic_dispatcher
- * and ip_handler
- *
- * After that goes into loop, waits for new messages and handles them accordingly.
- * Sends resulting messages to either ip_handler_t or quic_dispatch_t.
- */
+/// 
+/// A general handler of a quic connection.
+/// Will set up the connection and the connect_ip HTTP/3 connection.
+/// Then receives ip address and route advertisement. Sends these infos to quic_dispatcher
+/// and ip_handler
+/// After that goes into loop, waits for new messages and handles them accordingly.
+/// Sends resulting messages to either ip_handler_t or quic_dispatch_t.
+/// 
+/// Arguments:
+///     * ip_handler: Destination for unwrapped IP packets received in datagrams
+///     * info_sender: Once session is established, send config options here (assigned IP address, ..)
+///     * http3_sender: For sending http3 messages to
+///     * http3_receiver: Receives http3 messages, e.g. from ip handler
+///     * conn: QUIC connection in early data
+///     * udp_socket: Socket to send QUIC messages over
+///     * config: Initial client config
+/// 
 async fn quic_conn_handler(
-    ip_handler: Sender<IpMessage>,      // other side is ip_dispatcher_t
-    info_sender: Sender<ConnectIpInfo>, // other side is the ip_handler_t
+    ip_handler: Sender<IpMessage>,
+    info_sender: Sender<ConnectIpInfo>,
     http3_sender: Sender<ToSend>,
     mut http3_receiver: Receiver<ToSend>,
     mut conn: Connection,
@@ -881,13 +901,17 @@ async fn quic_conn_handler(
 
 ///
 /// Initiates the CONNECT-IP request.
+/// Arguments:
+///     * http3_sender: To send the http3 requests to
+///     * response_receiver: Receives responses on sent http3 requests from QUIC handler
+///     * config: Client configuration determined by user
 ///
 async fn handle_ip_connect_stream(
     http3_sender: Sender<ToSend>,
     mut response_receiver: Receiver<Content>,
     config: ClientConfig,
 ) {
-    // We only need to establish the connect-ip thing first
+    // We only need to establish the connect-ip session first
     // TODO: Check if this packet structure is correct.
     //       For now it's fine
     let headers = vec![
@@ -898,8 +922,9 @@ async fn handle_ip_connect_stream(
         quiche::h3::Header::new(b":path", b"/.well-known/masque/ip/*/*/"),
         quiche::h3::Header::new(b"connect-ip-version", b"3"),
     ];
-    let (stream_id_sender, mut stream_id_receiver) = mpsc::channel(1);
 
+    // Send CONNECT request and wait for response & stream ID
+    let (stream_id_sender, mut stream_id_receiver) = mpsc::channel(1);
     http3_sender
         .send(ToSend {
             stream_id: u64::MAX,
@@ -919,12 +944,13 @@ async fn handle_ip_connect_stream(
         .await
         .expect("Stream id receiver failed us all.");
 
-    // Now wait for response
-
     let response = response_receiver
         .recv()
         .await
         .expect("http3 response receiver error");
+
+    // Check if request was successful, send either ADDRESS_REQUEST or 
+    // CLIENT_HELLO if success
     let mut succeeded = false;
     if let Content::Headers { headers } = response {
         let mut status = None;
@@ -982,7 +1008,7 @@ pub struct ConnectIPClient;
 
 impl ConnectIPClient {
     pub async fn run(&self, config: ClientConfig) {
-        // 1) Create QUIC connection, connect to server
+        // 1) Set up QUIC connection
         let mut socket = match self.get_udp(config.server_address.as_ref().unwrap()).await {
             Ok(v) => v,
             Err(e) => {
@@ -1006,11 +1032,7 @@ impl ConnectIPClient {
         };
         debug!("Created QUIC connection");
 
-        // We need two connections in different threads, so we put it in a Arc<Mutex<>>
-        //let quic_conn = Arc::new(Mutex::new(quic_conn));
-        // 2) Setup Connect IP stream
-
-        // 3) Create TUN
+        // 2) Set up TUN device
         let dev = match self.create_tun(
             config.interface_address.as_ref().unwrap(),
             config.interface_gateway.as_ref().unwrap(),
@@ -1030,7 +1052,7 @@ impl ConnectIPClient {
         info!("Local address for packets: {}", ipaddr);
         let (reader, writer) = tokio::io::split(dev);
 
-        // 4) Create receivers/senders
+        // 3) Create receivers/senders
 
         // ip_sender for ip_receiver_t, ip_recv for ip_handler_t
         let (ip_sender, ip_recv) = tokio::sync::mpsc::channel(config.thread_channel_max.unwrap());
