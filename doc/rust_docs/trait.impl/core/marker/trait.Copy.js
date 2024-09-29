@@ -1,0 +1,3 @@
+(function() {var implementors = {
+"masquerade_proxy":[["impl <a class=\"trait\" href=\"https://doc.rust-lang.org/1.80.1/core/marker/trait.Copy.html\" title=\"trait core::marker::Copy\">Copy</a> for <a class=\"struct\" href=\"masquerade_proxy/connect_ip/client/struct.ConnectIpInfo.html\" title=\"struct masquerade_proxy::connect_ip::client::ConnectIpInfo\">ConnectIpInfo</a>"]]
+};if (window.register_implementors) {window.register_implementors(implementors);} else {window.pending_implementors = implementors;}})()
