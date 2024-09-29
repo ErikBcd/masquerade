@@ -27,6 +27,8 @@ Still a very early version that only has some base functionality.
 
 ## Basic inner workings
 
+More information can be found in the [Wiki](https://github.com/ErikBcd/masquerade/wiki)
+
 ### Server
 
 The server creates a virtual network interface ([TUN](https://de.wikipedia.org/wiki/TUN/TAP)) and a QUIC server. It will then wait for clients to connect and choose a protocol.
@@ -48,6 +50,8 @@ Arguments given via the command line instead of the configuration file take prec
 
 This was tested and written on arch linux and should work on most other distributions as well. 
 The software does not work on Windows, and I can't test it on MacOS.
+
+More information on the dependencies are in the [Wiki](https://github.com/ErikBcd/masquerade/wiki/Dependencies)
 
 ### Server
 ```
