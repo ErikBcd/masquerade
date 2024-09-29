@@ -9,8 +9,8 @@ use tokio::task::JoinHandle;
 use std::collections::HashMap;
 use std::error::Error;
 use std::io::ErrorKind;
-use std::net::{self, SocketAddr};
-use std::net::{Ipv4Addr, ToSocketAddrs};
+use std::net::SocketAddr;
+use std::net::Ipv4Addr;
 use std::path::Path;
 use std::process::Command;
 use std::str::FromStr;
@@ -30,6 +30,13 @@ use crate::connect_ip::util::*;
 const MAX_CHANNEL_MESSAGES: usize = 400;
 const STANDARD_NETMASK: u32 = 0xFFFFFF00;
 
+/////////////////////////////////////////////////////////////////////
+///                             STRUCTS                           ///
+/////////////////////////////////////////////////////////////////////
+///
+/// Used for requesting an IP from the ip register thread.
+/// Contains information about the client
+/// 
 struct IpRegisterRequest {
     requested_address: Ipv4Addr,
     id: String,
@@ -38,6 +45,21 @@ struct IpRegisterRequest {
     static_addr: bool,
 }
 
+/// 
+/// Base struct for a client that has connected to the server.
+/// Mainly used to send messages to the client_handler thread started from the Server.run()
+/// 
+struct Client {
+    conn: quiche::Connection,
+    quic_receiver: mpsc::UnboundedReceiver<QuicReceived>,
+    socket: Arc<UdpSocket>,
+}
+
+///
+/// A client that connected to the server.
+/// Once the CONNECT-IP session is established, `sender` contains a channel that the 
+/// TUN handling can use to send messages towards the client.
+/// 
 #[derive(Clone)]
 struct ConnectIpClient {
     assigned_addr: Ipv4Addr,
@@ -50,7 +72,46 @@ struct ConnectIpClient {
 type ConnectIpClientList = Arc<Mutex<HashMap<Ipv4Addr, ConnectIpClient>>>;
 /// Map of registered clients that use CONNECT-IP and want specific IPs
 pub type StaticClientMap = Arc<Mutex<HashMap<String, Ipv4Addr>>>;
+/// Map for known clients for the QUIC server, to find the recipient of received QUIC messages
+type ClientMap = HashMap<quiche::ConnectionId<'static>, mpsc::UnboundedSender<QuicReceived>>;
 
+/// Containes a received QUIC message
+struct QuicReceived {
+    recv_info: quiche::RecvInfo,
+    data: Vec<u8>,
+}
+
+/// Session data for an established CONNECT-IP client
+/// stream_id is used for the DATA messages (capsules),
+/// flow_id is used for datagrams,
+/// ip_h3_sender is used to send HTTP/3 messages to the CONNECT-IP session threads
+/// handler_thread is the thread containing the connect_ip_handler handle
+struct IpConnectSession {
+    stream_id: u64,
+    flow_id: u64,
+    ip_h3_sender: Sender<Content>,
+    handler_thread: Option<JoinHandle<()>>,
+}
+
+/// Data for a client
+/// connect_ip_session: For when the CONNECT-IP session is started
+/// client_ip: The assigned IP for the client on the server subnet
+/// http3_sender: Used to send HTTP/3 messages towards the client
+/// connect_ip_clients: Map for the clients that are currently connected to the server
+/// static_clients: Map of IPs that are currently reserved on the server
+/// register_handler: Channel for messages towards the IP register threads.
+struct ClientHandler {
+    connect_ip_session: Option<IpConnectSession>,
+    client_ip: Ipv4Addr,
+    http3_sender: mpsc::UnboundedSender<ToSend>,
+    connect_ip_clients: ConnectIpClientList,
+    static_clients: StaticClientMap,
+    register_handler: tokio::sync::mpsc::Sender<IpRegisterRequest>,
+}
+
+///
+/// Configuration aggregator for the server.
+/// 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ServerConfig {
     pub server_address: Option<String>,
@@ -116,23 +177,14 @@ impl std::fmt::Display for ServerConfig {
     }
 }
 
+/////////////////////////////////////////////////////////////////////
+///                             ERRORS                            ///
+/////////////////////////////////////////////////////////////////////
 #[derive(Debug)]
 pub enum ClientError {
     HandshakeFail,
     HttpFail,
     Other(String),
-}
-
-struct QuicReceived {
-    recv_info: quiche::RecvInfo,
-    data: Vec<u8>,
-}
-
-struct IpConnectSession {
-    stream_id: u64,
-    flow_id: u64,
-    ip_h3_sender: Sender<Content>,
-    handler_thread: Option<JoinHandle<()>>,
 }
 
 #[derive(Debug, Clone)]
@@ -145,16 +197,9 @@ impl std::fmt::Display for RunBeforeBindError {
 }
 impl Error for RunBeforeBindError {}
 
-/**
- * Client for each QUIC connection
- */
-struct Client {
-    conn: quiche::Connection,
-    quic_receiver: mpsc::UnboundedReceiver<QuicReceived>,
-    socket: Arc<UdpSocket>,
-}
-
-type ClientMap = HashMap<quiche::ConnectionId<'static>, mpsc::UnboundedSender<QuicReceived>>;
+/////////////////////////////////////////////////////////////////////
+///                             SERVER                            ///
+/////////////////////////////////////////////////////////////////////
 
 #[derive(Default)]
 pub struct Server {
@@ -583,28 +628,8 @@ pub async fn read_known_clients(config_path: &String) -> Result<StaticClientMap,
     Ok(res)
 }
 
-fn get_next_free_ip(
-    mut start_ip: Ipv4Addr,
-    existing_clients: &MutexGuard<HashMap<Ipv4Addr, ConnectIpClient>>,
-) -> Option<Ipv4Addr> {
-    while let Ok(v) = get_next_ipv4(start_ip, STANDARD_NETMASK) {
-        if existing_clients.contains_key(&v) {
-            start_ip = v;
-        } else {
-            return Some(v);
-        }
-    }
-    None
-}
 
-struct ClientHandler {
-    connect_ip_session: Option<IpConnectSession>,
-    client_ip: Ipv4Addr,
-    http3_sender: mpsc::UnboundedSender<ToSend>,
-    connect_ip_clients: ConnectIpClientList,
-    static_clients: StaticClientMap,
-    register_handler: tokio::sync::mpsc::Sender<IpRegisterRequest>,
-}
+
 
 /**
  * Client handler that handles the connection for a single client
@@ -858,45 +883,9 @@ async fn handle_client(
     }
 }
 
-/**
- * Parse pseudo-header path for CONNECT UDP to SocketAddr
- */
-fn _path_to_socketaddr(path: &[u8]) -> Option<net::SocketAddr> {
-    // for now, let's assume path pattern is "/something.../target-host/target-port/"
-    let split_iter = std::io::BufRead::split(path, b'/');
-    let mut second_last = None;
-    let mut last = None;
-    for curr in split_iter {
-        if let Ok(curr) = curr {
-            second_last = last;
-            last = Some(curr);
-        } else {
-            return None;
-        }
-    }
-    if second_last.is_some() && last.is_some() {
-        let second_last = second_last.unwrap();
-        let last = last.unwrap();
-        let second_last = std::str::from_utf8(&second_last);
-        let last = std::str::from_utf8(&last);
-        if second_last.is_ok() && last.is_ok() {
-            let url_str = format!("scheme://{}:{}/", second_last.unwrap(), last.unwrap());
-            let url = url::Url::parse(&url_str);
-            if let Ok(url) = url {
-                let socket_addrs = url.to_socket_addrs();
-                if let Ok(mut socket_addrs) = socket_addrs {
-                    return socket_addrs.next();
-                }
-            }
-        }
-    }
-
-    None
-}
-
-/**
- * Creates a new HTTP/3 connection for an existing & established QUIC connection
- */
+/// 
+/// Creates a new HTTP/3 connection for an existing & established QUIC connection
+/// 
 fn create_http3_conn(client: &mut Client) -> Option<quiche::h3::Connection> {
     debug!(
         "{} QUIC handshake completed, now trying HTTP/3",
@@ -917,10 +906,10 @@ fn create_http3_conn(client: &mut Client) -> Option<quiche::h3::Connection> {
     Some(h3_conn)
 }
 
-// TODO: Declutter this!
-/**
- * Processes an HTTP/3 event
- */
+/// 
+/// Processes an HTTP/3 event
+/// Creates CONNECT-IP session if requested.
+/// 
 async fn handle_http3_event(
     http3_conn: &mut quiche::h3::Connection,
     client: &mut Client,
@@ -1191,7 +1180,12 @@ async fn handle_http3_event(
     Ok(())
 }
 
+///
+/// Set up the TUN device.
+/// Will execute several IP commands to route traffic accordingly.
+/// 
 fn set_ip_settings(server_config: ServerConfig) -> Result<(), Box<dyn Error>> {
+    // Activate our TUN device
     let output = Command::new("ip")
         .args([
             "link",
@@ -1210,6 +1204,7 @@ fn set_ip_settings(server_config: ServerConfig) -> Result<(), Box<dyn Error>> {
         .into());
     }
 
+    // Assign the specified address to our device
     let output = Command::new("ip")
         .args([
             "addr",
@@ -1245,6 +1240,7 @@ fn set_ip_settings(server_config: ServerConfig) -> Result<(), Box<dyn Error>> {
     let mut ip_range = ipaddr.to_string();
     ip_range.push_str("/32");
 
+    // Route traffic of our subnet to us
     let route_output = Command::new("ip")
         .args([
             "route",
@@ -1265,7 +1261,7 @@ fn set_ip_settings(server_config: ServerConfig) -> Result<(), Box<dyn Error>> {
         );
     }
 
-    // ip link set dev eth0 mtu 1400
+    // Set the MTU of our device
     let mtu_output = Command::new("ip")
         .args([
             "link",
@@ -1285,7 +1281,7 @@ fn set_ip_settings(server_config: ServerConfig) -> Result<(), Box<dyn Error>> {
         );
     }
 
-    // sudo iptables -t nat -A POSTROUTING -o enp39s0 -j MASQUERADE
+    // Allow re-routing in iptables
     let iptables = Command::new("iptables")
         .args([
             "-t",
@@ -1322,8 +1318,14 @@ fn set_ip_settings(server_config: ServerConfig) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+///
+/// Destroy the device. 
+/// TODO: This is not used right now since the server/client can exit gracefully
+/// In the future we should delete the correct device
+/// 
+#[allow(unreachable_code)]
 fn destroy_tun_interface() {
-    // TODO: Properly destroy the interface
+    unreachable!();
     let output = Command::new("ip")
         .arg("link")
         .arg("delete")
@@ -1339,10 +1341,10 @@ fn destroy_tun_interface() {
     }
 }
 
-/**
- * Creates a TUN socket and sets it up in the system.
- * Will then create a writer and a reader thread which are connected to channels.
- */
+/// 
+/// Creates a TUN socket and sets it up in the system.
+/// Will then create a writer and a reader thread which are connected to channels.
+/// 
 async fn tun_socket_handler(
     ip_handlers: ConnectIpClientList,
     mut tun_sender: tokio::sync::mpsc::Receiver<Vec<u8>>,
@@ -1356,9 +1358,7 @@ async fn tun_socket_handler(
         config.ensure_root_privileges(true);
     });
 
-    //config.destination("192.168.0.71");
     config.tun_name(server_config.interface_name.as_ref().unwrap());
-
     let dev = tun2::create_as_async(&config).unwrap();
     set_ip_settings(server_config).unwrap_or_else(|e| panic!("Error setting up TUN: {e}"));
 
@@ -1480,6 +1480,11 @@ async fn tun_socket_handler(
     destroy_tun_interface();
 }
 
+
+///
+/// Function for an established CONNECT-IP session
+/// Starts a reader and a writer thread.
+/// 
 async fn connect_ip_handler(
     stream_id: u64,
     flow_id: u64,
@@ -1498,16 +1503,17 @@ async fn connect_ip_handler(
     let http3_sender_clone_2 = http3_sender.clone();
     let http3_sender_clone_3 = http3_sender.clone();
 
+    // Changed if the client sends CLIENT_HELLO
     let mut static_client = false;
     let mut client_id = String::new();
 
+    // Check for packets in the tun receiver
+    // This receiver gets packets from the TUN interface that are supposed to be tunnelled
+    // to the proxy client.
+    // The packets are confirmed to be ipv4 packets so we don't need to worry about anything.
+    // Just create the http3 datagram and send the packet.
     let read_task = tokio::spawn(async move {
         loop {
-            // Check for packets in the tun receiver
-            // This receiver gets packets from the TUN interface that are supposed to be tunnelled
-            // to the proxy client.
-            // The packets are confirmed to be ipv4 packets so we don't need to worry about anything.
-            // Just create the http3 datagram and send the packet.
             if let Some(mut pkt) = tun_receiver.recv().await {
                 // Decrease ttl
                 pkt[8] -= 1;
@@ -1522,11 +1528,11 @@ async fn connect_ip_handler(
         }
     });
 
+    // Check for packets in the http3 receiver
+    // This receiver gets datagram bodies (which are just ip packets) from the client proxy
+    // and handles them (sends them to the TUN interface)
     let write_task = tokio::spawn(async move {
         loop {
-            // Check for packets in the http3 receiver
-            // This receiver gets datagram bodies (which are just ip packets) from the client proxy
-            // and handles them (sends them to the TUN interface)
             if let Some(pkt) = http3_receiver.recv().await {
                 match pkt {
                     Content::Request {
@@ -1696,6 +1702,7 @@ async fn connect_ip_handler(
         }
     });
 
+    // Signal to the client that the connection has been set up, and it can start sending
     debug!("Sending back ok to the client!");
     let headers = vec![quiche::h3::Header::new(b":status", b"200")];
     http3_sender_clone_3
@@ -1723,6 +1730,23 @@ async fn connect_ip_handler(
         }
         (_, _) => {}
     };
+}
+
+///
+/// Search for the next free IP.
+/// Will start counting upwards from the given IP, and check each time if the IP is in use.
+fn get_next_free_ip(
+    mut start_ip: Ipv4Addr,
+    existing_clients: &MutexGuard<HashMap<Ipv4Addr, ConnectIpClient>>,
+) -> Option<Ipv4Addr> {
+    while let Ok(v) = get_next_ipv4(start_ip, STANDARD_NETMASK) {
+        if existing_clients.contains_key(&v) {
+            start_ip = v;
+        } else {
+            return Some(v);
+        }
+    }
+    None
 }
 
 ///
